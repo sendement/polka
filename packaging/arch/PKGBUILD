@@ -26,6 +26,8 @@ optdepends=(
   'papirus-icon-theme: a complete icon theme, if yours lacks mime icons'
 )
 makedepends=('cargo')
+# Rust links with lld here; GCC LTO objects from C build scripts break that.
+options=('!lto')
 # Local snapshot made by make-tarball.sh; switch to the GitHub tag tarball
 # once the repository is public.
 source=("$pkgname-$pkgver.tar.gz")
