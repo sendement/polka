@@ -20,6 +20,8 @@ const TOOL_BTN: f32 = 38.0;
 const TOOL_ICON: f32 = 24.0;
 /// Tab height; L1/R1 glyphs next to the tabs match it.
 const TAB_H: f32 = 30.0;
+/// Sidebar labels: the address bar's size.
+const SIDE_FONT: f32 = 16.0;
 /// Theme size asked for small icons. Many themes (Breeze, Win11) draw their
 /// 16–24px sizes as monochrome glyphs; 32 gets the full-colour ones and is
 /// sharper on HiDPI anyway.
@@ -465,6 +467,12 @@ impl App {
                 (Action::Actions, tr("Delete color")),
                 (Action::Back, tr("Close")),
             ],
+            Some(Overlay::IconPicker(_)) => vec![
+                (Action::PrevTab, tr("Color")),
+                (Action::Accept, tr("OK")),
+                (Action::Select, tr("Reset")),
+                (Action::Back, tr("Cancel")),
+            ],
             Some(_) => vec![(Action::Back, tr("Close"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -502,20 +510,22 @@ impl App {
                             if collapsed {
                                 ui.separator();
                             } else {
-                                ui.label(egui::RichText::new(tr(section)).small().weak());
+                                ui.label(egui::RichText::new(tr(section)).size(13.0).weak());
                             }
                         }
-                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), side_icon + 12.0), Sense::click());
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(SIDE_FONT + 18.0)), Sense::click());
                         let is_cursor = focused && i == self.side_cursor;
                         let here = it.loc == cur_loc;
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
-                        let icon_rect = Rect::from_min_size(rect.min + vec2(8.0, 6.0), Vec2::splat(side_icon));
-                        if let Some(u) = self.icons.named(it.icon, lookup_px(ui, side_icon)) {
+                        let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon));
+                        let px = lookup_px(ui, side_icon);
+                        let custom = it.custom_icon.as_deref().and_then(|c| self.icons.named(&[c], px));
+                        if let Some(u) = custom.or_else(|| self.icons.named(it.icon, px)) {
                             egui::Image::new(u).paint_at(ui, icon_rect);
                         }
                         if !collapsed {
                             let tx = side_icon + 16.0;
-                            let g = elided(ui, &it.label, FontId::proportional(14.0), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
+                            let g = elided(ui, &it.label, FontId::proportional(SIDE_FONT), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
                             ui.painter().galley(pos2(rect.min.x + tx, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
                         }
                         let r = if collapsed { r.on_hover_text(&it.label) } else { r };
@@ -652,6 +662,7 @@ impl App {
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Settings(st)) => settings_ev = draw_settings(ui, st, cfg, icons),
+                    Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     None => {}
                 });
             });
@@ -1486,7 +1497,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     let sw = crate::app::swatches(cfg);
     let per_line = 14;
     let lines = (sw.len() + 1).div_ceil(per_line);
-    let (rect, r) = settings_row(ui, 36.0 + lines as f32 * 34.0, st.row == row::ACCENT, "accent");
+    // Label sits ~10pt below the top; the last swatch line (with its cursor
+    // ring) ends 19pt below its centre. Same 10pt below it.
+    let (rect, r) = settings_row(ui, 52.0 + 19.0 + 10.0 + (lines - 1) as f32 * 34.0, st.row == row::ACCENT, "accent");
     if r.clicked() {
         ev = Some(SettingsEvent::Row(row::ACCENT));
     }
@@ -1628,4 +1641,105 @@ fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<Settin
         }
     });
     ev
+}
+
+// ---------------------------------------------------------------- icon picker
+
+fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Icons, pad: PadKind) -> Option<Cmd> {
+    let mut run = None;
+    let v = ui.visuals().clone();
+    let cell = 72.0;
+    let width = cell * p.cols as f32;
+    ui.label(egui::RichText::new(tr("Folder icon")).strong().size(18.0));
+    ui.add_space(6.0);
+
+    // Colour groups (L1/R1). Each tab shows its group's first icon.
+    if p.groups.len() > 1 {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(width);
+            let (r, _) = ui.allocate_exact_size(vec2(36.0, 26.0), Sense::hover());
+            shoulder_glyph(ui.painter(), r, Action::PrevTab, pad);
+            for (gi, g) in p.groups.iter().enumerate() {
+                let label = g.color.clone().unwrap_or_else(|| tr("Standard").to_string());
+                let on = gi == p.group;
+                let font = FontId::proportional(13.0);
+                let gal = ui.painter().layout_no_wrap(label, font, v.text_color());
+                let (rect, resp) = ui.allocate_exact_size(vec2(gal.size().x + 36.0, 26.0), Sense::click());
+                let (fill, stroke) = if on {
+                    (v.selection.bg_fill.gamma_multiply(0.4), Stroke::new(1.5, v.selection.bg_fill))
+                } else if resp.hovered() {
+                    (v.widgets.hovered.weak_bg_fill, Stroke::NONE)
+                } else {
+                    (Color32::TRANSPARENT, v.widgets.noninteractive.bg_stroke)
+                };
+                ui.painter().rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
+                let ir = Rect::from_min_size(rect.min + vec2(5.0, 4.0), Vec2::splat(18.0));
+                if let Some(u) = g.names.first().and_then(|n| icons.named(&[n.as_str()], SMALL_ICON_LOOKUP)) {
+                    egui::Image::new(u).paint_at(ui, ir);
+                }
+                ui.painter().galley(pos2(ir.max.x + 6.0, rect.center().y - gal.size().y / 2.0), gal, v.text_color());
+                if resp.clicked() {
+                    p.group = gi;
+                    p.cursor = 0;
+                }
+            }
+            let (r, _) = ui.allocate_exact_size(vec2(36.0, 26.0), Sense::hover());
+            shoulder_glyph(ui.painter(), r, Action::NextTab, pad);
+        });
+        ui.add_space(6.0);
+    }
+
+    let scroll_to = p.take_scroll();
+    let names = p.names().to_vec();
+    let rows = names.len().div_ceil(p.cols);
+    // show_rows only lays out visible rows, so keep the cursor in view by
+    // setting the offset ourselves (like the file panes do).
+    let view_h = cell * 5.0;
+    let mut sa = egui::ScrollArea::vertical().id_salt(("icon-picker", p.group)).max_height(view_h);
+    if let Some(i) = scroll_to {
+        let top = (i / p.cols) as f32 * cell;
+        let mut off = p.scroll_y;
+        if top < off {
+            off = top;
+        } else if top + cell > off + view_h {
+            off = top + cell - view_h;
+        }
+        sa = sa.vertical_scroll_offset(off);
+    }
+    let out = sa.show_rows(ui, cell, rows, |ui, range| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        for row in range {
+            let (row_rect, _) = ui.allocate_exact_size(vec2(width, cell), Sense::hover());
+            for col in 0..p.cols {
+                let i = row * p.cols + col;
+                let Some(name) = names.get(i) else { break };
+                let rect = Rect::from_min_size(row_rect.min + vec2(col as f32 * cell, 0.0), Vec2::splat(cell)).shrink(3.0);
+                let r = ui.interact(rect, ui.id().with(("icon", i)), Sense::click());
+                if i == p.cursor {
+                    ui.painter().rect(rect, 8.0, v.selection.bg_fill.gamma_multiply(0.4), Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
+                } else if r.hovered() {
+                    ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill);
+                }
+                if let Some(u) = icons.named(&[name.as_str()], 64) {
+                    egui::Image::new(u).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(44.0)));
+                }
+                if r.clicked() {
+                    run = Some(Cmd::SetPinIcon(p.path.clone(), Some(name.clone())));
+                }
+                r.on_hover_text(name);
+            }
+        }
+    });
+    p.scroll_y = out.state.offset.y;
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let name = names.get(p.cursor).cloned().unwrap_or_default();
+        ui.label(egui::RichText::new(name).monospace().weak());
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            if ui.button(tr("Reset")).clicked() {
+                run = Some(Cmd::SetPinIcon(p.path.clone(), None));
+            }
+        });
+    });
+    run
 }

@@ -83,6 +83,29 @@ impl Icons {
         uri
     }
 
+    /// Folder-ish icons the current theme (and the themes it inherits)
+    /// ships in its "places" context, grouped by colour variant. Papirus has
+    /// folder-blue-*, folder-red-*…; themes without variants give one group.
+    pub fn place_icons(&self) -> Vec<IconGroup> {
+        let mut names = std::collections::BTreeSet::new();
+        let mut queue = vec![self.theme.clone()];
+        let mut seen = HashSet::new();
+        while let Some(t) = queue.pop() {
+            if t == "hicolor" || !seen.insert(t.clone()) {
+                continue;
+            }
+            for dir in theme_dirs(&t) {
+                collect_places(&dir, 0, false, &mut names);
+                if let Ok(idx) = std::fs::read_to_string(dir.join("index.theme")) {
+                    if let Some(inh) = idx.lines().find_map(|l| l.strip_prefix("Inherits=")) {
+                        queue.extend(inh.split(',').map(|s| s.trim().to_string()));
+                    }
+                }
+            }
+        }
+        group_by_color(names.into_iter().collect())
+    }
+
     /// Switch themes; None follows the desktop's setting.
     pub fn set_theme(&mut self, theme: Option<String>) {
         self.theme = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
@@ -286,6 +309,107 @@ mod recolor_tests {
         let s = r##"<path fill="#bebebe" style="stroke:#222"/><use href="url(#abc)"/><path fill="#cc0000"/>"##;
         let r = super::replace_hex_colors(s, "ffffff");
         assert_eq!(r, r##"<path fill="#ffffff" style="stroke:#ffffff"/><use href="url(#abc)"/><path fill="#cc0000"/>"##);
+    }
+}
+
+/// Icons of one colour variant; `color` None = the plain ones.
+pub struct IconGroup {
+    pub color: Option<String>,
+    pub names: Vec<String>,
+}
+
+fn icon_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(d) = dirs::data_dir() {
+        roots.push(d.join("icons"));
+    }
+    if let Some(h) = dirs::home_dir() {
+        roots.push(h.join(".icons"));
+    }
+    let sys = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    roots.extend(sys.split(':').filter(|s| !s.is_empty()).map(|s| Path::new(s).join("icons")));
+    roots
+}
+
+fn theme_dirs(theme: &str) -> Vec<PathBuf> {
+    icon_roots().into_iter().map(|r| r.join(theme)).filter(|d| d.is_dir()).collect()
+}
+
+/// Icon names under any `places` directory (theme/64x64/places,
+/// theme/places/64, theme/scalable/places…).
+fn collect_places(dir: &Path, depth: usize, in_places: bool, out: &mut std::collections::BTreeSet<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if depth < 3 {
+                collect_places(&p, depth + 1, in_places || name == "places", out);
+            }
+        } else if in_places {
+            if let Some(stem) = name.strip_suffix(".svg").or_else(|| name.strip_suffix(".png")) {
+                if !stem.ends_with("-symbolic") && !stem.contains("-open") && !stem.contains("drag-accept") {
+                    out.insert(stem.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Split `folder-<colour>-<kind>` variants into groups. A segment counts as a
+/// colour when `folder-<c>` exists and at least five `folder-<c>-*` do.
+fn group_by_color(names: Vec<String>) -> Vec<IconGroup> {
+    let set: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let mut colors: Vec<String> = Vec::new();
+    for n in &names {
+        let Some(c) = n.strip_prefix("folder-") else { continue };
+        if c.contains('-') || colors.iter().any(|x| x == c) {
+            continue;
+        }
+        let prefix = format!("folder-{c}-");
+        if names.iter().filter(|m| m.starts_with(&prefix)).count() >= 5 && set.contains(n.as_str()) {
+            colors.push(c.to_string());
+        }
+    }
+    let color_of = |n: &str| -> Option<usize> {
+        colors.iter().position(|c| n == format!("folder-{c}") || n.starts_with(&format!("folder-{c}-")))
+    };
+    let mut plain = Vec::new();
+    let mut groups: Vec<Vec<String>> = vec![Vec::new(); colors.len()];
+    for n in &names {
+        match color_of(n) {
+            Some(i) => groups[i].push(n.clone()),
+            None => plain.push(n.clone()),
+        }
+    }
+    // Folders first in each group.
+    let order = |v: &mut Vec<String>| v.sort_by_key(|n| (!n.starts_with("folder"), n.clone()));
+    order(&mut plain);
+    let mut out = vec![IconGroup { color: None, names: plain }];
+    for (c, mut g) in colors.into_iter().zip(groups) {
+        order(&mut g);
+        out.push(IconGroup { color: Some(c), names: g });
+    }
+    out
+}
+
+#[cfg(test)]
+mod group_tests {
+    #[test]
+    fn colour_variants_are_grouped() {
+        let mut names: Vec<String> = ["folder", "folder-documents", "user-home", "folder-red"].map(String::from).to_vec();
+        for k in ["documents", "music", "pictures", "videos", "download"] {
+            names.push(format!("folder-red-{k}"));
+        }
+        names.push("folder-documents-x".into()); // not a colour: no bare "folder-documents-..." group of 5
+        names.sort();
+        let g = super::group_by_color(names);
+        assert_eq!(g.len(), 2);
+        assert_eq!(g[1].color.as_deref(), Some("red"));
+        assert_eq!(g[1].names.len(), 6);
+        assert!(g[0].names.contains(&"folder-documents".to_string()));
+        assert!(g[0].names.contains(&"user-home".to_string()));
+        assert_eq!(g[0].names[0], "folder");
     }
 }
 

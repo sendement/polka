@@ -27,6 +27,8 @@ pub enum SortKey {
 #[serde(default)]
 pub struct Config {
     pub pinned: Vec<PathBuf>,
+    /// Chosen theme icon per pinned folder (path → icon name).
+    pub pinned_icons: std::collections::BTreeMap<String, String>,
     pub show_hidden: bool,
     pub sidebar_collapsed: bool,
     pub view: ViewMode,
@@ -81,6 +83,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             pinned: Vec::new(),
+            pinned_icons: Default::default(),
             show_hidden: false,
             sidebar_collapsed: false,
             view: ViewMode::List,

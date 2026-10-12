@@ -331,6 +331,9 @@ pub enum Cmd {
     IconThemes,
     SetIconTheme(Option<String>),
     Settings,
+    ChooseIcon(PathBuf),
+    /// None resets to the default icon.
+    SetPinIcon(PathBuf, Option<String>),
     ToggleSidebar,
     SetView(ViewMode),
     Sort(SortKey),
@@ -548,6 +551,38 @@ pub enum Overlay {
     Help,
     Themes(ThemePicker),
     Settings(Settings),
+    IconPicker(IconPicker),
+}
+
+/// Theme icon chooser for a pinned folder. Groups are colour variants
+/// (L1/R1), the grid holds that group's icons.
+pub struct IconPicker {
+    pub path: PathBuf,
+    pub groups: Vec<crate::icons::IconGroup>,
+    pub group: usize,
+    pub cursor: usize,
+    /// Grid columns (fixed, so gamepad ↑↓ math matches the drawing).
+    pub cols: usize,
+    pub scrolled: Option<(usize, usize)>,
+    /// Scroll offset from the last frame.
+    pub scroll_y: f32,
+}
+
+impl IconPicker {
+    pub const COLS: usize = 8;
+
+    pub fn names(&self) -> &[String] {
+        &self.groups[self.group].names
+    }
+
+    /// Scroll target once per cursor/group change.
+    pub fn take_scroll(&mut self) -> Option<usize> {
+        let now = (self.group, self.cursor);
+        (self.scrolled != Some(now)).then(|| {
+            self.scrolled = Some(now);
+            self.cursor
+        })
+    }
 }
 
 pub const SETTINGS_ROWS: usize = 7;
@@ -633,6 +668,8 @@ impl ThemePicker {
 pub struct SideItem {
     pub label: String,
     pub icon: &'static [&'static str],
+    /// User-chosen theme icon (pinned folders), tried first.
+    pub custom_icon: Option<String>,
     pub loc: Location,
     pub pinned: bool,
     pub section: &'static str,
@@ -839,10 +876,11 @@ impl App {
         ];
         for (label, p, icon) in places {
             if let Some(p) = p.filter(|p| p.is_dir() && (label == "Home" || *p != home)) {
-                v.push(SideItem { label: tr(label).into(), icon, loc: Location::Local(p), pinned: false, section: "Places" });
+                v.push(SideItem { label: tr(label).into(), icon, custom_icon: None, loc: Location::Local(p), pinned: false, section: "Places" });
             }
         }
         v.push(SideItem {
+            custom_icon: None,
             label: tr("File system").into(),
             icon: &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"],
             loc: Location::Local("/".into()),
@@ -851,12 +889,13 @@ impl App {
         });
         let trash = dirs::data_dir().map(|d| d.join("Trash/files"));
         if let Some(t) = trash.filter(|t| t.is_dir()) {
-            v.push(SideItem { label: tr("Trash").into(), icon: &["user-trash", "user-trash-full"], loc: Location::Local(t), pinned: false, section: "Places" });
+            v.push(SideItem { label: tr("Trash").into(), custom_icon: None, icon: &["user-trash", "user-trash-full"], loc: Location::Local(t), pinned: false, section: "Places" });
         }
         for p in &self.cfg.pinned {
             v.push(SideItem {
                 label: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
                 icon: &["folder-bookmark", "bookmark-new", "folder"],
+                custom_icon: self.cfg.pinned_icons.get(&p.to_string_lossy().into_owned()).cloned(),
                 loc: Location::Local(p.clone()),
                 pinned: true,
                 section: "Pinned",
@@ -864,7 +903,7 @@ impl App {
         }
         for (dev, mnt) in mounts() {
             let label = mnt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dev);
-            v.push(SideItem { label, icon: &["drive-removable-media", "drive-harddisk", "media-flash"], loc: Location::Local(mnt), pinned: false, section: "Devices" });
+            v.push(SideItem { label, custom_icon: None, icon: &["drive-removable-media", "drive-harddisk", "media-flash"], loc: Location::Local(mnt), pinned: false, section: "Devices" });
         }
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
@@ -1016,6 +1055,7 @@ impl App {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
                     let mut items = vec![item(tr("New tab"), Cmd::OpenInNewTab(it.loc.clone()))];
                     if let (true, Some(p)) = (it.pinned, it.loc.local_path()) {
+                        items.push(item(tr("Choose icon…"), Cmd::ChooseIcon(p.to_path_buf())));
                         items.push(item(tr("Unpin from sidebar"), Cmd::Unpin(p.to_path_buf())));
                     }
                     self.overlay = Some(Overlay::Menu(Menu::new(it.label, items)));
@@ -1080,6 +1120,42 @@ impl App {
                 _ => {}
             },
             Overlay::Settings(_) => self.settings_input(a),
+            Overlay::IconPicker(p) => {
+                let n = p.names().len();
+                let cols = p.cols as isize;
+                let mv = |p: &mut IconPicker, d: isize| {
+                    p.cursor = (p.cursor as isize + d).clamp(0, n.saturating_sub(1) as isize) as usize;
+                };
+                match a {
+                    Action::Left => mv(p, -1),
+                    Action::Right => mv(p, 1),
+                    Action::Up => mv(p, -cols),
+                    Action::Down => mv(p, cols),
+                    Action::LeftTrigger => mv(p, -cols * 4),
+                    Action::RightTrigger => mv(p, cols * 4),
+                    Action::PrevTab | Action::NextTab => {
+                        let g = p.groups.len() as isize;
+                        let d = if a == Action::NextTab { 1 } else { -1 };
+                        p.group = (p.group as isize + d).rem_euclid(g) as usize;
+                        p.cursor = 0;
+                    }
+                    Action::Accept => {
+                        let icon = p.names().get(p.cursor).cloned();
+                        let path = p.path.clone();
+                        self.overlay = None;
+                        if icon.is_some() {
+                            self.run(Cmd::SetPinIcon(path, icon));
+                        }
+                    }
+                    Action::Select => {
+                        let path = p.path.clone();
+                        self.overlay = None;
+                        self.run(Cmd::SetPinIcon(path, None));
+                    }
+                    Action::Back | Action::Menu => self.overlay = None,
+                    _ => {}
+                }
+            }
             Overlay::Props(_) | Overlay::Help => {
                 if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
@@ -1781,6 +1857,37 @@ impl App {
                 self.cfg.show_hidden = !self.cfg.show_hidden;
                 self.cfg.save();
                 self.reload_all();
+            }
+            Cmd::ChooseIcon(path) => {
+                let groups = self.icons.place_icons();
+                if groups.iter().all(|g| g.names.is_empty()) {
+                    return self.toast(format!("{}: {}", tr("Failed"), tr("no icons in this theme")), true);
+                }
+                // Start on the current icon, if it's in the theme.
+                let cur = self.cfg.pinned_icons.get(&path.to_string_lossy().into_owned()).cloned();
+                let (group, cursor) = cur
+                    .and_then(|c| {
+                        groups.iter().enumerate().find_map(|(gi, g)| g.names.iter().position(|n| *n == c).map(|i| (gi, i)))
+                    })
+                    .unwrap_or((0, 0));
+                self.overlay = Some(Overlay::IconPicker(IconPicker {
+                    path,
+                    groups,
+                    group,
+                    cursor,
+                    cols: IconPicker::COLS,
+                    scrolled: None,
+                    scroll_y: 0.0,
+                }));
+            }
+            Cmd::SetPinIcon(path, icon) => {
+                let key = path.to_string_lossy().into_owned();
+                match icon {
+                    Some(i) => self.cfg.pinned_icons.insert(key, i),
+                    None => self.cfg.pinned_icons.remove(&key),
+                };
+                self.cfg.save();
+                self.refresh_sidebar();
             }
             Cmd::Settings => {
                 let sw = swatches(&self.cfg);

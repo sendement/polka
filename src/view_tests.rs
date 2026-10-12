@@ -317,4 +317,41 @@ fn settings(h: &mut Harness<'static, App>) {
     settle(h);
     shot(h, "20-tabs");
     assert_eq!(h.state().tabs.len(), 3);
+
+    pin_icons(h);
+}
+
+fn pin_icons(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("folder");
+    h.state_mut().run(Cmd::Pin(dir.clone()));
+    h.state_mut().run(Cmd::SetIconTheme(Some("Papirus-Dark".into())));
+    h.state_mut().run(Cmd::Settings);
+    settle(h);
+    shot(h, "21-settings-padding");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::ChooseIcon(dir.clone()));
+    let groups = match &h.state().overlay {
+        Some(Overlay::IconPicker(p)) => p.groups.len(),
+        _ => panic!("no picker"),
+    };
+    assert!(groups > 1, "Papirus should have colour groups");
+    press(h, &[Action::NextTab, Action::NextTab]);
+    for _ in 0..7 {
+        press(h, &[Action::Down]);
+    }
+    settle(h);
+    shot(h, "22-icon-picker");
+    let chosen = match &h.state().overlay {
+        Some(Overlay::IconPicker(p)) => {
+            // The cursor row must be scrolled into view.
+            assert!(p.scroll_y > 0.0, "grid did not scroll to the cursor");
+            p.names()[p.cursor].clone()
+        }
+        _ => unreachable!(),
+    };
+    press(h, &[Action::Accept]);
+    assert_eq!(h.state().cfg.pinned_icons.get(&dir.to_string_lossy().into_owned()), Some(&chosen));
+    settle(h);
+    shot(h, "23-pinned-icon");
 }
