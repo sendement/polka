@@ -274,4 +274,41 @@ fn submenus(h: &mut Harness<'static, App>) {
     assert_eq!(menu_depth(h), Some(0));
     press(h, &[Action::Back]);
     assert_eq!(menu_depth(h), None);
+
+    settings(h);
+}
+
+fn settings(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, row};
+    h.state_mut().run(Cmd::Settings);
+    settle(h);
+    // → over the swatches previews colours immediately.
+    press(h, &[Action::Right, Action::Right]);
+    assert_eq!(h.state().cfg.accent, crate::config::ACCENT_PRESETS[2]);
+    shot(h, "17-settings");
+    // Mix and save a colour from the "+" tile.
+    let add = crate::app::swatches(&h.state().cfg).len();
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.swatch = add;
+    }
+    press(h, &[Action::Accept]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Settings(st)) if st.editor.is_some()));
+    press(h, &[Action::Right, Action::Right, Action::Down, Action::Right]);
+    shot(h, "18-color-editor");
+    press(h, &[Action::Down, Action::Down, Action::Accept]); // to Save
+    assert_eq!(h.state().cfg.custom_colors.len(), 1);
+    assert_eq!(h.state().cfg.accent, Some(h.state().cfg.custom_colors[0]));
+    // Y deletes the saved colour under the cursor.
+    press(h, &[Action::Actions]);
+    assert!(h.state().cfg.custom_colors.is_empty());
+    // Icon sizes.
+    let before = h.state().cfg.list_icon;
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::LIST_ICON;
+    }
+    press(h, &[Action::Right, Action::Right, Action::Right, Action::Right]);
+    assert_eq!(h.state().cfg.list_icon, before + 8.0);
+    press(h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    shot(h, "19-big-list-icons");
 }

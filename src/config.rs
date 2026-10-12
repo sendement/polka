@@ -40,6 +40,41 @@ pub struct Config {
     pub icon_theme: Option<String>,
     /// UI zoom; bump it up for couch use.
     pub zoom: f32,
+    /// Highlight colour; None = the built-in default.
+    pub accent: Option<[u8; 3]>,
+    /// Colours the user mixed and saved.
+    pub custom_colors: Vec<[u8; 3]>,
+    /// Icon sizes in points.
+    pub side_icon: f32,
+    pub list_icon: f32,
+    pub grid_icon: f32,
+}
+
+pub const SIDE_ICON: (f32, f32, f32) = (16.0, 48.0, 2.0);
+pub const LIST_ICON: (f32, f32, f32) = (16.0, 64.0, 2.0);
+pub const GRID_ICON: (f32, f32, f32) = (32.0, 160.0, 8.0);
+pub const ZOOM: (f32, f32, f32) = (0.6, 3.0, 0.1);
+
+/// Highlight presets (GNOME's accent palette); index 0 is the default.
+pub const ACCENT_PRESETS: [Option<[u8; 3]>; 10] = [
+    None,
+    Some([0x35, 0x84, 0xe4]),
+    Some([0x21, 0x90, 0xa4]),
+    Some([0x3a, 0x94, 0x4a]),
+    Some([0xc8, 0x88, 0x00]),
+    Some([0xed, 0x5b, 0x00]),
+    Some([0xe6, 0x2d, 0x42]),
+    Some([0xd5, 0x61, 0x99]),
+    Some([0x91, 0x41, 0xac]),
+    Some([0x6f, 0x83, 0x96]),
+];
+pub const DEFAULT_ACCENT: [u8; 3] = [0x00, 0x5c, 0x80];
+pub const MAX_CUSTOM_COLORS: usize = 12;
+
+impl Config {
+    pub fn accent_rgb(&self) -> [u8; 3] {
+        self.accent.unwrap_or(DEFAULT_ACCENT)
+    }
 }
 
 impl Default for Config {
@@ -56,6 +91,11 @@ impl Default for Config {
             thumbnails: true,
             icon_theme: None,
             zoom: 1.0,
+            accent: None,
+            custom_colors: Vec::new(),
+            side_icon: 20.0,
+            list_icon: 22.0,
+            grid_icon: 56.0,
         }
     }
 }

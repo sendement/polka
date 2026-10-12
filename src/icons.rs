@@ -64,6 +64,25 @@ impl Icons {
         candidates.iter().find_map(|c| self.lookup_in(theme, c, size))
     }
 
+    /// Icon for UI chrome (toolbar buttons). Tries `name` and
+    /// `name-symbolic`; monochrome icons (GTK symbolic, KDE ColorScheme-Text)
+    /// are recoloured to `color` so they read on any background.
+    pub fn ui_icon(&mut self, candidates: &[&str], size: u16, color: egui::Color32) -> Option<String> {
+        let key = format!("ui:{}/{}@{size}#{:?}", self.theme, candidates.join(","), color.to_array());
+        if let Some(v) = self.names.get(&key) {
+            return v.clone();
+        }
+        let theme = self.theme.clone();
+        let found = candidates.iter().find_map(|c| {
+            [c.to_string(), format!("{c}-symbolic")].into_iter().find_map(|n| {
+                freedesktop_icons::lookup(&n).with_theme(&theme).with_size(size).with_cache().find()
+            })
+        });
+        let uri = found.map(|p| recolored(&p, color).unwrap_or_else(|| uri(&p)));
+        self.names.insert(key, uri.clone());
+        uri
+    }
+
     /// Switch themes; None follows the desktop's setting.
     pub fn set_theme(&mut self, theme: Option<String>) {
         self.theme = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
@@ -196,6 +215,78 @@ fn special_folder_icon(p: &Path) -> Option<&'static str> {
         (dirs::public_dir(), "folder-publicshare"),
     ];
     pairs.into_iter().find(|(d, _)| d.as_deref() == Some(p)).map(|(_, i)| i)
+}
+
+/// GTK keeps these semantic colours in symbolic icons (warning, error,
+/// success); everything else is the foreground.
+const SEMANTIC: [&str; 8] = ["f57900", "ff7800", "cc0000", "e01b24", "c01c28", "73d216", "33d17a", "4e9a06"];
+
+/// A copy of a monochrome SVG icon in `color`, cached on disk. None if the
+/// icon isn't monochrome (or isn't an SVG), so it's used as is.
+fn recolored(path: &Path, color: egui::Color32) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    if path.extension()? != "svg" {
+        return None;
+    }
+    let svg = std::fs::read_to_string(path).ok()?;
+    let hex = format!("{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    let symbolic = path.file_stem()?.to_string_lossy().ends_with("-symbolic");
+    let out = if symbolic {
+        replace_hex_colors(&svg, &hex)
+    } else if let Some(i) = svg.find(".ColorScheme-Text") {
+        // KDE: only the text colour in the stylesheet is the foreground.
+        let rule_end = i + svg[i..].find('}')?;
+        let rule = &svg[i..rule_end];
+        let fixed = replace_hex_colors(rule, &hex);
+        format!("{}{}{}", &svg[..i], fixed, &svg[rule_end..])
+    } else {
+        return None;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    hex.hash(&mut h);
+    let dir = dirs::cache_dir()?.join("polka/ui-icons");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = dir.join(format!("{:016x}.svg", h.finish()));
+    if !file.exists() {
+        std::fs::write(&file, out).ok()?;
+    }
+    Some(uri(&file))
+}
+
+/// Replace `#rgb` / `#rrggbb` colours (not ids like url(#a1)) with `hex`.
+fn replace_hex_colors(s: &str, hex: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'#' {
+            let n = b[i + 1..].iter().take_while(|c| c.is_ascii_alphanumeric()).count();
+            let digits = &s[i + 1..i + 1 + n];
+            let prev = if i > 0 { b[i - 1] } else { b' ' };
+            let is_color = (n == 6 || n == 3) && digits.bytes().all(|c| c.is_ascii_hexdigit()) && prev != b'(';
+            if is_color && !SEMANTIC.contains(&digits.to_lowercase().as_str()) {
+                out.push('#');
+                out.push_str(hex);
+                i += 1 + n;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+#[cfg(test)]
+mod recolor_tests {
+    #[test]
+    fn replaces_colors_not_ids() {
+        let s = r##"<path fill="#bebebe" style="stroke:#222"/><use href="url(#abc)"/><path fill="#cc0000"/>"##;
+        let r = super::replace_hex_colors(s, "ffffff");
+        assert_eq!(r, r##"<path fill="#ffffff" style="stroke:#ffffff"/><use href="url(#abc)"/><path fill="#cc0000"/>"##);
+    }
 }
 
 pub struct ThemeInfo {

@@ -330,6 +330,7 @@ pub enum Cmd {
     ToggleThumbnails,
     IconThemes,
     SetIconTheme(Option<String>),
+    Settings,
     ToggleSidebar,
     SetView(ViewMode),
     Sort(SortKey),
@@ -546,6 +547,64 @@ pub enum Overlay {
     Props(Props),
     Help,
     Themes(ThemePicker),
+    Settings(Settings),
+}
+
+pub const SETTINGS_ROWS: usize = 7;
+pub mod row {
+    pub const ACCENT: usize = 0;
+    pub const SIDE_ICON: usize = 1;
+    pub const LIST_ICON: usize = 2;
+    pub const GRID_ICON: usize = 3;
+    pub const ZOOM: usize = 4;
+    pub const THEME: usize = 5;
+    pub const CLOSE: usize = 6;
+}
+
+/// Settings dialog. Changes apply (and save) immediately.
+pub struct Settings {
+    pub row: usize,
+    /// Cursor in the colour row: presets, then saved colours, then "+".
+    pub swatch: usize,
+    pub editor: Option<ColorEditor>,
+}
+
+/// HSV colour mixer for a new saved colour.
+pub struct ColorEditor {
+    pub hsv: [f32; 3],
+    /// 0..=2 sliders, 3 = save, 4 = cancel
+    pub row: usize,
+}
+
+impl ColorEditor {
+    pub fn rgb(&self) -> [u8; 3] {
+        let c: egui::Color32 = egui::ecolor::Hsva::new(self.hsv[0], self.hsv[1], self.hsv[2], 1.0).into();
+        [c.r(), c.g(), c.b()]
+    }
+
+    fn adjust(&mut self, d: f32) {
+        if let Some(v) = self.hsv.get_mut(self.row) {
+            *v = if self.row == 0 { (*v + d * 0.02).rem_euclid(1.0) } else { (*v + d * 0.04).clamp(0.0, 1.0) };
+        }
+    }
+}
+
+/// The swatches of the colour row, in order.
+pub fn swatches(cfg: &Config) -> Vec<Option<[u8; 3]>> {
+    let mut v: Vec<Option<[u8; 3]>> = crate::config::ACCENT_PRESETS.to_vec();
+    v.extend(cfg.custom_colors.iter().map(|c| Some(*c)));
+    v
+}
+
+/// Push the highlight colour into egui's styles (dark and light).
+pub fn apply_accent(ctx: &egui::Context, cfg: &Config) {
+    let [r, g, b] = cfg.accent_rgb();
+    let c = egui::Color32::from_rgb(r, g, b);
+    ctx.all_styles_mut(|s| {
+        s.visuals.selection.bg_fill = c;
+        s.visuals.selection.stroke.color = egui::Color32::WHITE;
+        s.visuals.hyperlink_color = c;
+    });
 }
 
 /// Icon theme chooser. Row 0 is "system default" (id None).
@@ -617,6 +676,9 @@ pub struct App {
     msg_rx: Receiver<Msg>,
     pub ctx: egui::Context,
     pub quit: bool,
+    /// x of the line between the two panes (last frame), to split the
+    /// address bar at the same place.
+    pub divider_x: Option<f32>,
 }
 
 impl App {
@@ -647,6 +709,7 @@ impl App {
         let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0 };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         ctx.set_zoom_factor(cfg.zoom);
+        apply_accent(&ctx, &cfg);
         let mut app = Self {
             cfg,
             tabs: vec![tab],
@@ -668,6 +731,7 @@ impl App {
             msg_rx,
             ctx,
             quit: false,
+            divider_x: None,
         };
         app.refresh_sidebar();
         app
@@ -1015,6 +1079,7 @@ impl App {
                 Action::Back | Action::Menu => self.overlay = None,
                 _ => {}
             },
+            Overlay::Settings(_) => self.settings_input(a),
             Overlay::Props(_) | Overlay::Help => {
                 if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
@@ -1276,6 +1341,7 @@ impl App {
             item(tr("Select all"), Cmd::SelectAll),
             item(tr("View"), Cmd::Submenu(SubMenu::View)),
             item(tr("Sorting"), Cmd::Submenu(SubMenu::Sort)),
+            item(tr("Settings…"), Cmd::Settings),
             item(tr("Controls"), Cmd::Help),
             item(tr("Quit"), Cmd::Quit),
         ];
@@ -1343,6 +1409,137 @@ impl App {
                 self.run(cmd);
             }
         }
+    }
+
+    fn settings_input(&mut self, a: Action) {
+        let Some(Overlay::Settings(st)) = self.overlay.as_mut() else { return };
+        if let Some(ed) = st.editor.as_mut() {
+            match a {
+                Action::Up => ed.row = ed.row.saturating_sub(1),
+                Action::Down => ed.row = (ed.row + 1).min(4),
+                Action::Left if ed.row < 3 => ed.adjust(-1.0),
+                Action::Right if ed.row < 3 => ed.adjust(1.0),
+                Action::Left | Action::Right => ed.row = if ed.row == 3 { 4 } else { 3 },
+                Action::Accept if ed.row == 4 => st.editor = None,
+                Action::Accept => self.settings_save_color(),
+                Action::Back => st.editor = None,
+                _ => {}
+            }
+            return;
+        }
+        let d = match a {
+            Action::Left => -1.0,
+            Action::Right => 1.0,
+            _ => 0.0,
+        };
+        match a {
+            Action::Up => st.row = st.row.saturating_sub(1),
+            Action::Down => st.row = (st.row + 1).min(SETTINGS_ROWS - 1),
+            Action::Back | Action::Menu => self.overlay = None,
+            Action::Left | Action::Right => {
+                let row = st.row;
+                self.settings_step(row, d);
+            }
+            Action::Accept => {
+                let (row, swatch) = (st.row, st.swatch);
+                match row {
+                    row::ACCENT => self.settings_pick(swatch),
+                    row::THEME => self.run(Cmd::IconThemes),
+                    row::CLOSE => self.overlay = None,
+                    _ => {}
+                }
+            }
+            // Delete a saved colour.
+            Action::Actions if st.row == row::ACCENT => {
+                let i = st.swatch;
+                let first_custom = crate::config::ACCENT_PRESETS.len();
+                if i >= first_custom && i < first_custom + self.cfg.custom_colors.len() {
+                    let removed = self.cfg.custom_colors.remove(i - first_custom);
+                    if self.cfg.accent == Some(removed) {
+                        self.cfg.accent = None;
+                        apply_accent(&self.ctx, &self.cfg);
+                    }
+                    self.cfg.save();
+                    if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+                        st.swatch = st.swatch.min(swatches(&self.cfg).len());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// ←/→ on a settings row.
+    pub fn settings_step(&mut self, row: usize, d: f32) {
+        use crate::config::{GRID_ICON, LIST_ICON, SIDE_ICON, ZOOM};
+        let step = |v: &mut f32, (lo, hi, st): (f32, f32, f32)| *v = (*v + d * st).clamp(lo, hi);
+        match row {
+            row::ACCENT => {
+                let n = swatches(&self.cfg).len() + 1; // + the "add" tile
+                if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+                    st.swatch = (st.swatch as isize + d as isize).rem_euclid(n as isize) as usize;
+                    let i = st.swatch;
+                    // Moving over colours previews them right away.
+                    if let Some(c) = swatches(&self.cfg).get(i).copied() {
+                        self.cfg.accent = c;
+                        apply_accent(&self.ctx, &self.cfg);
+                        self.cfg.save();
+                    }
+                }
+            }
+            row::SIDE_ICON => step(&mut self.cfg.side_icon, SIDE_ICON),
+            row::LIST_ICON => step(&mut self.cfg.list_icon, LIST_ICON),
+            row::GRID_ICON => step(&mut self.cfg.grid_icon, GRID_ICON),
+            row::ZOOM => {
+                step(&mut self.cfg.zoom, ZOOM);
+                self.cfg.zoom = (self.cfg.zoom * 10.0).round() / 10.0;
+                self.ctx.set_zoom_factor(self.cfg.zoom);
+            }
+            _ => return,
+        }
+        self.cfg.save();
+        for t in &mut self.tabs {
+            for p in &mut t.panes {
+                p.scroll_to_cursor = true;
+            }
+        }
+    }
+
+    /// Choose swatch `i` (or open the mixer on the "+" tile).
+    pub fn settings_pick(&mut self, i: usize) {
+        let sw = swatches(&self.cfg);
+        let Some(Overlay::Settings(st)) = self.overlay.as_mut() else { return };
+        st.row = row::ACCENT;
+        st.swatch = i;
+        match sw.get(i) {
+            Some(c) => {
+                self.cfg.accent = *c;
+                apply_accent(&self.ctx, &self.cfg);
+                self.cfg.save();
+            }
+            None => {
+                let [r, g, b] = self.cfg.accent_rgb();
+                let hsva = egui::ecolor::Hsva::from(egui::Color32::from_rgb(r, g, b));
+                st.editor = Some(ColorEditor { hsv: [hsva.h, hsva.s, hsva.v], row: 0 });
+            }
+        }
+    }
+
+    pub fn settings_save_color(&mut self) {
+        let Some(Overlay::Settings(st)) = self.overlay.as_mut() else { return };
+        let Some(ed) = st.editor.take() else { return };
+        let c = ed.rgb();
+        let cfg = &mut self.cfg;
+        if !cfg.custom_colors.contains(&c) {
+            if cfg.custom_colors.len() >= crate::config::MAX_CUSTOM_COLORS {
+                cfg.custom_colors.remove(0);
+            }
+            cfg.custom_colors.push(c);
+        }
+        cfg.accent = Some(c);
+        st.swatch = swatches(cfg).iter().position(|s| *s == Some(c)).unwrap_or(0);
+        apply_accent(&self.ctx, cfg);
+        cfg.save();
     }
 
     /// Mouse: move the cursor at `depth` to `index` and accept it.
@@ -1584,6 +1781,11 @@ impl App {
                 self.cfg.show_hidden = !self.cfg.show_hidden;
                 self.cfg.save();
                 self.reload_all();
+            }
+            Cmd::Settings => {
+                let sw = swatches(&self.cfg);
+                let swatch = sw.iter().position(|c| *c == self.cfg.accent).unwrap_or(0);
+                self.overlay = Some(Overlay::Settings(Settings { row: 0, swatch, editor: None }));
             }
             Cmd::IconThemes => {
                 let system = crate::icons::detect_theme().unwrap_or_else(|| "hicolor".into());

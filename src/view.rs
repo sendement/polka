@@ -15,17 +15,14 @@ use crate::i18n::tr;
 use crate::icons::Icons;
 use crate::input::{Action, Input, PadKind};
 
-const LIST_ROW: f32 = 30.0;
-const LIST_ICON: f32 = 22.0;
-const GRID_W: f32 = 108.0;
-const GRID_H: f32 = 108.0;
-const GRID_ICON: f32 = 56.0;
+/// Top bar button size and the icon inside it.
+const TOOL_BTN: f32 = 38.0;
+const TOOL_ICON: f32 = 24.0;
 /// Theme size asked for small icons. Many themes (Breeze, Win11) draw their
 /// 16–24px sizes as monochrome glyphs; 32 gets the full-colour ones and is
 /// sharper on HiDPI anyway.
 const SMALL_ICON_LOOKUP: u16 = 32;
 const SIDE_W: f32 = 210.0;
-const SIDE_W_COLLAPSED: f32 = 52.0;
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -198,94 +195,191 @@ impl App {
 
     fn draw_top(&mut self, ui: &mut Ui) {
         let cfg = self.cfg.clone();
-        let mut go: Option<crate::vfs::Location> = None;
-        let mut nav: Option<Action> = None;
-        let mut switch_tab = None;
-        let mut close_tab = None;
-        let mut new_tab = false;
-        let mut clear_filter = false;
-        egui::Panel::top("top").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                if ui.button("⬅").on_hover_text(tr("History")).clicked() {
-                    nav = Some(Action::HistoryBack);
+        let mut act: Option<TopAction> = None;
+        let dual = cfg.dual;
+        let active = self.tabs[self.tab].active;
+        let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
+        egui::Panel::top("top").frame(frame).show(ui, |ui| {
+            let full = ui.available_rect_before_wrap();
+            let row = Rect::from_min_size(full.min, vec2(full.width(), TOOL_BTN));
+            ui.allocate_rect(row, Sense::hover());
+            let btn = |x: f32| Rect::from_min_size(pos2(x, row.min.y), Vec2::splat(TOOL_BTN));
+            let step = TOOL_BTN + 4.0;
+
+            // Left: sidebar toggle, then history / up.
+            let side_names: &[&str] = if cfg.sidebar_collapsed {
+                &["sidebar-expand-left", "view-left-new", "sidebar-show", "view-sidebar"]
+            } else {
+                &["sidebar-collapse-left", "view-left-close", "sidebar-show", "view-sidebar"]
+            };
+            let mut x = row.min.x;
+            let left: [(&[&str], &str, &str, TopAction); 4] = [
+                (side_names, "☰", tr("Sidebar"), TopAction::Sidebar),
+                (&["go-previous", "arrow-left"], "◀", tr("Back"), TopAction::Back),
+                (&["go-next", "arrow-right"], "▶", tr("Forward"), TopAction::Forward),
+                (&["go-up", "arrow-up"], "▲", tr("Up"), TopAction::Up),
+            ];
+            for (i, (names, fb, tip, a)) in left.into_iter().enumerate() {
+                if tool_button(ui, btn(x), &mut self.icons, names, fb, tip, false).clicked() {
+                    act = Some(a);
                 }
-                if ui.button("➡").clicked() {
-                    nav = Some(Action::HistoryForward);
+                x += step + if i == 0 { 8.0 } else { 0.0 };
+            }
+            let addr_start = x + 6.0;
+
+            // Right, pinned: search, dual pane, menu.
+            let mut rx = row.max.x - TOOL_BTN;
+            let right: [(&[&str], &str, &str, bool, TopAction); 3] = [
+                (&["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false, TopAction::Menu),
+                (&["view-split-left-right", "view-dual"], "◫", tr("Dual pane"), dual, TopAction::Dual),
+                (&["edit-find", "system-search"], "⌕", tr("Search"), false, TopAction::Search),
+            ];
+            for (names, fb, tip, on, a) in right {
+                if tool_button(ui, btn(rx), &mut self.icons, names, fb, tip, on).clicked() {
+                    act = Some(a);
                 }
-                if ui.button("⬆").clicked() {
-                    nav = Some(Action::Back);
+                rx -= step;
+            }
+            let addr_end = rx + TOOL_BTN - 6.0;
+
+            // Address field(s); in dual mode split where the panes split.
+            let fields: Vec<(usize, Rect)> = if dual {
+                let mid = self
+                    .divider_x
+                    .filter(|d| *d > addr_start + 120.0 && *d < addr_end - 120.0)
+                    .unwrap_or((addr_start + addr_end) / 2.0);
+                vec![
+                    (0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(mid - 4.0, row.max.y))),
+                    (1, Rect::from_min_max(pos2(mid + 4.0, row.min.y), pos2(addr_end, row.max.y))),
+                ]
+            } else {
+                vec![(0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
+            };
+            for (idx, rect) in fields {
+                let pane = &self.tabs[self.tab].panes[idx];
+                let highlight = dual && idx == active;
+                if let Some(a) = address_field(ui, rect, pane, highlight, idx) {
+                    act = Some(a);
                 }
-                ui.add_space(8.0);
-                let crumbs = self.pane().loc.crumbs();
-                let n = crumbs.len();
-                for (i, (label, loc)) in crumbs.into_iter().enumerate() {
-                    let last = i + 1 == n;
-                    let text = egui::RichText::new(label).size(15.0);
-                    let b = egui::Button::new(if last { text.strong() } else { text }).frame(last);
-                    if ui.add(b).clicked() {
-                        go = Some(loc);
-                    }
-                    if !last {
-                        ui.label(egui::RichText::new("›").weak());
-                    }
-                }
-                if self.pane().loc.is_archive() && self.pane().loc.dest().is_none() {
-                    ui.label(egui::RichText::new("🔒").weak()).on_hover_text(tr("This archive format is read-only"));
-                }
-                if let Some(f) = self.pane().filter.clone() {
-                    ui.add_space(12.0);
-                    let chip = egui::Button::new(egui::RichText::new(format!("{}: {f}  ✖", tr("Filter"))).size(14.0))
-                        .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.5));
-                    if ui.add(chip).clicked() {
-                        clear_filter = true;
-                    }
-                }
-            });
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                glyph(ui, Action::PrevTab, self.pad);
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let p = &t.panes[if cfg.dual { t.active } else { 0 }];
-                    let active = i == self.tab;
-                    let r = ui.add(
-                        egui::Button::selectable(active, egui::RichText::new(format!("  {}  ", p.loc.title())).size(14.0))
-                            .min_size(vec2(90.0, 26.0)),
-                    );
-                    if r.clicked() {
-                        switch_tab = Some(i);
-                    }
-                    if r.middle_clicked() {
-                        close_tab = Some(i);
-                    }
-                }
-                if ui.button(" + ").on_hover_text(tr("New tab")).clicked() {
-                    new_tab = true;
-                }
-                glyph(ui, Action::NextTab, self.pad);
-            });
-            ui.add_space(4.0);
+            }
         });
-        if let Some(a) = nav {
-            self.focus = Focus::Panes;
-            self.handle(Input::Press(a));
+
+        let Some(act) = act else { return };
+        match act {
+            TopAction::Sidebar => self.run(Cmd::ToggleSidebar),
+            TopAction::Back | TopAction::Forward | TopAction::Up => {
+                self.focus = Focus::Panes;
+                let a = match act {
+                    TopAction::Back => Action::HistoryBack,
+                    TopAction::Forward => Action::HistoryForward,
+                    _ => Action::Back,
+                };
+                if a == Action::Back {
+                    self.pane_mut().go_up(&cfg);
+                } else {
+                    self.handle(Input::Press(a));
+                }
+            }
+            TopAction::Search => {
+                self.run(if self.pane().loc.local_path().is_some() { Cmd::Search } else { Cmd::Filter });
+            }
+            TopAction::Dual => self.run(Cmd::ToggleDual),
+            TopAction::Menu => {
+                self.focus = Focus::Panes;
+                self.handle(Input::Press(Action::Menu));
+            }
+            TopAction::Focus(i) => {
+                self.focus = Focus::Panes;
+                self.tabs[self.tab].active = i;
+            }
+            TopAction::Go(i, loc) => {
+                self.focus = Focus::Panes;
+                self.tabs[self.tab].active = i;
+                self.pane_mut().navigate(loc, None, &cfg);
+            }
+            TopAction::ClearFilter(i) => {
+                self.tabs[self.tab].active = i;
+                self.pane_mut().set_filter(None);
+            }
         }
-        if let Some(loc) = go {
-            self.pane_mut().navigate(loc, None, &cfg);
-        }
-        if let Some(i) = switch_tab {
+    }
+
+    /// Tabs strip at the top of the file area.
+    fn draw_tabs(&mut self, ui: &mut Ui) {
+        let dual = self.cfg.dual;
+        let mut switch = None;
+        let mut close = None;
+        let mut new_tab = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            glyph(ui, Action::PrevTab, self.pad);
+            let many = self.tabs.len() > 1;
+            for (i, t) in self.tabs.iter().enumerate() {
+                let p = &t.panes[if dual { t.active } else { 0 }];
+                let is_active = i == self.tab;
+                let v = ui.visuals().clone();
+                let font = FontId::proportional(14.0);
+                let title = elided(ui, &p.loc.title(), font, v.text_color(), 180.0, 1);
+                let close_w = if many { 20.0 } else { 0.0 };
+                let w = (title.size().x + 28.0 + close_w).max(96.0);
+                let (rect, r) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
+                let accent = v.selection.bg_fill;
+                let (fill, stroke) = if is_active {
+                    (accent.gamma_multiply(0.35), Stroke::new(1.5, accent))
+                } else if r.hovered() {
+                    (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
+                } else {
+                    (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
+                };
+                ui.painter().rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
+                let text_x = rect.min.x + 14.0;
+                ui.painter().galley(pos2(text_x, rect.center().y - title.size().y / 2.0), title, v.text_color());
+                if many {
+                    let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
+                    let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
+                    if is_active || r.hovered() || cresp.hovered() {
+                        if cresp.hovered() {
+                            ui.painter().circle_filled(cr.center(), 9.0, v.widgets.hovered.bg_fill);
+                        }
+                        ui.painter().text(cr.center(), Align2::CENTER_CENTER, "×", FontId::proportional(15.0), v.weak_text_color());
+                    }
+                    if cresp.clicked() {
+                        close = Some(i);
+                        continue;
+                    }
+                }
+                if r.clicked() {
+                    switch = Some(i);
+                }
+                if r.middle_clicked() {
+                    close = Some(i);
+                }
+            }
+            let (rect, r) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+            let v = ui.visuals();
+            ui.painter().rect(
+                rect,
+                7.0,
+                if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT },
+                v.widgets.noninteractive.bg_stroke,
+                StrokeKind::Inside,
+            );
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
+            if r.on_hover_text(tr("New tab")).clicked() {
+                new_tab = true;
+            }
+            glyph(ui, Action::NextTab, self.pad);
+        });
+        ui.add_space(6.0);
+        if let Some(i) = switch {
             self.tab = i;
         }
-        if let Some(i) = close_tab {
+        if let Some(i) = close {
             self.tab = i;
             self.run(Cmd::CloseTab);
         }
         if new_tab {
             self.run(Cmd::NewTab);
-        }
-        if clear_filter {
-            self.pane_mut().set_filter(None);
         }
     }
 
@@ -342,6 +436,15 @@ impl App {
                 (Action::Menu, tr("OK")),
                 (Action::Back, tr("Cancel")),
             ],
+            Some(Overlay::Settings(st)) if st.editor.is_some() => {
+                vec![(Action::Left, tr("Adjust")), (Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]
+            }
+            Some(Overlay::Settings(_)) => vec![
+                (Action::Left, tr("Adjust")),
+                (Action::Accept, tr("OK")),
+                (Action::Actions, tr("Delete color")),
+                (Action::Back, tr("Close")),
+            ],
             Some(_) => vec![(Action::Back, tr("Close"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -364,9 +467,10 @@ impl App {
         let cur_loc = self.pane().loc.clone();
         let mut clicked = None;
         let mut actions = None;
+        let side_icon = self.cfg.side_icon;
         egui::Panel::left("sidebar")
             .resizable(false)
-            .exact_size(if collapsed { SIDE_W_COLLAPSED } else { SIDE_W })
+            .exact_size(if collapsed { side_icon + 32.0 } else { SIDE_W + (side_icon - 20.0).max(0.0) * 3.0 })
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -381,17 +485,18 @@ impl App {
                                 ui.label(egui::RichText::new(tr(section)).small().weak());
                             }
                         }
-                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), side_icon + 12.0), Sense::click());
                         let is_cursor = focused && i == self.side_cursor;
                         let here = it.loc == cur_loc;
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
-                        let icon_rect = Rect::from_min_size(rect.min + vec2(8.0, 6.0), vec2(20.0, 20.0));
-                        if let Some(u) = self.icons.named(it.icon, SMALL_ICON_LOOKUP) {
+                        let icon_rect = Rect::from_min_size(rect.min + vec2(8.0, 6.0), Vec2::splat(side_icon));
+                        if let Some(u) = self.icons.named(it.icon, lookup_px(ui, side_icon)) {
                             egui::Image::new(u).paint_at(ui, icon_rect);
                         }
                         if !collapsed {
-                            let g = elided(ui, &it.label, FontId::proportional(14.0), ui.visuals().text_color(), rect.width() - 44.0, 1);
-                            ui.painter().galley(pos2(rect.min.x + 36.0, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
+                            let tx = side_icon + 16.0;
+                            let g = elided(ui, &it.label, FontId::proportional(14.0), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
+                            ui.painter().galley(pos2(rect.min.x + tx, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
                         }
                         let r = if collapsed { r.on_hover_text(&it.label) } else { r };
                         if r.clicked() {
@@ -426,7 +531,9 @@ impl App {
         let focused = self.focus == Focus::Panes && self.overlay.is_none();
         let active = self.tabs[tab].active;
         let mut events: Vec<(usize, PaneEvent)> = Vec::new();
+        let mut divider = None;
         egui::CentralPanel::default().show(ui, |ui| {
+            self.draw_tabs(ui);
             let App { tabs, icons, cfg, .. } = self;
             let [a, b] = &mut tabs[tab].panes;
             if dual {
@@ -435,6 +542,7 @@ impl App {
                 let w = (full.width() - gap) / 2.0;
                 let ra = Rect::from_min_size(full.min, vec2(w, full.height()));
                 let rb = Rect::from_min_size(pos2(full.min.x + w + gap, full.min.y), vec2(w, full.height()));
+                divider = Some(full.min.x + w + gap / 2.0);
                 for (idx, (pane, rect)) in [(a, ra), (b, rb)].into_iter().enumerate() {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("pane", idx)));
                     let is_active = active == idx;
@@ -445,8 +553,6 @@ impl App {
                     };
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
-                    let header = pane.loc.display();
-                    inner.label(egui::RichText::new(header).small().color(if is_active { inner.visuals().strong_text_color() } else { inner.visuals().weak_text_color() }));
                     for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx)) {
                         events.push((idx, e));
                     }
@@ -457,6 +563,11 @@ impl App {
                 }
             }
         });
+        if divider != self.divider_x {
+            // The address bar lines up with this on the next frame.
+            self.divider_x = divider;
+            ui.ctx().request_repaint();
+        }
         for (idx, e) in events {
             self.focus = Focus::Panes;
             self.tabs[tab].active = idx;
@@ -508,7 +619,8 @@ impl App {
         let mut menu_click: Option<(usize, usize)> = None;
         let mut osk_key: Option<OskKey> = None;
         let mut dismiss = false;
-        let (overlay, icons) = (&mut self.overlay, &mut self.icons);
+        let mut settings_ev: Option<SettingsEvent> = None;
+        let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
         egui::Area::new("overlay".into())
             .order(Order::Foreground)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
@@ -519,6 +631,7 @@ impl App {
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
+                    Some(Overlay::Settings(st)) => settings_ev = draw_settings(ui, st, cfg, icons),
                     None => {}
                 });
             });
@@ -534,6 +647,9 @@ impl App {
         }
         if let Some((depth, index)) = menu_click {
             self.menu_click(depth, index);
+        }
+        if let Some(ev) = settings_ev {
+            self.settings_event(ev);
         }
     }
 }
@@ -572,9 +688,14 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
 
     let grid = cfg.view == ViewMode::Grid;
     let width = ui.available_width();
-    let cols = if grid { ((width - 8.0) / GRID_W).floor().max(1.0) as usize } else { 1 };
+    let (list_icon, grid_icon) = (cfg.list_icon, cfg.grid_icon);
+    let grid_w = (grid_icon + 44.0).max(96.0);
+    let grid_h = grid_icon + 52.0;
+    let list_row = (list_icon + 8.0).max(28.0);
+    let name_x = list_icon + 20.0;
+    let cols = if grid { ((width - 8.0) / grid_w).floor().max(1.0) as usize } else { 1 };
     pane.cols = cols;
-    let row_h = if grid { GRID_H } else { LIST_ROW };
+    let row_h = if grid { grid_h } else { list_row };
     let rows = pane.entries.len().div_ceil(cols);
 
     if !grid {
@@ -582,7 +703,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         let (r, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
         let c = ui.visuals().weak_text_color();
         let f = FontId::proportional(12.0);
-        ui.painter().text(pos2(r.min.x + 40.0, r.center().y), Align2::LEFT_CENTER, tr("Name"), f.clone(), c);
+        ui.painter().text(pos2(r.min.x + name_x, r.center().y), Align2::LEFT_CENTER, tr("Name"), f.clone(), c);
         ui.painter().text(pos2(r.max.x - 160.0, r.center().y), Align2::RIGHT_CENTER, tr("Size"), f.clone(), c);
         ui.painter().text(pos2(r.max.x - 145.0, r.center().y), Align2::LEFT_CENTER, tr("Modified"), f, c);
     }
@@ -608,7 +729,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let i = row * cols + col;
                 let Some(e) = pane.entries.get(i) else { break };
                 let rect = if grid {
-                    Rect::from_min_size(row_rect.min + vec2(col as f32 * GRID_W + 4.0, 0.0), vec2(GRID_W - 4.0, GRID_H - 4.0))
+                    Rect::from_min_size(row_rect.min + vec2(col as f32 * grid_w + 4.0, 0.0), vec2(grid_w - 4.0, grid_h - 4.0))
                 } else {
                     row_rect
                 };
@@ -617,12 +738,12 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let is_cursor = i == pane.cursor;
                 paint_entry_bg(ui, rect, is_cursor, focused, sel, r.hovered());
                 let path = pane.loc.entry_path(&e.name);
-                let icon_size = if grid { GRID_ICON } else { LIST_ICON };
+                let icon_size = if grid { grid_icon } else { list_icon };
                 let thumb = match (&path, e.mtime) {
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
                     _ => None,
                 };
-                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), if grid { 64 } else { SMALL_ICON_LOOKUP }) };
+                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), lookup_px(ui, icon_size)) };
                 let text_c = if e.hidden() { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
@@ -632,9 +753,9 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
-                    let name_w = rect.width() - 40.0 - 260.0;
+                    let name_w = rect.width() - name_x - 260.0;
                     let g = elided(ui, &e.name, FontId::proportional(14.0), text_c, name_w.max(60.0), 1);
-                    ui.painter().galley(pos2(rect.min.x + 40.0, rect.center().y - g.size().y / 2.0), g, text_c);
+                    ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
                     let weak = ui.visuals().weak_text_color();
                     let f = FontId::proportional(13.0);
                     let size = if e.is_dir { String::new() } else { human_size(e.size) };
@@ -957,7 +1078,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                 for (i, (caption, names)) in THEME_SAMPLES.iter().enumerate() {
                     let (rect, _) = ui.allocate_exact_size(vec2(78.0, 78.0), Sense::hover());
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 28.0), Vec2::splat(48.0));
-                    if let Some(u) = icons.named_in(&theme, names, 48) {
+                    if let Some(u) = icons.named_in(&theme, names, 64) {
                         egui::Image::new(u).paint_at(ui, ir);
                     }
                     let c = ui.visuals().weak_text_color();
@@ -1118,4 +1239,362 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------- top bar
+
+enum TopAction {
+    Sidebar,
+    Back,
+    Forward,
+    Up,
+    Search,
+    Dual,
+    Menu,
+    /// Click on an address field's background: make that pane active.
+    Focus(usize),
+    Go(usize, crate::vfs::Location),
+    ClearFilter(usize),
+}
+
+/// Theme size to ask for an icon drawn `pt` points wide, rounded up to a
+/// size themes ship natively. Odd sizes (48, 56…) make lookups fall back to
+/// scaled-up small icons (Breeze's `16@3x`), which are monochrome glyphs.
+fn lookup_px(ui: &Ui, pt: f32) -> u16 {
+    let px = (pt * ui.pixels_per_point()).ceil() as u16;
+    [SMALL_ICON_LOOKUP, 64, 128, 256].into_iter().find(|s| *s >= px).unwrap_or(256)
+}
+
+/// Square toolbar button with a themed icon (text fallback).
+fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&str], fallback: &str, tip: &str, on: bool) -> egui::Response {
+    let id = ui.id().with(("tool", names.first().copied().unwrap_or(fallback)));
+    let r = ui.interact(rect, id, Sense::click());
+    let v = ui.visuals();
+    let accent = v.selection.bg_fill;
+    if on {
+        ui.painter().rect(rect, 8.0, accent.gamma_multiply(0.4), Stroke::new(1.0, accent), StrokeKind::Inside);
+    } else if r.hovered() {
+        ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill);
+    }
+    let color = v.text_color();
+    let px = ((TOOL_ICON * ui.pixels_per_point()).ceil() as u16).max(22);
+    match icons.ui_icon(names, px, color) {
+        Some(u) => egui::Image::new(u).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(TOOL_ICON))),
+        None => {
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, fallback, FontId::proportional(18.0), color);
+        }
+    }
+    r.on_hover_text(tip)
+}
+
+/// One address field: breadcrumbs (trimmed from the left when long), a
+/// read-only lock and the filter chip.
+fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usize) -> Option<TopAction> {
+    let mut act = None;
+    let bg = ui.interact(rect, ui.id().with(("addr", idx)), Sense::click());
+    let v = ui.visuals().clone();
+    let stroke = if highlight { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };
+    ui.painter().rect(rect, 8.0, v.extreme_bg_color, stroke, StrokeKind::Inside);
+    if bg.clicked() {
+        act = Some(TopAction::Focus(idx));
+    }
+    let inner = rect.shrink2(vec2(6.0, 4.0));
+    let painter = ui.painter().with_clip_rect(rect.shrink(1.0));
+    let mut right = inner.max.x;
+
+    if let Some(f) = &pane.filter {
+        let font = FontId::proportional(14.0);
+        let g = painter.layout_no_wrap(format!("{}: {f}  ✕", tr("Filter")), font, v.strong_text_color());
+        let chip = Rect::from_min_max(pos2(right - g.size().x - 16.0, inner.min.y + 2.0), pos2(right, inner.max.y - 2.0));
+        let r = ui.interact(chip, ui.id().with(("filter-chip", idx)), Sense::click());
+        painter.rect_filled(chip, 6.0, v.selection.bg_fill.gamma_multiply(if r.hovered() { 0.8 } else { 0.5 }));
+        painter.galley(pos2(chip.min.x + 8.0, chip.center().y - g.size().y / 2.0), g, Color32::WHITE);
+        if r.clicked() {
+            act = Some(TopAction::ClearFilter(idx));
+        }
+        right = chip.min.x - 6.0;
+    }
+    if pane.loc.is_archive() && pane.loc.dest().is_none() {
+        let g = painter.layout_no_wrap("🔒".into(), FontId::proportional(15.0), v.weak_text_color());
+        let p = pos2(right - g.size().x, inner.center().y - g.size().y / 2.0);
+        let r = ui.interact(Rect::from_min_size(p, g.size()), ui.id().with(("lock", idx)), Sense::hover());
+        r.on_hover_text(tr("This archive format is read-only"));
+        right -= g.size().x + 6.0;
+        painter.galley(p, g, v.weak_text_color());
+    }
+
+    // Breadcrumbs: keep the last ones that fit.
+    let crumbs = pane.loc.crumbs();
+    let n = crumbs.len();
+    let font = FontId::proportional(16.0);
+    let galleys: Vec<_> = crumbs
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| {
+            let c = if i + 1 == n { v.strong_text_color() } else { v.text_color() };
+            painter.layout_no_wrap(label.clone(), font.clone(), c)
+        })
+        .collect();
+    let sep = 18.0;
+    let pad = 14.0;
+    let avail = right - inner.min.x;
+    let mut first = 0;
+    let width = |from: usize| -> f32 {
+        let w: f32 = galleys[from..].iter().map(|g| g.size().x + pad).sum::<f32>() + sep * (n - from - 1) as f32;
+        if from > 0 { w + 24.0 + sep } else { w }
+    };
+    while first + 1 < n && width(first) > avail {
+        first += 1;
+    }
+    let mut x = inner.min.x;
+    if first > 0 {
+        painter.text(pos2(x + 8.0, inner.center().y), Align2::LEFT_CENTER, "…", font.clone(), v.weak_text_color());
+        x += 24.0;
+        painter.text(pos2(x + sep / 2.0, inner.center().y), Align2::CENTER_CENTER, "›", font.clone(), v.weak_text_color());
+        x += sep;
+    }
+    for (i, g) in galleys.into_iter().enumerate().skip(first) {
+        let w = g.size().x + pad;
+        let r = Rect::from_min_size(pos2(x, inner.min.y), vec2(w, inner.height()));
+        let resp = ui.interact(r, ui.id().with(("crumb", idx, i)), Sense::click());
+        if resp.hovered() {
+            painter.rect_filled(r, 6.0, v.widgets.hovered.weak_bg_fill);
+        }
+        painter.galley(pos2(r.min.x + pad / 2.0, r.center().y - g.size().y / 2.0), g, v.text_color());
+        if resp.clicked() {
+            act = Some(TopAction::Go(idx, crumbs[i].1.clone()));
+        }
+        x += w;
+        if i + 1 < n {
+            painter.text(pos2(x + sep / 2.0, inner.center().y), Align2::CENTER_CENTER, "›", font.clone(), v.weak_text_color());
+            x += sep;
+        }
+    }
+    act
+}
+
+// ---------------------------------------------------------------- settings
+
+pub enum SettingsEvent {
+    Row(usize),
+    Step(usize, f32),
+    Pick(usize),
+    Theme,
+    Close,
+    EditorRow(usize),
+    EditorSet(usize, f32),
+    Save,
+    CancelEditor,
+}
+
+impl App {
+    fn settings_event(&mut self, ev: SettingsEvent) {
+        use crate::app::row;
+        let Some(Overlay::Settings(st)) = self.overlay.as_mut() else { return };
+        match ev {
+            SettingsEvent::Row(r) => st.row = r,
+            SettingsEvent::Step(r, d) => {
+                st.row = r;
+                self.settings_step(r, d);
+            }
+            SettingsEvent::Pick(i) => self.settings_pick(i),
+            SettingsEvent::Theme => {
+                st.row = row::THEME;
+                self.run(Cmd::IconThemes);
+            }
+            SettingsEvent::Close => self.overlay = None,
+            SettingsEvent::EditorRow(r) => {
+                if let Some(ed) = st.editor.as_mut() {
+                    ed.row = r;
+                }
+            }
+            SettingsEvent::EditorSet(r, v) => {
+                if let Some(ed) = st.editor.as_mut() {
+                    ed.row = r;
+                    ed.hsv[r] = v.clamp(0.0, 1.0);
+                }
+            }
+            SettingsEvent::Save => self.settings_save_color(),
+            SettingsEvent::CancelEditor => st.editor = None,
+        }
+    }
+}
+
+const SETTINGS_W: f32 = 560.0;
+
+fn rgb(c: [u8; 3]) -> Color32 {
+    Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Row background; the focused row gets the highlight.
+fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) -> (Rect, egui::Response) {
+    let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W, h), Sense::click());
+    let _ = id;
+    let v = ui.visuals();
+    if focused {
+        ui.painter().rect(rect, 8.0, v.selection.bg_fill.gamma_multiply(0.25), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+    } else if r.hovered() {
+        ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.5));
+    }
+    (rect, r)
+}
+
+fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons: &mut Icons) -> Option<SettingsEvent> {
+    use crate::app::row;
+    if let Some(ed) = &st.editor {
+        return draw_color_editor(ui, ed);
+    }
+    let mut ev = None;
+    ui.label(egui::RichText::new(tr("Settings")).strong().size(18.0));
+    ui.add_space(8.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+    let v = ui.visuals().clone();
+    let label_font = FontId::proportional(15.0);
+
+    // Highlight colour: swatches, wrapped.
+    let sw = crate::app::swatches(cfg);
+    let per_line = 14;
+    let lines = (sw.len() + 1).div_ceil(per_line);
+    let (rect, r) = settings_row(ui, 36.0 + lines as f32 * 34.0, st.row == row::ACCENT, "accent");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::ACCENT));
+    }
+    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Highlight color"), label_font.clone(), v.text_color());
+    for i in 0..=sw.len() {
+        let (line, col) = (i / per_line, i % per_line);
+        let c = pos2(rect.min.x + 30.0 + col as f32 * 36.0, rect.min.y + 52.0 + line as f32 * 34.0);
+        let hit = Rect::from_center_size(c, Vec2::splat(32.0));
+        let resp = ui.interact(hit, ui.id().with(("swatch", i)), Sense::click());
+        let cursor = st.row == row::ACCENT && st.swatch == i;
+        if let Some(sc) = sw.get(i) {
+            let fill = rgb(sc.unwrap_or(crate::config::DEFAULT_ACCENT));
+            ui.painter().circle_filled(c, 13.0, fill);
+            if *sc == cfg.accent {
+                ui.painter().circle_stroke(c, 13.0, Stroke::new(2.0, Color32::WHITE));
+                ui.painter().circle_filled(c, 3.5, Color32::WHITE);
+            }
+            let r = resp.on_hover_text(match sc {
+                None => tr("Default").to_string(),
+                Some([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
+            });
+            if r.clicked() {
+                ev = Some(SettingsEvent::Pick(i));
+            }
+        } else {
+            ui.painter().circle_stroke(c, 12.0, Stroke::new(1.5, v.text_color()));
+            ui.painter().text(c, Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
+            if resp.on_hover_text(tr("New color")).clicked() {
+                ev = Some(SettingsEvent::Pick(i));
+            }
+        }
+        if cursor {
+            ui.painter().circle_stroke(c, 17.0, Stroke::new(2.0, v.strong_text_color()));
+        }
+    }
+
+    // Steppers.
+    let steppers: [(usize, &str, String); 4] = [
+        (row::SIDE_ICON, tr("Sidebar icons"), format!("{} px", cfg.side_icon)),
+        (row::LIST_ICON, tr("List icons"), format!("{} px", cfg.list_icon)),
+        (row::GRID_ICON, tr("Grid icons"), format!("{} px", cfg.grid_icon)),
+        (row::ZOOM, tr("Interface scale"), format!("{:.0}%", cfg.zoom * 100.0)),
+    ];
+    for (r_i, label, value) in steppers {
+        let (rect, r) = settings_row(ui, 44.0, st.row == r_i, r_i);
+        if r.clicked() {
+            ev = Some(SettingsEvent::Row(r_i));
+        }
+        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, label_font.clone(), v.text_color());
+        let plus = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(30.0));
+        let minus = Rect::from_center_size(pos2(rect.max.x - 136.0, rect.center().y), Vec2::splat(30.0));
+        for (b, t, d) in [(minus, "−", -1.0), (plus, "+", 1.0)] {
+            let br = ui.interact(b, ui.id().with(("step", r_i, t)), Sense::click());
+            ui.painter().rect(b, 6.0, if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill }, Stroke::NONE, StrokeKind::Inside);
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, t, FontId::proportional(18.0), v.text_color());
+            if br.clicked() {
+                ev = Some(SettingsEvent::Step(r_i, d));
+            }
+        }
+        ui.painter().text(pos2((plus.min.x + minus.max.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, value, label_font.clone(), v.strong_text_color());
+    }
+
+    // Icon theme.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::THEME, "theme");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Icon theme…"), label_font.clone(), v.text_color());
+    let ir = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(24.0));
+    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 24.0)) {
+        egui::Image::new(u).paint_at(ui, ir);
+    }
+    ui.painter().text(pos2(ir.min.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Theme);
+    }
+
+    // Close.
+    let (rect, r) = settings_row(ui, 40.0, st.row == row::CLOSE, "close");
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("Close"), label_font, v.text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Close);
+    }
+    ev
+}
+
+fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<SettingsEvent> {
+    let mut ev = None;
+    let v = ui.visuals().clone();
+    ui.label(egui::RichText::new(tr("New color")).strong().size(18.0));
+    ui.add_space(8.0);
+    let [r, g, b] = ed.rgb();
+    let (prev, _) = ui.allocate_exact_size(vec2(SETTINGS_W, 56.0), Sense::hover());
+    ui.painter().rect_filled(Rect::from_min_size(prev.min, vec2(120.0, 48.0)), 8.0, Color32::from_rgb(r, g, b));
+    ui.painter().text(
+        pos2(prev.min.x + 136.0, prev.min.y + 24.0),
+        Align2::LEFT_CENTER,
+        format!("#{r:02x}{g:02x}{b:02x}"),
+        FontId::monospace(16.0),
+        v.strong_text_color(),
+    );
+    let [h, s, val] = ed.hsv;
+    let hsv = |h: f32, s: f32, v: f32| -> Color32 { egui::ecolor::Hsva::new(h, s, v, 1.0).into() };
+    let bars: [(&str, Box<dyn Fn(f32) -> Color32>); 3] = [
+        (tr("Hue"), Box::new(move |t| hsv(t, 1.0, 1.0))),
+        (tr("Saturation"), Box::new(move |t| hsv(h, t, val.max(0.2)))),
+        (tr("Brightness"), Box::new(move |t| hsv(h, s, t))),
+    ];
+    for (i, (label, color_at)) in bars.iter().enumerate() {
+        let (rect, rr) = settings_row(ui, 54.0, ed.row == i, ("bar", i));
+        if rr.clicked() {
+            ev = Some(SettingsEvent::EditorRow(i));
+        }
+        ui.painter().text(rect.min + vec2(14.0, 14.0), Align2::LEFT_CENTER, *label, FontId::proportional(14.0), v.text_color());
+        let bar = Rect::from_min_max(pos2(rect.min.x + 14.0, rect.min.y + 28.0), pos2(rect.max.x - 14.0, rect.max.y - 8.0));
+        let steps = 48;
+        for k in 0..steps {
+            let t0 = k as f32 / steps as f32;
+            let seg = Rect::from_min_max(pos2(bar.min.x + bar.width() * t0, bar.min.y), pos2(bar.min.x + bar.width() * (k + 1) as f32 / steps as f32 + 0.5, bar.max.y));
+            ui.painter().rect_filled(seg, 0.0, color_at(t0));
+        }
+        let x = bar.min.x + bar.width() * ed.hsv[i];
+        ui.painter().rect_stroke(Rect::from_center_size(pos2(x, bar.center().y), vec2(6.0, bar.height() + 6.0)), 2.0, Stroke::new(2.0, Color32::WHITE), StrokeKind::Middle);
+        let drag = ui.interact(bar.expand(4.0), ui.id().with(("bar-drag", i)), Sense::click_and_drag());
+        if drag.dragged() || drag.clicked() {
+            if let Some(p) = drag.interact_pointer_pos() {
+                ev = Some(SettingsEvent::EditorSet(i, (p.x - bar.min.x) / bar.width()));
+            }
+        }
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        for (i, label) in [(3, tr("Save")), (4, tr("Cancel"))] {
+            let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
+            let focused = ed.row == i;
+            let fill = if focused { v.selection.bg_fill.gamma_multiply(0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+            ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), v.text_color());
+            if r.clicked() {
+                ev = Some(if i == 3 { SettingsEvent::Save } else { SettingsEvent::CancelEditor });
+            }
+        }
+    });
+    ev
 }
