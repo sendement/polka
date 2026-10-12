@@ -20,6 +20,10 @@ const LIST_ICON: f32 = 22.0;
 const GRID_W: f32 = 108.0;
 const GRID_H: f32 = 108.0;
 const GRID_ICON: f32 = 56.0;
+/// Theme size asked for small icons. Many themes (Breeze, Win11) draw their
+/// 16–24px sizes as monochrome glyphs; 32 gets the full-colour ones and is
+/// sharper on HiDPI anyway.
+const SMALL_ICON_LOOKUP: u16 = 32;
 const SIDE_W: f32 = 210.0;
 const SIDE_W_COLLAPSED: f32 = 52.0;
 
@@ -382,7 +386,7 @@ impl App {
                         let here = it.loc == cur_loc;
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
                         let icon_rect = Rect::from_min_size(rect.min + vec2(8.0, 6.0), vec2(20.0, 20.0));
-                        if let Some(u) = self.icons.named(it.icon, 24) {
+                        if let Some(u) = self.icons.named(it.icon, SMALL_ICON_LOOKUP) {
                             egui::Image::new(u).paint_at(ui, icon_rect);
                         }
                         if !collapsed {
@@ -503,15 +507,17 @@ impl App {
         let mut run: Option<Cmd> = None;
         let mut osk_key: Option<OskKey> = None;
         let mut dismiss = false;
+        let (overlay, icons) = (&mut self.overlay, &mut self.icons);
         egui::Area::new("overlay".into())
             .order(Order::Foreground)
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match self.overlay.as_mut() {
+                egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => run = draw_menu(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
+                    Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     None => {}
                 });
             });
@@ -612,7 +618,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
                     _ => None,
                 };
-                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), if grid { 64 } else { 24 }) };
+                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), if grid { 64 } else { SMALL_ICON_LOOKUP }) };
                 let text_c = if e.hidden() { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
@@ -832,6 +838,91 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
     ui.add_space(4.0);
     ui.label(egui::RichText::new("L1/R1: ◀ ▶").small().weak());
     pressed
+}
+
+/// Sample icons for the theme preview: (caption, candidates).
+const THEME_SAMPLES: [(&str, &[&str]); 16] = [
+    ("Folder", &["folder", "inode-directory"]),
+    ("Home", &["user-home", "folder-home"]),
+    ("Downloads", &["folder-download", "folder-downloads"]),
+    ("Documents", &["folder-documents"]),
+    ("Pictures", &["folder-pictures"]),
+    ("Music", &["folder-music"]),
+    ("Videos", &["folder-videos"]),
+    ("Trash", &["user-trash"]),
+    ("Text", &["text-x-generic"]),
+    ("Image", &["image-png", "image-x-generic"]),
+    ("Audio", &["audio-x-generic", "audio-mpeg"]),
+    ("Video", &["video-x-generic", "video-mp4"]),
+    ("Archive", &["application-x-compressed-tar", "package-x-generic"]),
+    ("PDF", &["application-pdf"]),
+    ("Program", &["application-x-ms-dos-executable", "application-x-executable"]),
+    ("Disk", &["drive-harddisk"]),
+];
+
+fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) -> Option<Cmd> {
+    let mut run = None;
+    ui.label(egui::RichText::new(tr("Icon theme")).strong().size(18.0));
+    ui.add_space(8.0);
+    ui.horizontal_top(|ui| {
+        // Theme list.
+        ui.vertical(|ui| {
+            ui.set_width(250.0);
+            let scroll_to = t.take_scroll();
+            egui::ScrollArea::vertical().id_salt("themes").max_height(380.0).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (i, (id, label)) in t.items.iter().enumerate() {
+                    let (rect, r) = ui.allocate_exact_size(vec2(240.0, 34.0), Sense::click());
+                    if r.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                        t.cursor = i;
+                    }
+                    let cur = i == t.cursor;
+                    let v = ui.visuals();
+                    if cur {
+                        ui.painter().rect_filled(rect, 6.0, v.selection.bg_fill.gamma_multiply(0.55));
+                        ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
+                    }
+                    // Each row shows its own folder icon.
+                    let ir = Rect::from_min_size(rect.min + vec2(8.0, 5.0), Vec2::splat(24.0));
+                    if let Some(u) = icons.named_in(&t.preview[i], &["folder", "inode-directory"], SMALL_ICON_LOOKUP) {
+                        egui::Image::new(u).paint_at(ui, ir);
+                    }
+                    let g = elided(ui, label, FontId::proportional(15.0), v.text_color(), rect.width() - 48.0, 1);
+                    ui.painter().galley(pos2(rect.min.x + 40.0, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
+                    if scroll_to == Some(i) {
+                        r.scroll_to_me(None);
+                    }
+                    if r.clicked() {
+                        run = Some(Cmd::SetIconTheme(id.clone()));
+                    }
+                }
+            });
+        });
+        ui.separator();
+        // Preview of the highlighted theme.
+        ui.vertical(|ui| {
+            let theme = t.preview[t.cursor].clone();
+            ui.label(egui::RichText::new(&t.items[t.cursor].1).weak());
+            ui.add_space(4.0);
+            egui::Grid::new("theme-preview").spacing([6.0, 6.0]).show(ui, |ui| {
+                for (i, (caption, names)) in THEME_SAMPLES.iter().enumerate() {
+                    let (rect, _) = ui.allocate_exact_size(vec2(78.0, 78.0), Sense::hover());
+                    let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 28.0), Vec2::splat(48.0));
+                    if let Some(u) = icons.named_in(&theme, names, 48) {
+                        egui::Image::new(u).paint_at(ui, ir);
+                    }
+                    let c = ui.visuals().weak_text_color();
+                    let g = elided_centered(ui, tr(caption), FontId::proportional(11.0), c, 76.0, 1);
+                    ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, c);
+                    if i % 4 == 3 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+    });
+    ui.add_space(6.0);
+    run
 }
 
 fn draw_props(ui: &mut Ui, p: &Props) -> bool {

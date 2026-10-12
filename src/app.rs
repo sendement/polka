@@ -322,6 +322,8 @@ pub enum Cmd {
     ToggleDual,
     ToggleHidden,
     ToggleThumbnails,
+    IconThemes,
+    SetIconTheme(Option<String>),
     ToggleSidebar,
     SetView(ViewMode),
     Sort(SortKey),
@@ -501,6 +503,27 @@ pub enum Overlay {
     Osk(Osk),
     Props(Props),
     Help,
+    Themes(ThemePicker),
+}
+
+/// Icon theme chooser. Row 0 is "system default" (id None).
+pub struct ThemePicker {
+    pub items: Vec<(Option<String>, String)>,
+    pub cursor: usize,
+    /// Theme the preview shows for each row (system default resolved).
+    pub preview: Vec<String>,
+    /// Cursor the list was last scrolled to.
+    pub scrolled: Option<usize>,
+}
+
+impl ThemePicker {
+    /// The cursor row, once per cursor change, for scrolling it into view.
+    pub fn take_scroll(&mut self) -> Option<usize> {
+        (self.scrolled != Some(self.cursor)).then(|| {
+            self.scrolled = Some(self.cursor);
+            self.cursor
+        })
+    }
 }
 
 // ---------------------------------------------------------------- sidebar
@@ -934,6 +957,19 @@ impl App {
                 Action::Menu | Action::RightTrigger => self.osk_submit(),
                 _ => {}
             },
+            Overlay::Themes(t) => match a {
+                Action::Up | Action::FastUp => t.cursor = t.cursor.saturating_sub(1),
+                Action::Down | Action::FastDown => t.cursor = (t.cursor + 1).min(t.items.len().saturating_sub(1)),
+                Action::LeftTrigger => t.cursor = t.cursor.saturating_sub(8),
+                Action::RightTrigger => t.cursor = (t.cursor + 8).min(t.items.len().saturating_sub(1)),
+                Action::Accept | Action::TouchClick => {
+                    let id = t.items[t.cursor].0.clone();
+                    self.overlay = None;
+                    self.run(Cmd::SetIconTheme(id));
+                }
+                Action::Back | Action::Menu => self.overlay = None,
+                _ => {}
+            },
             Overlay::Props(_) | Overlay::Help => {
                 if matches!(a, Action::Back | Action::Accept | Action::RightStick | Action::Menu) {
                     self.overlay = None;
@@ -1199,6 +1235,7 @@ impl App {
             check(tr("Sidebar"), Cmd::ToggleSidebar, !c.sidebar_collapsed),
             check(tr("Show hidden files"), Cmd::ToggleHidden, c.show_hidden),
             check(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
+            item(tr("Icon theme…"), Cmd::IconThemes),
             check(tr("List view"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
             check(tr("Grid view"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
             check(tr("Sort by name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
@@ -1441,6 +1478,23 @@ impl App {
                 self.cfg.show_hidden = !self.cfg.show_hidden;
                 self.cfg.save();
                 self.reload_all();
+            }
+            Cmd::IconThemes => {
+                let system = crate::icons::detect_theme().unwrap_or_else(|| "hicolor".into());
+                let mut items = vec![(None, format!("{} ({system})", tr("System")))];
+                let mut preview = vec![system];
+                for t in crate::icons::installed_themes() {
+                    preview.push(t.id.clone());
+                    items.push((Some(t.id), t.name));
+                }
+                let cursor = items.iter().position(|(id, _)| *id == self.cfg.icon_theme).unwrap_or(0);
+                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None }));
+            }
+            Cmd::SetIconTheme(id) => {
+                self.icons.set_theme(id.clone());
+                self.cfg.icon_theme = id;
+                self.cfg.save();
+                self.refresh_sidebar();
             }
             Cmd::ToggleThumbnails => {
                 self.cfg.thumbnails = !self.cfg.thumbnails;

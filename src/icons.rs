@@ -55,21 +55,32 @@ impl Icons {
 
     /// First icon from `candidates` that the theme has.
     pub fn named(&mut self, candidates: &[&str], size: u16) -> Option<String> {
-        for c in candidates {
-            if let Some(u) = self.lookup(c, size) {
-                return Some(u);
-            }
-        }
-        None
+        let theme = self.theme.clone();
+        self.named_in(&theme, candidates, size)
+    }
+
+    /// Like `named`, but from any installed theme (theme picker preview).
+    pub fn named_in(&mut self, theme: &str, candidates: &[&str], size: u16) -> Option<String> {
+        candidates.iter().find_map(|c| self.lookup_in(theme, c, size))
+    }
+
+    /// Switch themes; None follows the desktop's setting.
+    pub fn set_theme(&mut self, theme: Option<String>) {
+        self.theme = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
     }
 
     fn lookup(&mut self, name: &str, size: u16) -> Option<String> {
-        let key = format!("{name}@{size}");
+        let theme = self.theme.clone();
+        self.lookup_in(&theme, name, size)
+    }
+
+    fn lookup_in(&mut self, theme: &str, name: &str, size: u16) -> Option<String> {
+        let key = format!("{theme}/{name}@{size}");
         if let Some(v) = self.names.get(&key) {
             return v.clone();
         }
         let found = freedesktop_icons::lookup(name)
-            .with_theme(&self.theme)
+            .with_theme(theme)
             .with_size(size)
             .with_cache()
             .find()
@@ -187,8 +198,67 @@ fn special_folder_icon(p: &Path) -> Option<&'static str> {
     pairs.into_iter().find(|(d, _)| d.as_deref() == Some(p)).map(|(_, i)| i)
 }
 
+pub struct ThemeInfo {
+    /// Directory name, which is what lookups use.
+    pub id: String,
+    pub name: String,
+}
+
+/// Installed icon themes (not cursor-only ones), user dirs first.
+pub fn installed_themes() -> Vec<ThemeInfo> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(d) = dirs::data_dir() {
+        roots.push(d.join("icons"));
+    }
+    if let Some(h) = dirs::home_dir() {
+        roots.push(h.join(".icons"));
+    }
+    let sys = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    roots.extend(sys.split(':').filter(|s| !s.is_empty()).map(|s| Path::new(s).join("icons")));
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for root in roots {
+        let Ok(rd) = std::fs::read_dir(&root) else { continue };
+        for e in rd.flatten() {
+            let id = e.file_name().to_string_lossy().into_owned();
+            if id == "hicolor" || id == "default" || seen.contains(&id) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(e.path().join("index.theme")) else { continue };
+            let mut name = None;
+            let mut has_dirs = false;
+            let mut hidden = false;
+            let mut in_main = false;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_main = line == "[Icon Theme]";
+                    continue;
+                }
+                let Some((k, v)) = line.split_once('=').filter(|_| in_main) else { continue };
+                match k.trim() {
+                    "Name" => name = Some(v.trim().to_string()),
+                    "Directories" => has_dirs = v.split(',').any(|d| !d.trim().is_empty()),
+                    "Hidden" => hidden = v.trim() == "true",
+                    _ => {}
+                }
+            }
+            // Cursor themes have no icon directories. GNOME marks Adwaita
+            // hidden, but it's a complete theme people do pick.
+            if !has_dirs || (hidden && id != "Adwaita") {
+                continue;
+            }
+            seen.insert(id.clone());
+            out.push(ThemeInfo { name: name.filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone()), id });
+        }
+    }
+    out.sort_by_key(|t| t.name.to_lowercase());
+    out
+}
+
 /// Icon theme from gsettings, then GTK/KDE config files.
-fn detect_theme() -> Option<String> {
+pub fn detect_theme() -> Option<String> {
     if let Ok(out) = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "icon-theme"])
         .output()

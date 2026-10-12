@@ -209,4 +209,26 @@ fn features(h: &mut Harness<'static, App>) {
     shot(h, "13-search");
     let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
     assert!(names.contains(&"folder/note.txt".to_string()), "{names:?}");
+
+    // Icon theme picker: browse, then apply one.
+    h.state_mut().run(Cmd::IconThemes);
+    let target = match &h.state().overlay {
+        Some(crate::app::Overlay::Themes(t)) => t.items.iter().position(|(id, _)| id.as_deref() == Some("breeze")),
+        _ => panic!("no theme picker"),
+    };
+    if let Some(Some(i)) = target.map(Some) {
+        if let Some(crate::app::Overlay::Themes(t)) = h.state_mut().overlay.as_mut() {
+            t.cursor = i;
+        }
+    }
+    settle(h);
+    settle(h);
+    shot(h, "14-themes");
+    press(h, &[Action::Accept]);
+    assert!(h.state().overlay.is_none());
+    if target.is_some() {
+        assert_eq!(h.state().cfg.icon_theme.as_deref(), Some("breeze"));
+    }
+    settle(h);
+    shot(h, "15-theme-applied");
 }
