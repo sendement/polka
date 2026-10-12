@@ -30,6 +30,7 @@ pub struct Config {
     pub view: ViewMode,
     pub sort: SortKey,
     pub dual: bool,
+    pub thumbnails: bool,
     /// Overrides the detected icon theme.
     pub icon_theme: Option<String>,
     /// UI zoom; bump it up for couch use.
@@ -45,6 +46,7 @@ impl Default for Config {
             view: ViewMode::List,
             sort: SortKey::Name,
             dual: false,
+            thumbnails: true,
             icon_theme: None,
             zoom: 1.0,
         }

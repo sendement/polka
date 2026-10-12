@@ -7,6 +7,7 @@ mod icons;
 mod input;
 mod launch;
 mod ops;
+mod thumbs;
 mod vfs;
 mod view;
 #[cfg(test)]

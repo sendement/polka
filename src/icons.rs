@@ -16,16 +16,40 @@ pub struct Icons {
     files: Arc<Mutex<HashMap<PathBuf, Option<String>>>>,
     pending: Arc<Mutex<HashSet<PathBuf>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    thumbs: crate::thumbs::Thumbs,
+    /// Thumbnail textures handed to egui, to free them in bulk.
+    thumb_uris: HashSet<String>,
 }
 
 impl Icons {
     pub fn new(theme: Option<String>, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let w = wake.clone();
         Self {
+            thumbs: crate::thumbs::Thumbs::new(move || w()),
+            thumb_uris: HashSet::new(),
             theme: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
             names: HashMap::new(),
             files: Default::default(),
             pending: Default::default(),
-            wake: Arc::new(wake),
+            wake,
+        }
+    }
+
+    /// Thumbnail (uri, width/height) for a real file, if one is ready.
+    pub fn thumb(&mut self, path: &Path, mtime: i64) -> Option<(String, f32)> {
+        let t = self.thumbs.get(path, mtime)?;
+        self.thumb_uris.insert(t.0.clone());
+        Some(t)
+    }
+
+    /// Drop thumbnail textures once many have piled up (big photo folders);
+    /// the visible ones simply load again from the disk cache.
+    pub fn trim(&mut self, ctx: &egui::Context) {
+        if self.thumb_uris.len() > 1500 {
+            for u in self.thumb_uris.drain() {
+                ctx.forget_image(&u);
+            }
         }
     }
 

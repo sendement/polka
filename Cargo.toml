@@ -9,7 +9,7 @@ description = "Gamepad-first dual-pane file manager"
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["svg", "image", "file"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp", "gif", "webp", "tiff"] }
 gilrs = "0.11"
 compress-tools = "0.16"
 freedesktop-icons = "0.4"
@@ -27,6 +27,8 @@ dirs = "7"
 mime_guess = "2"
 crossbeam-channel = "0.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+md5 = "0.8"
+png = "0.17"
 
 [profile.release]
 lto = "thin"

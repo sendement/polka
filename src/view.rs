@@ -37,6 +37,7 @@ impl eframe::App for App {
         }
         self.keyboard(&ctx);
         self.tick();
+        self.icons.trim(&ctx);
 
         self.draw_bottom(ui);
         self.draw_top(ui);
@@ -565,7 +566,6 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     pane.cols = cols;
     let row_h = if grid { GRID_H } else { LIST_ROW };
     let rows = pane.entries.len().div_ceil(cols);
-    let local_dir = pane.loc.local_path().map(|p| p.to_path_buf());
 
     if !grid {
         // Column header.
@@ -606,22 +606,22 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let sel = pane.selected.contains(&e.name);
                 let is_cursor = i == pane.cursor;
                 paint_entry_bg(ui, rect, is_cursor, focused, sel, r.hovered());
-                let path = local_dir.as_ref().map(|d| d.join(&e.name));
+                let path = pane.loc.entry_path(&e.name);
                 let icon_size = if grid { GRID_ICON } else { LIST_ICON };
-                let icon = icons.for_entry(e, path.as_deref(), if grid { 64 } else { 24 });
+                let thumb = match (&path, e.mtime) {
+                    (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
+                    _ => None,
+                };
+                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), if grid { 64 } else { 24 }) };
                 let text_c = if e.hidden() { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
-                    if let Some(u) = icon {
-                        egui::Image::new(u).paint_at(ui, ir);
-                    }
+                    paint_icon(ui, ir, icon, thumb);
                     let g = elided_centered(ui, &e.name, FontId::proportional(13.0), text_c, rect.width() - 6.0, 2);
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
-                    if let Some(u) = icon {
-                        egui::Image::new(u).paint_at(ui, ir);
-                    }
+                    paint_icon(ui, ir, icon, thumb);
                     let name_w = rect.width() - 40.0 - 260.0;
                     let g = elided(ui, &e.name, FontId::proportional(14.0), text_c, name_w.max(60.0), 1);
                     ui.painter().galley(pos2(rect.min.x + 40.0, rect.center().y - g.size().y / 2.0), g, text_c);
@@ -647,6 +647,21 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     pane.view_h = out.inner_rect.height();
     pane.page_rows = ((pane.view_h / row_h) as usize).saturating_sub(1).max(1);
     events
+}
+
+/// Theme icon, or a thumbnail fitted into the square keeping its aspect.
+fn paint_icon(ui: &Ui, rect: Rect, icon: Option<String>, thumb: Option<(String, f32)>) {
+    if let Some((uri, aspect)) = thumb {
+        let size = if aspect >= 1.0 {
+            vec2(rect.width(), rect.width() / aspect)
+        } else {
+            vec2(rect.height() * aspect, rect.height())
+        };
+        let r = Rect::from_center_size(rect.center(), size);
+        egui::Image::new(uri).corner_radius(3).paint_at(ui, r);
+    } else if let Some(u) = icon {
+        egui::Image::new(u).paint_at(ui, rect);
+    }
 }
 
 fn paint_entry_bg(ui: &Ui, rect: Rect, cursor: bool, focused: bool, selected: bool, hovered: bool) {

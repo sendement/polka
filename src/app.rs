@@ -321,6 +321,7 @@ pub enum Cmd {
     NewFolder,
     ToggleDual,
     ToggleHidden,
+    ToggleThumbnails,
     ToggleSidebar,
     SetView(ViewMode),
     Sort(SortKey),
@@ -1179,6 +1180,7 @@ impl App {
             check(tr("Dual pane"), Cmd::ToggleDual, c.dual),
             check(tr("Sidebar"), Cmd::ToggleSidebar, !c.sidebar_collapsed),
             check(tr("Show hidden files"), Cmd::ToggleHidden, c.show_hidden),
+            check(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
             check(tr("List view"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
             check(tr("Grid view"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
             check(tr("Sort by name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
@@ -1421,6 +1423,10 @@ impl App {
                 self.cfg.show_hidden = !self.cfg.show_hidden;
                 self.cfg.save();
                 self.reload_all();
+            }
+            Cmd::ToggleThumbnails => {
+                self.cfg.thumbnails = !self.cfg.thumbnails;
+                self.cfg.save();
             }
             Cmd::ToggleSidebar => {
                 self.cfg.sidebar_collapsed = !self.cfg.sidebar_collapsed;
