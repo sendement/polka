@@ -111,6 +111,9 @@ const RU: &[(&str, &str)] = &[
     ("Encrypted archives can't be modified", "Зашифрованные архивы нельзя изменять"),
     ("Thumbnails", "Миниатюры"),
     ("Nothing found", "Ничего не найдено"),
+    ("Touchpad: swipe to move, click for places", "Тачпад: свайп — движение, клик — места"),
+    ("Filter / search", "Фильтр / поиск"),
+    ("The touchpad needs the udev rule from the Polka package (see README).", "Для тачпада нужно udev-правило из пакета Polka (см. README)."),
 ];
 
 fn table() -> &'static HashMap<&'static str, &'static str> {

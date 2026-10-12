@@ -857,7 +857,7 @@ fn draw_props(ui: &mut Ui, p: &Props) -> bool {
 fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
     ui.label(egui::RichText::new(tr("Controls")).strong().size(18.0));
     ui.add_space(8.0);
-    let rows: [(Action, &str, &str); 14] = [
+    let rows: [(Action, &str, &str); 16] = [
         (Action::Up, "", "←↑→↓"),
         (Action::Accept, tr("Open"), "Enter"),
         (Action::Back, tr("Back"), "Backspace / Esc"),
@@ -872,6 +872,8 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
         (Action::HistoryBack, tr("History"), "Alt+← →"),
         (Action::FastDown, tr("Fast scroll"), ""),
         (Action::Home, tr("Rename"), "F2"),
+        (Action::TouchClick, tr("Touchpad: swipe to move, click for places"), ""),
+        (Action::Menu, tr("Filter / search"), "Ctrl+F / Ctrl+Shift+F"),
     ];
     egui::Grid::new("help").num_columns(3).spacing([18.0, 8.0]).show(ui, |ui| {
         ui.label(egui::RichText::new(tr("Gamepad")).weak());
@@ -897,6 +899,10 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
             ui.end_row();
         }
     });
+    if crate::touchpad::TOUCHPAD_STATUS.load(std::sync::atomic::Ordering::Relaxed) == crate::touchpad::STATUS_DENIED {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(tr("The touchpad needs the udev rule from the Polka package (see README).")).small().color(ui.visuals().warn_fg_color));
+    }
     ui.add_space(8.0);
     ui.button(tr("Close")).clicked()
 }
@@ -914,6 +920,7 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
         Action::RightTrigger => Some(shoulder("R2", "RT")),
         Action::LeftStick => Some(shoulder("L3", "LS")),
         Action::RightStick => Some(shoulder("R3", "RS")),
+        Action::TouchClick => Some("TP"),
         Action::HistoryBack | Action::HistoryForward => Some("R ↔"),
         Action::FastUp | Action::FastDown => Some("R ↕"),
         _ => None,

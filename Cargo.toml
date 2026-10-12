@@ -29,6 +29,7 @@ crossbeam-channel = "0.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 md5 = "0.8"
 png = "0.17"
+evdev = "0.13"
 
 [profile.release]
 lto = "thin"

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Sender;
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -44,6 +44,8 @@ pub enum Action {
     FastDown,
     Home,
     End,
+    /// DualSense / DS4 touchpad click
+    TouchClick,
 }
 
 impl Action {
@@ -112,12 +114,10 @@ struct PadThread {
     owner: Option<(GamepadId, Instant)>,
 }
 
-pub fn spawn_gamepad(wake: impl Fn() + Send + 'static) -> Receiver<Input> {
-    let (tx, rx) = crossbeam_channel::unbounded();
+/// Start reading gamepads into `tx`.
+pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
     if std::env::var_os("POLKA_NO_GAMEPAD").is_some() {
-        // Keep the sender alive so the channel never reports disconnection.
-        std::mem::forget(tx);
-        return rx;
+        return;
     }
     std::thread::Builder::new()
         .name("polka-gamepad".into())
@@ -160,7 +160,6 @@ pub fn spawn_gamepad(wake: impl Fn() + Send + 'static) -> Receiver<Input> {
             }
         })
         .expect("spawn gamepad thread");
-    rx
 }
 
 fn map_button(b: Button) -> Option<Action> {

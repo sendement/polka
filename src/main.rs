@@ -8,6 +8,7 @@ mod input;
 mod launch;
 mod ops;
 mod thumbs;
+mod touchpad;
 mod vfs;
 mod view;
 #[cfg(test)]

@@ -557,8 +557,16 @@ pub struct App {
 impl App {
     pub fn new(ctx: egui::Context, start: Option<PathBuf>) -> Self {
         let cfg = Config::load();
-        let wake_ctx = ctx.clone();
-        let pad_rx = crate::input::spawn_gamepad(move || wake_ctx.request_repaint());
+        let (pad_tx, pad_rx) = crossbeam_channel::unbounded();
+        if std::env::var_os("POLKA_NO_GAMEPAD").is_none() {
+            let c = ctx.clone();
+            crate::input::spawn_gamepad(pad_tx.clone(), move || c.request_repaint());
+            let c = ctx.clone();
+            crate::touchpad::spawn(pad_tx, std::sync::Arc::new(move || c.request_repaint()));
+        } else {
+            // Keep the sender alive so the channel never reports disconnection.
+            std::mem::forget(pad_tx);
+        }
         let icon_ctx = ctx.clone();
         let icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
@@ -816,6 +824,7 @@ impl App {
             Action::RightStick => self.run(Cmd::Properties),
             Action::HistoryBack => self.pane_mut().history(false, &cfg),
             Action::HistoryForward => self.pane_mut().history(true, &cfg),
+            Action::TouchClick => self.focus_sidebar(),
         }
     }
 
@@ -823,12 +832,16 @@ impl App {
         if self.cfg.dual && self.cur_tab().active == 1 {
             self.tabs[self.tab].active = 0;
         } else {
-            self.focus = Focus::Sidebar;
-            // Land on the sidebar entry for the current folder if there is one.
-            let loc = self.pane().loc.clone();
-            if let Some(i) = self.side_items.iter().position(|s| s.loc == loc) {
-                self.side_cursor = i;
-            }
+            self.focus_sidebar();
+        }
+    }
+
+    fn focus_sidebar(&mut self) {
+        self.focus = Focus::Sidebar;
+        // Land on the sidebar entry for the current folder if there is one.
+        let loc = self.pane().loc.clone();
+        if let Some(i) = self.side_items.iter().position(|s| s.loc == loc) {
+            self.side_cursor = i;
         }
     }
 
@@ -859,7 +872,7 @@ impl App {
             Action::Down | Action::FastDown => self.side_cursor = (self.side_cursor + 1).min(n.saturating_sub(1)),
             Action::Home => self.side_cursor = 0,
             Action::End => self.side_cursor = n.saturating_sub(1),
-            Action::Right | Action::Back => self.focus = Focus::Panes,
+            Action::Right | Action::Back | Action::TouchClick => self.focus = Focus::Panes,
             Action::Accept => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
                     let cfg = self.cfg.clone();
@@ -890,7 +903,7 @@ impl App {
             Overlay::Menu(m) => match a {
                 Action::Up | Action::FastUp => m.step(-1),
                 Action::Down | Action::FastDown => m.step(1),
-                Action::Accept => {
+                Action::Accept | Action::TouchClick => {
                     let cmd = m.items.get(m.cursor).filter(|i| i.enabled).map(|i| i.cmd.clone());
                     self.overlay = None;
                     if let Some(c) = cmd {
