@@ -1,0 +1,126 @@
+//! Tiny i18n: English source strings, translated through an embedded table.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+
+const RU: &[(&str, &str)] = &[
+    ("Places", "Места"),
+    ("Pinned", "Закреплённые"),
+    ("Devices", "Устройства"),
+    ("Home", "Домашняя"),
+    ("Desktop", "Рабочий стол"),
+    ("Documents", "Документы"),
+    ("Downloads", "Загрузки"),
+    ("Music", "Музыка"),
+    ("Pictures", "Изображения"),
+    ("Videos", "Видео"),
+    ("File system", "Файловая система"),
+    ("Trash", "Корзина"),
+    ("Name", "Имя"),
+    ("Size", "Размер"),
+    ("Modified", "Изменён"),
+    ("Open", "Открыть"),
+    ("Open as folder", "Открыть как папку"),
+    ("Copy", "Копировать"),
+    ("Cut", "Вырезать"),
+    ("Paste", "Вставить"),
+    ("Copy to other pane", "Копировать в другую панель"),
+    ("Move to other pane", "Переместить в другую панель"),
+    ("Rename", "Переименовать"),
+    ("Move to trash", "В корзину"),
+    ("Delete permanently", "Удалить навсегда"),
+    ("Compress…", "Сжать…"),
+    ("Extract here", "Распаковать сюда"),
+    ("Extract to other pane", "Распаковать в другую панель"),
+    ("Pin to sidebar", "Закрепить на панели"),
+    ("Unpin from sidebar", "Открепить от панели"),
+    ("Properties", "Свойства"),
+    ("New tab", "Новая вкладка"),
+    ("Close tab", "Закрыть вкладку"),
+    ("New folder", "Новая папка"),
+    ("Dual pane", "Две панели"),
+    ("Show hidden files", "Скрытые файлы"),
+    ("Sidebar", "Боковая панель"),
+    ("Grid view", "Сетка"),
+    ("List view", "Список"),
+    ("Sort by name", "Сортировать по имени"),
+    ("Sort by size", "Сортировать по размеру"),
+    ("Sort by date", "Сортировать по дате"),
+    ("Go to path…", "Перейти по пути…"),
+    ("Select all", "Выделить всё"),
+    ("Clear selection", "Снять выделение"),
+    ("Controls", "Управление"),
+    ("Quit", "Выход"),
+    ("Cancel", "Отмена"),
+    ("OK", "ОК"),
+    ("Delete", "Удалить"),
+    ("Archive format", "Формат архива"),
+    ("Archive name", "Имя архива"),
+    ("Folder name", "Имя папки"),
+    ("New name", "Новое имя"),
+    ("Path", "Путь"),
+    ("items", "эл."),
+    ("selected", "выделено"),
+    ("Folder", "Папка"),
+    ("File", "Файл"),
+    ("Link", "Ссылка"),
+    ("Type", "Тип"),
+    ("Location", "Расположение"),
+    ("Permissions", "Права"),
+    ("Contents", "Содержимое"),
+    ("Archives are read-only for now", "Архивы пока только для чтения"),
+    ("Nothing to paste", "Нечего вставлять"),
+    ("Copying", "Копирование"),
+    ("Moving", "Перемещение"),
+    ("Deleting", "Удаление"),
+    ("Compressing", "Сжатие"),
+    ("Extracting", "Распаковка"),
+    ("Done", "Готово"),
+    ("Failed", "Ошибка"),
+    ("Empty folder", "Пустая папка"),
+    ("Delete %n item(s) permanently?", "Удалить навсегда (%n шт.)?"),
+    ("Move %n item(s) to trash?", "Переместить в корзину (%n шт.)?"),
+    ("Space", "Пробел"),
+    ("Backspace", "Стереть"),
+    ("Layout", "Раскладка"),
+    ("Shift", "Регистр"),
+    ("Move", "Двигать"),
+    ("Back", "Назад"),
+    ("Select", "Выделить"),
+    ("Actions", "Действия"),
+    ("Menu", "Меню"),
+    ("Tabs", "Вкладки"),
+    ("Panes / page", "Панели / страница"),
+    ("History", "История"),
+    ("Fast scroll", "Быстрая прокрутка"),
+    ("Preview", "Свойства"),
+    ("Gamepad", "Геймпад"),
+    ("Keyboard", "Клавиатура"),
+    ("Close", "Закрыть"),
+];
+
+fn table() -> &'static HashMap<&'static str, &'static str> {
+    TABLE.get_or_init(|| {
+        let lang = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+            .iter()
+            .filter_map(|k| std::env::var(k).ok())
+            .find(|v| !v.is_empty())
+            .unwrap_or_default();
+        if lang.starts_with("ru") {
+            RU.iter().copied().collect()
+        } else {
+            HashMap::new()
+        }
+    })
+}
+
+pub fn tr(s: &'static str) -> &'static str {
+    table().get(s).copied().unwrap_or(s)
+}
+
+/// `tr` with `%n` replaced by a number.
+pub fn trn(s: &'static str, n: usize) -> String {
+    tr(s).replace("%n", &n.to_string())
+}
