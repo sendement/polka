@@ -20,8 +20,17 @@ const TOOL_BTN: f32 = 38.0;
 const TOOL_ICON: f32 = 24.0;
 /// Tab height; L1/R1 glyphs next to the tabs match it.
 const TAB_H: f32 = 30.0;
-/// Sidebar labels: the address bar's size.
-const SIDE_FONT: f32 = 16.0;
+/// Label sizes follow icon sizes; at the default icon sizes these give
+/// 16 (sidebar, like the address bar), 14 (list) and 13 (grid).
+fn side_font(icon: f32) -> f32 {
+    (10.0 + icon * 0.3).clamp(12.0, 28.0)
+}
+fn list_font(icon: f32) -> f32 {
+    (7.4 + icon * 0.3).clamp(12.0, 26.0)
+}
+fn grid_font(icon: f32) -> f32 {
+    (8.5 + icon * 0.08).clamp(11.0, 22.0)
+}
 /// Theme size asked for small icons. Many themes (Breeze, Win11) draw their
 /// 16–24px sizes as monochrome glyphs; 32 gets the full-colour ones and is
 /// sharper on HiDPI anyway.
@@ -63,6 +72,9 @@ impl App {
     // ------------------------------------------------------------ keyboard
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        if self.range.as_ref().is_some_and(|r| r.keyboard) && !ctx.input(|i| i.modifiers.shift) {
+            self.range = None;
+        }
         let events = ctx.input(|i| i.events.clone());
         let osk = matches!(self.overlay, Some(Overlay::Osk(_)));
         for ev in events {
@@ -138,6 +150,11 @@ impl App {
                 _ => {}
             }
             return;
+        }
+        // Shift + movement selects a range, like holding □.
+        let moving = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End | Key::PageUp | Key::PageDown);
+        if m.shift && moving && self.overlay.is_none() && self.focus == Focus::Panes && self.range.is_none() {
+            self.begin_range(true);
         }
         let a = match key {
             Key::ArrowUp => Action::Up,
@@ -496,6 +513,7 @@ impl App {
         let mut clicked = None;
         let mut actions = None;
         let side_icon = self.cfg.side_icon;
+        let side_font = side_font(side_icon);
         egui::Panel::left("sidebar")
             .resizable(false)
             .exact_size(if collapsed { side_icon + 32.0 } else { SIDE_W + (side_icon - 20.0).max(0.0) * 3.0 })
@@ -513,19 +531,23 @@ impl App {
                                 ui.label(egui::RichText::new(tr(section)).size(13.0).weak());
                             }
                         }
-                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(SIDE_FONT + 18.0)), Sense::click());
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
                         let is_cursor = focused && i == self.side_cursor;
                         let here = it.loc == cur_loc;
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
                         let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon));
                         let px = lookup_px(ui, side_icon);
-                        let custom = it.custom_icon.as_deref().and_then(|c| self.icons.named(&[c], px));
+                        // Custom icons are theme names or image files we stored.
+                        let custom = it.custom_icon.as_deref().and_then(|c| {
+                            let p = std::path::Path::new(c);
+                            if p.is_absolute() { p.exists().then(|| crate::icons::uri(p)) } else { self.icons.named(&[c], px) }
+                        });
                         if let Some(u) = custom.or_else(|| self.icons.named(it.icon, px)) {
                             egui::Image::new(u).paint_at(ui, icon_rect);
                         }
                         if !collapsed {
                             let tx = side_icon + 16.0;
-                            let g = elided(ui, &it.label, FontId::proportional(SIDE_FONT), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
+                            let g = elided(ui, &it.label, FontId::proportional(side_font), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
                             ui.painter().galley(pos2(rect.min.x + tx, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
                         }
                         let r = if collapsed { r.on_hover_text(&it.label) } else { r };
@@ -720,10 +742,18 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     let grid = cfg.view == ViewMode::Grid;
     let width = ui.available_width();
     let (list_icon, grid_icon) = (cfg.list_icon, cfg.grid_icon);
-    let grid_w = (grid_icon + 44.0).max(96.0);
-    let grid_h = grid_icon + 52.0;
-    let list_row = (list_icon + 8.0).max(28.0);
+    let (list_font, grid_font) = (list_font(list_icon), grid_font(grid_icon));
+    // Size/date columns scale with the font so wide fonts still fit.
+    let k = list_font / 14.0;
+    let grid_w = (grid_icon + 44.0).max(96.0).max(grid_font * 7.5);
+    let grid_h = grid_icon + 18.0 + 2.0 * grid_font * 1.3;
+    let list_row = (list_icon + 8.0).max(list_font + 14.0);
     let name_x = list_icon + 20.0;
+    // Narrow panes (dual mode, big fonts) drop the date column first, so
+    // names keep room. Column x positions are offsets from the right edge.
+    let show_date = width > 560.0 * k;
+    let size_right = if show_date { 160.0 * k } else { 12.0 };
+    let name_room = if show_date { 260.0 * k } else { 100.0 * k };
     let cols = if grid { ((width - 8.0) / grid_w).floor().max(1.0) as usize } else { 1 };
     pane.cols = cols;
     let row_h = if grid { grid_h } else { list_row };
@@ -735,8 +765,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         let c = ui.visuals().weak_text_color();
         let f = FontId::proportional(12.0);
         ui.painter().text(pos2(r.min.x + name_x, r.center().y), Align2::LEFT_CENTER, tr("Name"), f.clone(), c);
-        ui.painter().text(pos2(r.max.x - 160.0, r.center().y), Align2::RIGHT_CENTER, tr("Size"), f.clone(), c);
-        ui.painter().text(pos2(r.max.x - 145.0, r.center().y), Align2::LEFT_CENTER, tr("Modified"), f, c);
+        ui.painter().text(pos2(r.max.x - size_right, r.center().y), Align2::RIGHT_CENTER, tr("Size"), f.clone(), c);
+        if show_date {
+            ui.painter().text(pos2(r.max.x - 145.0 * k, r.center().y), Align2::LEFT_CENTER, tr("Modified"), f, c);
+        }
     }
 
     let mut sa = egui::ScrollArea::vertical().id_salt(("pane-scroll", id)).auto_shrink([false, false]);
@@ -779,20 +811,20 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
-                    let g = elided_centered(ui, &e.name, FontId::proportional(13.0), text_c, rect.width() - 6.0, 2);
+                    let g = elided_centered(ui, &e.name, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
-                    let name_w = rect.width() - name_x - 260.0;
-                    let g = elided(ui, &e.name, FontId::proportional(14.0), text_c, name_w.max(60.0), 1);
+                    let name_w = rect.width() - name_x - name_room;
+                    let g = elided(ui, &e.name, FontId::proportional(list_font), text_c, name_w.max(60.0), 1);
                     ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
                     let weak = ui.visuals().weak_text_color();
-                    let f = FontId::proportional(13.0);
+                    let f = FontId::proportional(list_font - 1.0);
                     let size = if e.is_dir { String::new() } else { human_size(e.size) };
-                    ui.painter().text(pos2(rect.max.x - 160.0, rect.center().y), Align2::RIGHT_CENTER, size, f.clone(), weak);
-                    if let Some(t) = e.mtime {
-                        ui.painter().text(pos2(rect.max.x - 145.0, rect.center().y), Align2::LEFT_CENTER, fmt_time(t), f, weak);
+                    ui.painter().text(pos2(rect.max.x - size_right, rect.center().y), Align2::RIGHT_CENTER, size, f.clone(), weak);
+                    if let (true, Some(t)) = (show_date, e.mtime) {
+                        ui.painter().text(pos2(rect.max.x - 145.0 * k, rect.center().y), Align2::LEFT_CENTER, fmt_time(t), f, weak);
                     }
                 }
                 if r.double_clicked() {
@@ -1735,6 +1767,7 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
     ui.horizontal(|ui| {
         let name = names.get(p.cursor).cloned().unwrap_or_default();
         ui.label(egui::RichText::new(name).monospace().weak());
+        ui.label(egui::RichText::new(tr("Your own picture: open it in Polka, △ → \"Use as pinned folder icon\"")).small().weak());
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             if ui.button(tr("Reset")).clicked() {
                 run = Some(Cmd::SetPinIcon(p.path.clone(), None));

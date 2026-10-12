@@ -332,6 +332,9 @@ pub enum Cmd {
     SetIconTheme(Option<String>),
     Settings,
     ChooseIcon(PathBuf),
+    /// Use an image file as a pinned folder's icon: pick the folder.
+    IconFromFile(PathBuf),
+    SetPinIconFile { folder: PathBuf, image: PathBuf },
     /// None resets to the default icon.
     SetPinIcon(PathBuf, Option<String>),
     ToggleSidebar,
@@ -681,6 +684,16 @@ pub enum Focus {
     Panes,
 }
 
+pub struct RangeSel {
+    pub anchor: usize,
+    /// Select (true) or deselect the range.
+    pub on: bool,
+    /// Selection before the range started.
+    pub base: HashSet<String>,
+    /// Started by Shift: ends when Shift is released.
+    pub keyboard: bool,
+}
+
 pub struct Clip {
     pub items: Vec<Location>,
     pub cut: bool,
@@ -705,7 +718,8 @@ pub struct App {
     pub pad_rx: Receiver<Input>,
     pub pad: PadKind,
     pub pad_seen: bool,
-    select_held: Option<bool>,
+    /// Range selection while Select (or Shift on the keyboard) is held.
+    pub range: Option<RangeSel>,
     pub clip: Option<Clip>,
     pub jobs: Vec<Arc<Job>>,
     pub toast: Option<(String, bool, Instant)>,
@@ -760,7 +774,7 @@ impl App {
             pad_rx,
             pad: PadKind::default(),
             pad_seen: false,
-            select_held: None,
+            range: None,
             clip: None,
             jobs: Vec::new(),
             toast: None,
@@ -919,7 +933,7 @@ impl App {
                 return;
             }
             Input::Release(Action::Select) => {
-                self.select_held = None;
+                self.range = None;
                 return;
             }
             Input::Release(_) => return,
@@ -939,11 +953,12 @@ impl App {
         match a {
             Action::Up => self.move_and_paint(-cols),
             Action::Down => self.move_and_paint(cols),
+            // While a range is being selected, nothing leaves this pane.
             Action::Left => {
                 let p = self.pane();
                 if grid && p.cursor as isize % cols != 0 {
                     self.move_and_paint(-1);
-                } else {
+                } else if self.range.is_none() {
                     self.focus_left();
                 }
             }
@@ -952,14 +967,20 @@ impl App {
                 let last_col = (p.cursor as isize + 1) % cols == 0 || p.cursor + 1 >= p.entries.len();
                 if grid && !last_col {
                     self.move_and_paint(1);
-                } else if cfg.dual && self.cur_tab().active == 0 {
+                } else if cfg.dual && self.cur_tab().active == 0 && self.range.is_none() {
                     self.tabs[self.tab].active = 1;
                 }
             }
-            Action::Home => self.pane_mut().set_cursor(0),
+            Action::PrevTab | Action::NextTab | Action::View if self.range.is_some() => {}
+            Action::LeftTrigger | Action::RightTrigger if cfg.dual && self.range.is_some() => {}
+            Action::Home => {
+                self.pane_mut().set_cursor(0);
+                self.paint_range();
+            }
             Action::End => {
                 let n = self.pane().entries.len();
                 self.pane_mut().set_cursor(n.saturating_sub(1));
+                self.paint_range();
             }
             Action::Accept => self.activate(),
             Action::Back => {
@@ -971,14 +992,7 @@ impl App {
                     self.pane_mut().go_up(&cfg);
                 }
             }
-            Action::Select => {
-                let p = self.pane_mut();
-                if let Some(name) = p.current().map(|e| e.name.clone()) {
-                    let on = !p.selected.contains(&name);
-                    if on { p.selected.insert(name) } else { p.selected.remove(&name) };
-                    self.select_held = Some(on);
-                }
-            }
+            Action::Select => self.begin_range(false),
             Action::Actions => self.open_actions_menu(),
             Action::Menu => self.open_app_menu(),
             Action::View => self.run(Cmd::ToggleDual),
@@ -1018,17 +1032,37 @@ impl App {
 
     /// Move the cursor; while Select is held, paint the selection along.
     fn move_and_paint(&mut self, d: isize) {
-        let held = self.select_held;
+        self.pane_mut().move_cursor(d);
+        self.paint_range();
+    }
+
+    /// Start a range at the cursor. The anchor item flips (select or
+    /// deselect); the whole range then takes that state.
+    pub fn begin_range(&mut self, keyboard: bool) {
+        let p = self.pane();
+        let Some(name) = p.current().map(|e| e.name.clone()) else { return };
+        self.range = Some(RangeSel {
+            anchor: p.cursor,
+            // Shift always selects; □ flips the anchor item's state.
+            on: keyboard || !p.selected.contains(&name),
+            base: p.selected.clone(),
+            keyboard,
+        });
+        self.paint_range();
+    }
+
+    /// Selection = what was selected before the range + anchor..=cursor.
+    /// Moving back towards the anchor gives items back their old state.
+    fn paint_range(&mut self) {
+        let Some(r) = &self.range else { return };
+        let (anchor, on, base) = (r.anchor, r.on, r.base.clone());
         let p = self.pane_mut();
-        let from = p.cursor;
-        p.move_cursor(d);
-        if let Some(on) = held {
-            let (lo, hi) = (from.min(p.cursor), from.max(p.cursor));
-            for i in lo..=hi {
-                let n = p.entries[i].name.clone();
-                if on { p.selected.insert(n) } else { p.selected.remove(&n) };
-            }
+        let (lo, hi) = (anchor.min(p.cursor), anchor.max(p.cursor).min(p.entries.len().saturating_sub(1)));
+        let mut sel = base;
+        for e in p.entries.get(lo..=hi).unwrap_or(&[]) {
+            if on { sel.insert(e.name.clone()) } else { sel.remove(&e.name) };
         }
+        p.selected = sel;
     }
 
     fn switch_tab(&mut self, d: isize) {
@@ -1384,6 +1418,11 @@ impl App {
             if dual {
                 add(tr("Extract to other pane"), Cmd::ExtractOther, local && other_local);
             }
+        }
+        let one_image = single && !targets[0].is_dir && local && is_icon_image(&targets[0].name);
+        if one_image && !self.cfg.pinned.is_empty() {
+            let path = p.entry_path(&targets[0]).unwrap();
+            add(tr("Use as pinned folder icon…"), Cmd::IconFromFile(path), true);
         }
         if one_dir_local {
             let path = p.entry_path(&targets[0]).unwrap();
@@ -1880,6 +1919,22 @@ impl App {
                     scroll_y: 0.0,
                 }));
             }
+            Cmd::IconFromFile(image) => {
+                let items = self
+                    .cfg
+                    .pinned
+                    .iter()
+                    .map(|f| {
+                        let label = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.display().to_string());
+                        item(&label, Cmd::SetPinIconFile { folder: f.clone(), image: image.clone() })
+                    })
+                    .collect();
+                self.overlay = Some(Overlay::Menu(Menu::new(tr("Pinned folder"), items)));
+            }
+            Cmd::SetPinIconFile { folder, image } => match store_icon(&image) {
+                Ok(stored) => self.run(Cmd::SetPinIcon(folder, Some(stored.to_string_lossy().into_owned()))),
+                Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
+            },
             Cmd::SetPinIcon(path, icon) => {
                 let key = path.to_string_lossy().into_owned();
                 match icon {
@@ -2035,6 +2090,29 @@ pub fn arg_path(arg: &std::ffi::OsStr) -> PathBuf {
         i += 1;
     }
     PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
+/// Image types the icon loaders can draw.
+pub fn is_icon_image(name: &str) -> bool {
+    let l = name.to_lowercase();
+    [".png", ".svg", ".jpg", ".jpeg", ".webp", ".ico", ".bmp", ".gif"].iter().any(|e| l.ends_with(e))
+}
+
+/// Copy a user image into Polka's data dir (so moving the original doesn't
+/// break the icon). Returns the stored path.
+fn store_icon(image: &Path) -> std::io::Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let data = std::fs::read(image)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    let ext = image.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "png".into());
+    let dir = dirs::data_dir().ok_or_else(|| std::io::Error::other("no data dir"))?.join("polka/icons");
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join(format!("{:016x}.{ext}", h.finish()));
+    if !out.exists() {
+        std::fs::write(&out, data)?;
+    }
+    Ok(out)
 }
 
 fn expand_tilde(s: &str) -> PathBuf {

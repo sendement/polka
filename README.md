@@ -16,6 +16,8 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Top bar icons come from the icon theme (monochrome ones are recoloured to fit the UI)
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
+- Pinned folders can use any theme icon (Papirus colour variants included) or your own picture
+  (select an image, △ → "Use as pinned folder icon"); label sizes follow icon sizes
 
 ## Controls
 
@@ -24,7 +26,7 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 | D-pad / left stick | Move | Arrows |
 | ✕ / A | Open folder, run file | Enter |
 | ○ / B | Back (clears selection first) | Backspace, Esc |
-| □ / X | Select; hold and move to select a range | Space, Insert |
+| □ / X | Select; hold and move for a range (moving back shrinks it; arrows stay in the pane) | Space, Insert, Shift+arrows |
 | △ / Y | Actions menu | Shift+F10 |
 | Options / Menu | App menu | F10 |
 | Create / View | Toggle dual pane | F3 |

@@ -354,4 +354,52 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     assert_eq!(h.state().cfg.pinned_icons.get(&dir.to_string_lossy().into_owned()), Some(&chosen));
     settle(h);
     shot(h, "23-pinned-icon");
+
+    // Own picture: the photo from earlier becomes the pinned folder's icon.
+    let photo = dir.parent().unwrap().join("photo.png");
+    h.state_mut().run(Cmd::IconFromFile(photo));
+    press(h, &[Action::Accept]);
+    let stored = h.state().cfg.pinned_icons.get(&dir.to_string_lossy().into_owned()).cloned().unwrap();
+    assert!(stored.starts_with('/') && std::path::Path::new(&stored).exists(), "{stored}");
+    settle(h);
+    shot(h, "24-pinned-photo-icon");
+
+    range_selection(h);
+}
+
+fn range_selection(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir), None, &cfg);
+    h.state_mut().focus = crate::app::Focus::Panes;
+    let p = h.state_mut().pane_mut();
+    p.selected.clear();
+    p.set_cursor(2);
+    let names = |h: &Harness<'static, App>| -> Vec<usize> {
+        let p = h.state().pane();
+        let mut v: Vec<usize> = p.entries.iter().enumerate().filter(|(_, e)| p.selected.contains(&e.name)).map(|(i, _)| i).collect();
+        v.sort();
+        v
+    };
+    h.state_mut().handle(Input::Press(Action::Select));
+    press(h, &[Action::Down, Action::Down]);
+    assert_eq!(names(h), [2, 3, 4]);
+    // Going back gives items their old state, past the anchor selects upwards.
+    press(h, &[Action::Up]);
+    assert_eq!(names(h), [2, 3]);
+    press(h, &[Action::Up, Action::Up]);
+    assert_eq!(names(h), [1, 2]);
+    // Arrows stay in this pane while selecting.
+    press(h, &[Action::Left]);
+    assert!(h.state().focus == crate::app::Focus::Panes);
+    h.state_mut().handle(Input::Release(Action::Select));
+    // Deselecting with a range: start on a selected item.
+    h.state_mut().pane_mut().set_cursor(2);
+    h.state_mut().handle(Input::Press(Action::Select));
+    press(h, &[Action::Up]);
+    h.state_mut().handle(Input::Release(Action::Select));
+    assert!(names(h).is_empty());
+    shot(h, "25-after-range");
 }
