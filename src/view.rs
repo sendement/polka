@@ -20,10 +20,16 @@ const TOOL_BTN: f32 = 38.0;
 const TOOL_ICON: f32 = 24.0;
 /// Tab height; L1/R1 glyphs next to the tabs match it.
 const TAB_H: f32 = 30.0;
-/// Label sizes follow icon sizes; at the default icon sizes these give
-/// 16 (sidebar, like the address bar), 14 (list) and 13 (grid).
-fn side_font(icon: f32) -> f32 {
+/// Label sizes follow icon sizes. Sidebar at the default 20px icons:
+/// items 13.6, section headers ("Places", "Pinned") 15.2.
+fn side_base(icon: f32) -> f32 {
     (10.0 + icon * 0.3).clamp(12.0, 28.0)
+}
+fn side_font(icon: f32) -> f32 {
+    side_base(icon) * 0.85
+}
+fn side_section_font(icon: f32) -> f32 {
+    side_base(icon) * 0.95
 }
 fn list_font(icon: f32) -> f32 {
     (7.4 + icon * 0.3).clamp(12.0, 26.0)
@@ -528,7 +534,7 @@ impl App {
                             if collapsed {
                                 ui.separator();
                             } else {
-                                ui.label(egui::RichText::new(tr(section)).size(13.0).weak());
+                                ui.label(egui::RichText::new(tr(section)).size(side_section_font(side_icon)).weak());
                             }
                         }
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
