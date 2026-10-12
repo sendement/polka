@@ -1,4 +1,5 @@
 mod app;
+mod archive_rw;
 mod config;
 mod fonts;
 mod i18n;

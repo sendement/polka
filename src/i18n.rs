@@ -70,7 +70,6 @@ const RU: &[(&str, &str)] = &[
     ("Location", "Расположение"),
     ("Permissions", "Права"),
     ("Contents", "Содержимое"),
-    ("Archives are read-only for now", "Архивы пока только для чтения"),
     ("Nothing to paste", "Нечего вставлять"),
     ("Copying", "Копирование"),
     ("Moving", "Перемещение"),
@@ -99,6 +98,19 @@ const RU: &[(&str, &str)] = &[
     ("Gamepad", "Геймпад"),
     ("Keyboard", "Клавиатура"),
     ("Close", "Закрыть"),
+    ("Filter…", "Фильтр…"),
+    ("Filter", "Фильтр"),
+    ("Search…", "Поиск…"),
+    ("Search in subfolders", "Поиск во вложенных папках"),
+    ("already exists", "уже существует"),
+    ("%n item(s) already exist", "Уже существуют: %n шт."),
+    ("Keep both", "Оставить оба"),
+    ("Replace", "Заменить"),
+    ("Skip", "Пропустить"),
+    ("This archive format is read-only", "Этот формат архива только для чтения"),
+    ("Encrypted archives can't be modified", "Зашифрованные архивы нельзя изменять"),
+    ("Thumbnails", "Миниатюры"),
+    ("Nothing found", "Ничего не найдено"),
 ];
 
 fn table() -> &'static HashMap<&'static str, &'static str> {

@@ -88,7 +88,7 @@ impl App {
             Key::Home => k.caret = 0,
             Key::End => k.caret = k.text.len(),
             Key::Enter => self.osk_submit(),
-            Key::Escape => self.overlay = None,
+            Key::Escape => self.osk_cancel(),
             _ => {}
         }
     }
@@ -106,6 +106,8 @@ impl App {
                 Key::H => Some(Cmd::ToggleHidden),
                 Key::B => Some(Cmd::ToggleSidebar),
                 Key::L => Some(Cmd::GoTo),
+                Key::F if m.shift => Some(Cmd::Search),
+                Key::F => Some(Cmd::Filter),
                 Key::Q => Some(Cmd::Quit),
                 Key::N if m.shift => Some(Cmd::NewFolder),
                 Key::Tab | Key::PageDown => return press(self, if m.shift && key == Key::Tab { Action::PrevTab } else { Action::NextTab }),
@@ -196,6 +198,7 @@ impl App {
         let mut switch_tab = None;
         let mut close_tab = None;
         let mut new_tab = false;
+        let mut clear_filter = false;
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -223,8 +226,16 @@ impl App {
                         ui.label(egui::RichText::new("›").weak());
                     }
                 }
-                if self.pane().loc.is_archive() {
-                    ui.label(egui::RichText::new("📦").weak()).on_hover_text(tr("Archives are read-only for now"));
+                if self.pane().loc.is_archive() && self.pane().loc.dest().is_none() {
+                    ui.label(egui::RichText::new("🔒").weak()).on_hover_text(tr("This archive format is read-only"));
+                }
+                if let Some(f) = self.pane().filter.clone() {
+                    ui.add_space(12.0);
+                    let chip = egui::Button::new(egui::RichText::new(format!("{}: {f}  ✖", tr("Filter"))).size(14.0))
+                        .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.5));
+                    if ui.add(chip).clicked() {
+                        clear_filter = true;
+                    }
                 }
             });
             ui.add_space(2.0);
@@ -267,6 +278,9 @@ impl App {
         }
         if new_tab {
             self.run(Cmd::NewTab);
+        }
+        if clear_filter {
+            self.pane_mut().set_filter(None);
         }
     }
 
@@ -533,7 +547,12 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         return events;
     }
     if pane.entries.is_empty() {
-        let r = ui.centered_and_justified(|ui| ui.label(egui::RichText::new(tr("Empty folder")).weak())).response;
+        let empty = if pane.filter.is_some() || matches!(pane.loc, crate::vfs::Location::Search { .. }) {
+            tr("Nothing found")
+        } else {
+            tr("Empty folder")
+        };
+        let r = ui.centered_and_justified(|ui| ui.label(egui::RichText::new(empty).weak())).response;
         if r.secondary_clicked() {
             events.push(PaneEvent::Context(None));
         }

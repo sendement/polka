@@ -12,14 +12,19 @@ use crate::config::{Config, SortKey, ViewMode};
 use crate::i18n::{tr, trn};
 use crate::icons::Icons;
 use crate::input::{Action, Input, PadKind};
-use crate::ops::{self, ArchiveFormat, Job, Op};
-use crate::vfs::{self, Entry, Location};
+use crate::ops::{self, ArchiveFormat, Conflict, Job, Op};
+use crate::vfs::{self, Dest, Entry, Location};
 
 // ---------------------------------------------------------------- panes
 
 pub struct Pane {
     pub loc: Location,
+    /// Visible entries (after the quick filter).
     pub entries: Vec<Entry>,
+    /// Listing before the quick filter (hidden files and sorting applied).
+    all: Vec<Entry>,
+    /// Quick filter on names within this folder.
+    pub filter: Option<String>,
     pub error: Option<String>,
     pub cursor: usize,
     pub selected: HashSet<String>,
@@ -44,6 +49,8 @@ impl Pane {
         let mut p = Self {
             loc: loc.clone(),
             entries: Vec::new(),
+            all: Vec::new(),
+            filter: None,
             error: None,
             cursor: 0,
             selected: HashSet::new(),
@@ -71,7 +78,7 @@ impl Pane {
     }
 
     pub fn entry_path(&self, e: &Entry) -> Option<PathBuf> {
-        self.loc.local_path().map(|p| p.join(&e.name))
+        self.loc.entry_path(&e.name)
     }
 
     /// Selection if any, else the entry under the cursor.
@@ -87,14 +94,15 @@ impl Pane {
         self.loc = loc.clone();
         self.selected.clear();
         self.error = None;
-        if loc.is_archive() {
-            // Archive indexing can take a while (tar has no index), so it runs
-            // off the UI thread.
+        if !matches!(loc, Location::Local(_)) {
+            // Archive indexing can take a while (tar has no index), and so
+            // can searching, so they run off the UI thread.
             let (tx, rx) = crossbeam_channel::bounded(1);
             std::thread::spawn(move || {
                 let _ = tx.send(vfs::list(&loc));
             });
             self.entries.clear();
+            self.all.clear();
             self.loading = Some(rx);
             self.pending_focus = focus;
         } else {
@@ -128,15 +136,28 @@ impl Pane {
                 if !cfg.show_hidden {
                     v.retain(|e| !e.hidden());
                 }
-                sort_entries(&mut v, cfg.sort);
-                self.entries = v;
+                // Search results keep their breadth-first order (near first).
+                if !matches!(self.loc, Location::Search { .. }) {
+                    sort_entries(&mut v, cfg.sort);
+                }
+                self.all = v;
                 self.error = None;
             }
             Err(e) => {
-                self.entries.clear();
+                self.all.clear();
                 self.error = Some(e.to_string());
             }
         }
+        self.refilter(focus);
+    }
+
+    /// Rebuild `entries` from `all` with the current filter.
+    pub fn refilter(&mut self, focus: Option<String>) {
+        let focus = focus.or_else(|| self.current().map(|e| e.name.clone()));
+        self.entries = match self.filter.as_deref() {
+            Some(f) if !f.is_empty() => self.all.iter().filter(|e| vfs::name_matches(&e.name, f)).cloned().collect(),
+            _ => self.all.clone(),
+        };
         self.cursor = focus
             .and_then(|n| self.entries.iter().position(|e| e.name == n))
             .unwrap_or(0);
@@ -145,9 +166,17 @@ impl Pane {
         self.scroll_to_cursor = true;
     }
 
+    pub fn set_filter(&mut self, f: Option<String>) {
+        let f = f.filter(|s| !s.is_empty());
+        if f != self.filter {
+            self.filter = f;
+            self.refilter(None);
+        }
+    }
+
     /// Re-list the current location, keeping cursor and selection.
     pub fn reload(&mut self, cfg: &Config) {
-        let focus = self.current().map(|e| e.name.clone());
+        let focus = self.pending_focus.take().or_else(|| self.current().map(|e| e.name.clone()));
         let keep = std::mem::take(&mut self.selected);
         let loc = self.loc.clone();
         self.load(loc, focus, cfg);
@@ -163,6 +192,7 @@ impl Pane {
         let here = self.current().map(|e| e.name.clone()).unwrap_or_default();
         self.back.push((self.loc.clone(), here));
         self.forward.clear();
+        self.filter = None;
         self.load(loc, focus, cfg);
     }
 
@@ -186,6 +216,7 @@ impl Pane {
         if let Some((loc, name)) = from.pop() {
             let here = self.entries.get(self.cursor).map(|e| e.name.clone()).unwrap_or_default();
             to.push((self.loc.clone(), here));
+            self.filter = None;
             self.load(loc, Some(name), cfg);
         }
     }
@@ -272,6 +303,11 @@ pub enum Cmd {
     DeleteAsk,
     TrashNow(Vec<PathBuf>),
     DeleteNow(Vec<PathBuf>),
+    /// Copy/move with a decided conflict policy.
+    Transfer { sources: Vec<Location>, dest: Dest, mv: bool, policy: Conflict },
+    DeleteInArchive { archive: PathBuf, inners: Vec<String> },
+    Filter,
+    Search,
     CompressAsk,
     Compress(ArchiveFormat),
     ExtractHere,
@@ -335,8 +371,12 @@ fn item(label: &str, cmd: Cmd) -> MenuItem {
 
 pub enum OskPurpose {
     Rename { old: PathBuf },
-    NewFolder { dir: PathBuf },
+    RenameInArchive { archive: PathBuf, from: String },
+    NewFolder { dest: Dest },
     GoTo,
+    /// Live quick filter; `prev` is restored on cancel.
+    Filter { prev: Option<String> },
+    Search { root: PathBuf },
     Compress { sources: Vec<PathBuf>, dir: PathBuf, format: ArchiveFormat },
 }
 
@@ -376,6 +416,10 @@ impl Osk {
         // Put the caret before the extension when renaming files.
         let caret = match &purpose {
             OskPurpose::Rename { old } if !old.is_dir() => {
+                let s: String = text.iter().collect();
+                ops::split_ext(&s).0.chars().count()
+            }
+            OskPurpose::RenameInArchive { .. } => {
                 let s: String = text.iter().collect();
                 ops::split_ext(&s).0.chars().count()
             }
@@ -587,6 +631,13 @@ impl App {
                 Msg::Toast(s, e) => self.toast(s, e),
             }
         }
+        // The filter keyboard filters live.
+        if let Some(Overlay::Osk(k)) = &self.overlay {
+            if let OskPurpose::Filter { .. } = k.purpose {
+                let f = k.string();
+                self.pane_mut().set_filter(Some(f));
+            }
+        }
         // Finished jobs: refresh what they touched, report errors.
         let mut touched: Vec<Location> = Vec::new();
         let mut report = Vec::new();
@@ -609,7 +660,7 @@ impl App {
         if !touched.is_empty() {
             for t in &mut self.tabs {
                 for p in &mut t.panes {
-                    if touched.contains(&p.loc) {
+                    if touched.iter().any(|t| p.loc.affected_by(t)) {
                         p.reload(&cfg);
                     }
                 }
@@ -732,6 +783,8 @@ impl App {
             Action::Back => {
                 if !self.pane().selected.is_empty() {
                     self.pane_mut().selected.clear();
+                } else if self.pane().filter.is_some() {
+                    self.pane_mut().set_filter(None);
                 } else {
                     self.pane_mut().go_up(&cfg);
                 }
@@ -852,7 +905,7 @@ impl App {
                     let key = k.key_at(k.row, k.col);
                     self.osk_key(key);
                 }
-                Action::Back => self.overlay = None,
+                Action::Back => self.osk_cancel(),
                 Action::Select => k.backspace(),
                 Action::Actions => k.insert(" "),
                 Action::PrevTab => k.caret_by(-1),
@@ -886,9 +939,21 @@ impl App {
         }
     }
 
+    pub fn osk_cancel(&mut self) {
+        if let Some(Overlay::Osk(k)) = self.overlay.take() {
+            if let OskPurpose::Filter { prev } = k.purpose {
+                self.pane_mut().set_filter(prev);
+            }
+        }
+    }
+
     pub fn osk_submit(&mut self) {
         let Some(Overlay::Osk(k)) = self.overlay.take() else { return };
         let text = k.string().trim().to_string();
+        if let OskPurpose::Filter { .. } = k.purpose {
+            self.pane_mut().set_filter(Some(text));
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -918,7 +983,41 @@ impl App {
                     Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
                 }
             }
-            OskPurpose::NewFolder { dir } => {
+            OskPurpose::RenameInArchive { archive, from } => {
+                if bad_name {
+                    return self.toast(format!("{}: {text}", tr("Failed")), true);
+                }
+                let parent = from.rsplit_once('/').map_or("", |(p, _)| p);
+                let to = if parent.is_empty() { text.clone() } else { format!("{parent}/{text}") };
+                if to == from {
+                    return;
+                }
+                if self.pane().all.iter().any(|e| e.name == text) {
+                    return self.toast(format!("{}: {} exists", tr("Failed"), text), true);
+                }
+                let plan = crate::archive_rw::Plan { rename: vec![(from, to)], ..Default::default() };
+                self.pane_mut().selected.clear();
+                self.pending_focus(text);
+                self.start(Op::ArchiveEdit { archive, plan, label: tr("Rename") });
+            }
+            OskPurpose::NewFolder { dest: Dest::Archive { archive, inner } } => {
+                if bad_name {
+                    return self.toast(format!("{}: {text}", tr("Failed")), true);
+                }
+                if self.pane().all.iter().any(|e| e.name == text) {
+                    return self.toast(format!("{}: {} exists", tr("Failed"), text), true);
+                }
+                let path = if inner.is_empty() { text.clone() } else { format!("{inner}/{text}") };
+                let plan = crate::archive_rw::Plan { mkdir: vec![path], ..Default::default() };
+                self.pending_focus(text);
+                self.start(Op::ArchiveEdit { archive, plan, label: tr("New folder") });
+            }
+            OskPurpose::Search { root } => {
+                let loc = Location::Search { root, query: text, hidden: cfg.show_hidden };
+                self.pane_mut().navigate(loc, None, &cfg);
+            }
+            OskPurpose::Filter { .. } => {}
+            OskPurpose::NewFolder { dest: Dest::Dir(dir) } => {
                 if bad_name {
                     return self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
@@ -966,8 +1065,8 @@ impl App {
             return;
         }
         match &p.loc {
-            Location::Local(dir) => {
-                let path = dir.join(&e.name);
+            Location::Local(_) | Location::Search { .. } => {
+                let path = p.entry_path(&e).expect("local entry");
                 if vfs::is_archive_name(&e.name) {
                     self.pane_mut().navigate(Location::Archive { archive: path, inner: String::new() }, None, &cfg);
                 } else if let Err(err) = crate::launch::open(&path) {
@@ -1007,11 +1106,14 @@ impl App {
     fn open_actions_menu(&mut self) {
         let p = self.pane();
         let targets = p.targets();
-        let in_archive = p.loc.is_archive();
-        let local = !in_archive;
+        // Real files (a folder or search results) vs. a writable archive.
+        let local = p.loc.entry_path("").is_some();
+        let writable = p.loc.dest().is_some();
+        let editable = local || writable;
         let single = targets.len() == 1;
         let any = !targets.is_empty();
         let dual = self.cfg.dual;
+        let other_writable = self.cur_tab().panes[1 - self.cur_tab().active].loc.dest().is_some();
         let other_local = self.cur_tab().panes[1 - self.cur_tab().active].loc.local_path().is_some();
         let one_archive = single && !targets[0].is_dir && vfs::is_archive_name(&targets[0].name);
         let one_dir_local = single && targets[0].is_dir && local;
@@ -1024,15 +1126,17 @@ impl App {
         };
         add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
         add(tr("Copy"), Cmd::Copy, any);
-        add(tr("Cut"), Cmd::Cut, any && local);
-        add(tr("Paste"), Cmd::Paste, self.clip.is_some() && local);
+        add(tr("Cut"), Cmd::Cut, any && editable);
+        add(tr("Paste"), Cmd::Paste, self.clip.is_some() && writable);
         if dual {
-            add(tr("Copy to other pane"), Cmd::CopyOther, any && other_local);
-            add(tr("Move to other pane"), Cmd::MoveOther, any && local && other_local);
+            add(tr("Copy to other pane"), Cmd::CopyOther, any && other_writable);
+            add(tr("Move to other pane"), Cmd::MoveOther, any && editable && other_writable);
         }
-        add(tr("Rename"), Cmd::Rename, single && local);
-        add(tr("Move to trash"), Cmd::TrashAsk, any && local);
-        add(tr("Delete permanently"), Cmd::DeleteAsk, any && local);
+        add(tr("Rename"), Cmd::Rename, single && editable);
+        if local {
+            add(tr("Move to trash"), Cmd::TrashAsk, any);
+        }
+        add(tr("Delete permanently"), Cmd::DeleteAsk, any && editable);
         add(tr("Compress…"), Cmd::CompressAsk, any && local);
         if one_archive {
             add(tr("Extract here"), Cmd::ExtractHere, local);
@@ -1062,11 +1166,14 @@ impl App {
         let c = &self.cfg;
         let check = |label: &str, cmd: Cmd, on: bool| MenuItem { label: label.into(), cmd, enabled: true, checked: Some(on) };
         let local = self.pane().loc.local_path().is_some();
+        let writable = self.pane().loc.dest().is_some();
         let items = vec![
             item(tr("New tab"), Cmd::NewTab),
             MenuItem { enabled: self.tabs.len() > 1, ..item(tr("Close tab"), Cmd::CloseTab) },
-            MenuItem { enabled: local, ..item(tr("New folder"), Cmd::NewFolder) },
-            MenuItem { enabled: self.clip.is_some() && local, ..item(tr("Paste"), Cmd::Paste) },
+            MenuItem { enabled: writable, ..item(tr("New folder"), Cmd::NewFolder) },
+            MenuItem { enabled: self.clip.is_some() && writable, ..item(tr("Paste"), Cmd::Paste) },
+            item(tr("Filter…"), Cmd::Filter),
+            MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
             item(tr("Go to path…"), Cmd::GoTo),
             item(tr("Select all"), Cmd::SelectAll),
             check(tr("Dual pane"), Cmd::ToggleDual, c.dual),
@@ -1081,6 +1188,35 @@ impl App {
             item(tr("Quit"), Cmd::Quit),
         ];
         self.overlay = Some(Overlay::Menu(Menu { title: "Polka".into(), items, cursor: 0 }));
+    }
+
+    /// Copy/move, asking first if names clash at the destination.
+    fn request_transfer(&mut self, sources: Vec<Location>, dest: Dest, mv: bool) {
+        if sources.is_empty() {
+            return;
+        }
+        let clashes = ops::conflicts(&sources, &dest);
+        if clashes.is_empty() {
+            return self.run(Cmd::Transfer { sources, dest, mv, policy: Conflict::Rename });
+        }
+        let title = if clashes.len() == 1 {
+            format!("«{}» {}", clashes[0], tr("already exists"))
+        } else {
+            trn("%n item(s) already exist", clashes.len())
+        };
+        let go = |policy| Cmd::Transfer { sources: sources.clone(), dest: dest.clone(), mv, policy };
+        let items = vec![
+            item(tr("Keep both"), go(Conflict::Rename)),
+            item(tr("Replace"), go(Conflict::Overwrite)),
+            item(tr("Skip"), go(Conflict::Skip)),
+            item(tr("Cancel"), Cmd::Nothing),
+        ];
+        self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }));
+    }
+
+    /// Put the cursor on `name` once the pane next reloads (after a job).
+    fn pending_focus(&mut self, name: String) {
+        self.pane_mut().pending_focus = Some(name);
     }
 
     fn start(&mut self, op: Op) {
@@ -1118,37 +1254,78 @@ impl App {
                 }
             }
             Cmd::Paste => {
-                let Some(dest) = self.pane().loc.local_path().map(Path::to_path_buf) else {
-                    return self.toast(tr("Archives are read-only for now"), true);
+                let Some(dest) = self.pane().loc.dest() else {
+                    return self.toast(tr("This archive format is read-only"), true);
                 };
-                let Some(clip) = self.clip.take() else { return self.toast(tr("Nothing to paste"), true) };
-                if clip.cut {
-                    self.start(Op::Move { sources: clip.items, dest });
-                } else {
-                    self.start(Op::Copy { sources: clip.items.clone(), dest });
-                    self.clip = Some(clip);
-                }
+                let Some(clip) = &self.clip else { return self.toast(tr("Nothing to paste"), true) };
+                let (sources, mv) = (clip.items.clone(), clip.cut);
+                self.request_transfer(sources, dest, mv);
             }
             Cmd::CopyOther | Cmd::MoveOther => {
                 let (a, b) = self.pane_pair();
-                let Some(dest) = b.loc.local_path().map(Path::to_path_buf) else {
-                    return self.toast(tr("Archives are read-only for now"), true);
+                let Some(dest) = b.loc.dest() else {
+                    return self.toast(tr("This archive format is read-only"), true);
                 };
                 let sources: Vec<Location> = a.targets().iter().map(|e| a.entry_loc(e)).collect();
-                a.selected.clear();
-                if matches!(cmd, Cmd::MoveOther) {
-                    self.start(Op::Move { sources, dest });
+                self.request_transfer(sources, dest, matches!(cmd, Cmd::MoveOther));
+            }
+            Cmd::Transfer { sources, dest, mv, policy } => {
+                self.pane_mut().selected.clear();
+                if mv {
+                    // A cut is used up by its paste.
+                    if self.clip.as_ref().is_some_and(|c| c.cut && c.items == sources) {
+                        self.clip = None;
+                    }
+                    self.start(Op::Move { sources, dest, policy });
                 } else {
-                    self.start(Op::Copy { sources, dest });
+                    self.start(Op::Copy { sources, dest, policy });
                 }
             }
             Cmd::Rename => {
                 let p = self.pane();
                 if let Some(e) = p.current() {
-                    if let Some(path) = p.entry_path(e) {
-                        let name = e.name.clone();
-                        self.overlay = Some(Overlay::Osk(Osk::new(tr("New name"), &name, OskPurpose::Rename { old: path })));
-                    }
+                    let name = e.name.rsplit('/').next().unwrap_or(&e.name).to_string();
+                    let purpose = match (p.entry_path(e), p.loc.dest(), p.entry_loc(e)) {
+                        (Some(old), _, _) => OskPurpose::Rename { old },
+                        (None, Some(_), Location::Archive { archive, inner }) => {
+                            OskPurpose::RenameInArchive { archive, from: inner }
+                        }
+                        _ => return,
+                    };
+                    self.overlay = Some(Overlay::Osk(Osk::new(tr("New name"), &name, purpose)));
+                }
+            }
+            Cmd::DeleteAsk if self.pane().loc.is_archive() => {
+                let p = self.pane();
+                let inners: Vec<String> = p
+                    .targets()
+                    .iter()
+                    .filter_map(|e| match p.entry_loc(e) {
+                        Location::Archive { inner, .. } => Some(inner),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(archive) = p.loc.archive().map(Path::to_path_buf) else { return };
+                if inners.is_empty() {
+                    return;
+                }
+                let title = trn("Delete %n item(s) permanently?", inners.len());
+                let items = vec![item(tr("Cancel"), Cmd::Nothing), item(tr("Delete"), Cmd::DeleteInArchive { archive, inners })];
+                self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }));
+            }
+            Cmd::DeleteInArchive { archive, inners } => {
+                self.pane_mut().selected.clear();
+                let plan = crate::archive_rw::Plan { remove: inners, ..Default::default() };
+                self.start(Op::ArchiveEdit { archive, plan, label: tr("Deleting") });
+            }
+            Cmd::Filter => {
+                let prev = self.pane().filter.clone();
+                let text = prev.clone().unwrap_or_default();
+                self.overlay = Some(Overlay::Osk(Osk::new(tr("Filter"), &text, OskPurpose::Filter { prev })));
+            }
+            Cmd::Search => {
+                if let Some(root) = self.pane().loc.local_path().map(Path::to_path_buf) {
+                    self.overlay = Some(Overlay::Osk(Osk::new(tr("Search in subfolders"), "", OskPurpose::Search { root })));
                 }
             }
             Cmd::TrashAsk | Cmd::DeleteAsk => {
@@ -1232,8 +1409,8 @@ impl App {
                 }
             }
             Cmd::NewFolder => {
-                if let Some(dir) = self.pane().loc.local_path().map(Path::to_path_buf) {
-                    self.overlay = Some(Overlay::Osk(Osk::new(tr("Folder name"), "", OskPurpose::NewFolder { dir })));
+                if let Some(dest) = self.pane().loc.dest() {
+                    self.overlay = Some(Overlay::Osk(Osk::new(tr("Folder name"), "", OskPurpose::NewFolder { dest })));
                 }
             }
             Cmd::ToggleDual => {

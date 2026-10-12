@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Prints actions from the gamepad thread; for checking mappings.
 #[path = "../src/input.rs"]
 mod input;

@@ -17,6 +17,25 @@ pub enum Location {
     Local(PathBuf),
     /// `inner` has no leading or trailing slash; "" is the archive root.
     Archive { archive: PathBuf, inner: String },
+    /// Recursive name search under `root`. Entry names are paths relative
+    /// to `root`.
+    Search { root: PathBuf, query: String, hidden: bool },
+}
+
+/// Somewhere files can be put.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dest {
+    Dir(PathBuf),
+    Archive { archive: PathBuf, inner: String },
+}
+
+impl Dest {
+    pub fn location(&self) -> Location {
+        match self {
+            Dest::Dir(p) => Location::Local(p.clone()),
+            Dest::Archive { archive, inner } => Location::Archive { archive: archive.clone(), inner: inner.clone() },
+        }
+    }
 }
 
 impl Location {
@@ -27,6 +46,7 @@ impl Location {
                 archive.display().to_string()
             }
             Location::Archive { archive, inner } => format!("{}/{}", archive.display(), inner),
+            Location::Search { root, query, .. } => format!("{} — \u{1F50D} {query}", root.display()),
         }
     }
 
@@ -41,6 +61,7 @@ impl Location {
                 Some(n) if !n.is_empty() => n.to_string(),
                 _ => archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             },
+            Location::Search { query, .. } => format!("\u{1F50D} {query}"),
         };
         if let (Location::Local(p), Some(home)) = (self, dirs::home_dir()) {
             if *p == home {
@@ -52,6 +73,14 @@ impl Location {
 
     pub fn is_archive(&self) -> bool {
         matches!(self, Location::Archive { .. })
+    }
+
+    /// The archive file this location is inside, if any.
+    pub fn archive(&self) -> Option<&Path> {
+        match self {
+            Location::Archive { archive, .. } => Some(archive),
+            _ => None,
+        }
     }
 
     /// Parent location and the name of `self` inside it (to restore the cursor).
@@ -72,6 +101,7 @@ impl Location {
                 };
                 Some((Location::Archive { archive: archive.clone(), inner: parent }, name))
             }
+            Location::Search { root, .. } => Some((Location::Local(root.clone()), String::new())),
         }
     }
 
@@ -82,13 +112,47 @@ impl Location {
                 archive: archive.clone(),
                 inner: if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") },
             },
+            Location::Search { root, .. } => Location::Local(root.join(name)),
         }
     }
 
+    /// The directory itself, when it is a real one.
     pub fn local_path(&self) -> Option<&Path> {
         match self {
             Location::Local(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Real path of an entry listed here (None inside archives).
+    pub fn entry_path(&self, name: &str) -> Option<PathBuf> {
+        match self {
+            Location::Local(p) => Some(p.join(name)),
+            Location::Search { root, .. } => Some(root.join(name)),
             Location::Archive { .. } => None,
+        }
+    }
+
+    /// Where pasted files would go, if this location accepts them.
+    pub fn dest(&self) -> Option<Dest> {
+        match self {
+            Location::Local(p) => Some(Dest::Dir(p.clone())),
+            Location::Archive { archive, inner } => {
+                let name = archive.file_name()?.to_string_lossy();
+                // Nested archives are temporary copies; edits would be lost.
+                (crate::archive_rw::writable_name(&name) && !archive.starts_with(temp_root()))
+                    .then(|| Dest::Archive { archive: archive.clone(), inner: inner.clone() })
+            }
+            Location::Search { .. } => None,
+        }
+    }
+
+    /// Same place for refresh purposes (any folder of the same archive counts).
+    pub fn affected_by(&self, changed: &Location) -> bool {
+        match (self, changed) {
+            (Location::Archive { archive: a, .. }, Location::Archive { archive: b, .. }) => a == b,
+            (Location::Search { root, .. }, Location::Local(p)) => p.starts_with(root),
+            _ => self == changed,
         }
     }
 
@@ -122,7 +186,7 @@ pub struct Entry {
 
 impl Entry {
     pub fn hidden(&self) -> bool {
-        self.name.starts_with('.')
+        self.name.rsplit('/').next().unwrap_or(&self.name).starts_with('.')
     }
     pub fn executable(&self) -> bool {
         !self.is_dir && self.mode & 0o111 != 0
@@ -147,7 +211,60 @@ pub fn list(loc: &Location) -> std::io::Result<Vec<Entry>> {
             let idx = archive_index(archive)?;
             Ok(idx.dirs.get(inner).cloned().unwrap_or_default())
         }
+        Location::Search { root, query, hidden } => Ok(search(root, query, *hidden)),
     }
+}
+
+const SEARCH_MAX_RESULTS: usize = 5000;
+const SEARCH_MAX_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Case-insensitive substring match on names; `*` matches anything.
+pub fn name_matches(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    let mut rest = name.as_str();
+    let parts: Vec<String> = query.to_lowercase().split('*').map(str::to_string).collect();
+    if parts.len() == 1 {
+        return name.contains(&parts[0]);
+    }
+    for p in &parts {
+        match rest.find(p.as_str()) {
+            Some(i) => rest = &rest[i + p.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Breadth-first, so near results come first; doesn't follow symlinks or
+/// cross into other file systems.
+fn search(root: &Path, query: &str, hidden: bool) -> Vec<Entry> {
+    let started = std::time::Instant::now();
+    let dev = std::fs::metadata(root).map(|m| m.dev()).ok();
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([PathBuf::new()]);
+    while let Some(rel) = queue.pop_front() {
+        if out.len() >= SEARCH_MAX_RESULTS || started.elapsed() > SEARCH_MAX_TIME {
+            break;
+        }
+        let Ok(entries) = list_local(&root.join(&rel)) else { continue };
+        for mut e in entries {
+            if !hidden && e.hidden() {
+                continue;
+            }
+            let rel_name = if rel.as_os_str().is_empty() { e.name.clone() } else { format!("{}/{}", rel.display(), e.name) };
+            if e.is_dir && !e.is_link {
+                let same_fs = std::fs::metadata(root.join(&rel_name)).map(|m| Some(m.dev()) == dev).unwrap_or(false);
+                if same_fs {
+                    queue.push_back(PathBuf::from(&rel_name));
+                }
+            }
+            if name_matches(&e.name, query) {
+                e.name = rel_name;
+                out.push(e);
+            }
+        }
+    }
+    out
 }
 
 fn list_local(dir: &Path) -> std::io::Result<Vec<Entry>> {
@@ -193,6 +310,10 @@ pub fn normalize_inner(name: &str) -> String {
 
 fn io_err(e: compress_tools::Error) -> std::io::Error {
     std::io::Error::other(e.to_string())
+}
+
+pub fn invalidate(archive: &Path) {
+    cache().lock().unwrap().remove(archive);
 }
 
 pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
@@ -400,6 +521,16 @@ pub fn extract_to_temp(archive: &Path, inner: &str) -> std::io::Result<PathBuf> 
     Ok(target)
 }
 
+/// Like `extract_to_temp` but never reuses an earlier extraction (tests
+/// read the same path after the archive changed).
+#[cfg(test)]
+pub fn extract_to_temp_fresh(archive: &Path, inner: &str) -> std::io::Result<PathBuf> {
+    let dir = temp_root().join(format!("fresh-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir)?;
+    extract(archive, &[inner.to_string()], &dir, |_| true)?;
+    Ok(dir.join(normalize_inner(inner).rsplit('/').next().unwrap_or("file")))
+}
+
 pub fn temp_root() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -453,10 +584,10 @@ mod tests {
             let dest = dir.join("dest");
             std::fs::create_dir_all(&dest).unwrap();
             let src = Location::Archive { archive: out.clone(), inner: "src/a".into() };
-            wait(&ops::spawn(Op::Copy { sources: vec![src.clone()], dest: dest.clone() }, || {}));
+            wait(&ops::spawn(Op::Copy { sources: vec![src.clone()], dest: Dest::Dir(dest.clone()), policy: ops::Conflict::Rename }, || {}));
             assert_eq!(std::fs::read_to_string(dest.join("a/b/deep.txt")).unwrap(), "deep");
             // Second copy gets a unique name.
-            wait(&ops::spawn(Op::Copy { sources: vec![src], dest: dest.clone() }, || {}));
+            wait(&ops::spawn(Op::Copy { sources: vec![src], dest: Dest::Dir(dest.clone()), policy: ops::Conflict::Rename }, || {}));
             assert!(dest.join("a (2)/mid.txt").exists());
 
             // Extract-all with a single top folder lands as-is.
