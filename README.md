@@ -13,7 +13,6 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Quick filter (live, as you type) and recursive search
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
-- DualSense / DualShock 4 touchpad: swipe to move, click to jump to the sidebar
 
 ## Controls
 
@@ -29,12 +28,10 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 | L1 / R1 | Previous / next tab | Ctrl+Tab, Ctrl+PgUp/PgDn |
 | L2 / R2 | Left / right pane (dual), page up / down (single) | Tab, PgUp/PgDn |
 | L3 | Collapse sidebar | Ctrl+B |
-| R3 | Properties | |
-| Right stick ↔ / ↕ | History back/forward / fast scroll | Alt+← → |
+| — | History back / forward | Alt+← → |
 
-Touchpad (DualSense / DS4): swipe up/down moves the cursor, left/right works like the arrows,
-a click jumps between the files and the sidebar. It needs read access to the touchpad device:
-the package installs `70-polka-dualsense-touchpad.rules` (reconnect the controller afterwards).
+The right stick and the touchpad are intentionally left unbound.
+Menus: → or ✕/A opens a submenu (View, Sorting), ← or ○/B goes back; toggles keep the menu open.
 
 Filter: app menu → Filter… or Ctrl+F (○/B clears it). Search in subfolders: app menu or Ctrl+Shift+F.
 
@@ -53,7 +50,7 @@ cargo build --release
 ```
 
 Arch package: `packaging/arch/make-tarball.sh`, then `makepkg` in `packaging/arch`
-(installs the binary, desktop entry, icon and the touchpad udev rule).
+(installs the binary, desktop entry and icon).
 Video thumbnails need `ffmpegthumbnailer`.
 
 Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,

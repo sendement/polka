@@ -34,18 +34,11 @@ pub enum Action {
     RightTrigger,
     /// L3
     LeftStick,
-    /// R3
-    RightStick,
-    /// Right stick left/right
+    /// Keyboard / toolbar history
     HistoryBack,
     HistoryForward,
-    /// Right stick up/down (fast repeat)
-    FastUp,
-    FastDown,
     Home,
     End,
-    /// DualSense / DS4 touchpad click
-    TouchClick,
 }
 
 impl Action {
@@ -56,8 +49,6 @@ impl Action {
                 | Action::Down
                 | Action::Left
                 | Action::Right
-                | Action::FastUp
-                | Action::FastDown
                 | Action::LeftTrigger
                 | Action::RightTrigger
         )
@@ -110,7 +101,6 @@ struct PadThread {
     wake: Box<dyn Fn() + Send>,
     held: Vec<Held>,
     left: Stick,
-    right: Stick,
     owner: Option<(GamepadId, Instant)>,
 }
 
@@ -134,7 +124,6 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
                 wake: Box::new(wake),
                 held: Vec::new(),
                 left: Stick::default(),
-                right: Stick::default(),
                 owner: None,
             };
             loop {
@@ -179,7 +168,6 @@ fn map_button(b: Button) -> Option<Action> {
         Button::LeftTrigger2 => Action::LeftTrigger,
         Button::RightTrigger2 => Action::RightTrigger,
         Button::LeftThumb => Action::LeftStick,
-        Button::RightThumb => Action::RightStick,
         _ => return None,
     })
 }
@@ -196,12 +184,7 @@ impl PadThread {
         }
         let now = Instant::now();
         if a.repeats() {
-            let first = if matches!(a, Action::FastUp | Action::FastDown) {
-                REPEAT_FAST
-            } else {
-                REPEAT_DELAY
-            };
-            self.held.push(Held { action: a, since: now, next: now + first });
+            self.held.push(Held { action: a, since: now, next: now + REPEAT_DELAY });
         } else {
             self.held.push(Held { action: a, since: now, next: now + Duration::from_secs(3600) });
         }
@@ -225,8 +208,7 @@ impl PadThread {
         let mut fire = Vec::new();
         for h in &mut self.held {
             if h.action.repeats() && now >= h.next {
-                let fast = matches!(h.action, Action::FastUp | Action::FastDown)
-                    || now.duration_since(h.since) > ACCEL_AFTER;
+                let fast = now.duration_since(h.since) > ACCEL_AFTER;
                 h.next = now + if fast { REPEAT_FAST } else { REPEAT_SLOW };
                 fire.push(h.action);
             }
@@ -248,7 +230,6 @@ impl PadThread {
                         self.release(a);
                     }
                     self.left = Stick::default();
-                    self.right = Stick::default();
                 }
                 self.owner = Some((id, now));
                 true
@@ -294,21 +275,14 @@ impl PadThread {
                 }
             }
             EventType::AxisChanged(axis, v, _) => match axis {
+                // The right stick is deliberately unbound.
                 Axis::LeftStickX => {
                     self.left.x = v;
-                    self.update_stick(false);
+                    self.update_stick();
                 }
                 Axis::LeftStickY => {
                     self.left.y = v;
-                    self.update_stick(false);
-                }
-                Axis::RightStickX => {
-                    self.right.x = v;
-                    self.update_stick(true);
-                }
-                Axis::RightStickY => {
-                    self.right.y = v;
-                    self.update_stick(true);
+                    self.update_stick();
                 }
                 _ => {}
             },
@@ -316,28 +290,18 @@ impl PadThread {
         }
     }
 
-    fn update_stick(&mut self, right: bool) {
-        let s = if right { &self.right } else { &self.left };
+    fn update_stick(&mut self) {
+        let s = &self.left;
         let (x, y) = (s.x, s.y);
         let mag = x.abs().max(y.abs());
         let threshold = if s.active.is_some() { STICK_OFF } else { STICK_ON };
         let want = if mag < threshold {
             None
         } else if x.abs() > y.abs() {
-            Some(match (right, x > 0.0) {
-                (false, true) => Action::Right,
-                (false, false) => Action::Left,
-                (true, true) => Action::HistoryForward,
-                (true, false) => Action::HistoryBack,
-            })
+            Some(if x > 0.0 { Action::Right } else { Action::Left })
         } else {
             // gilrs: up is positive Y.
-            Some(match (right, y > 0.0) {
-                (false, true) => Action::Up,
-                (false, false) => Action::Down,
-                (true, true) => Action::FastUp,
-                (true, false) => Action::FastDown,
-            })
+            Some(if y > 0.0 { Action::Up } else { Action::Down })
         };
         let cur = s.active;
         if cur != want {
@@ -347,7 +311,7 @@ impl PadThread {
             if let Some(w) = want {
                 self.press(w);
             }
-            let s = if right { &mut self.right } else { &mut self.left };
+            let s = &mut self.left;
             s.active = want;
         }
     }

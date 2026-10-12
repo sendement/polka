@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -29,7 +29,6 @@ crossbeam-channel = "0.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 md5 = "0.8"
 png = "0.17"
-evdev = "0.13"
 
 [profile.release]
 lto = "thin"

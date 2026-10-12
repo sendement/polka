@@ -1,4 +1,0 @@
-# Let the logged-in user read Sony controller touchpads (DualSense, DualShock 4),
-# which Polka uses for swipe navigation. Gamepad buttons already get this
-# access through systemd's joystick rules; the touchpad is a separate device.
-SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="*Wireless Controller Touchpad", TAG+="uaccess"

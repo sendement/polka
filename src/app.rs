@@ -138,7 +138,7 @@ impl Pane {
                 }
                 // Search results keep their breadth-first order (near first).
                 if !matches!(self.loc, Location::Search { .. }) {
-                    sort_entries(&mut v, cfg.sort);
+                    sort_entries(&mut v, cfg);
                 }
                 self.all = v;
                 self.error = None;
@@ -273,13 +273,19 @@ fn natural_cmp(a: &str, b: &str) -> Ordering {
     }
 }
 
-fn sort_entries(v: &mut [Entry], key: SortKey) {
+/// Folders first (optional), then the key in its natural order: names A→Z,
+/// biggest and newest first, types A→Z. `sort_reverse` flips the key only.
+fn sort_entries(v: &mut [Entry], cfg: &Config) {
+    let ext = |e: &Entry| if e.is_dir { String::new() } else { ops::split_ext(&e.name).1.to_lowercase() };
     v.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| match key {
+        let dirs = if cfg.dirs_first { b.is_dir.cmp(&a.is_dir) } else { Ordering::Equal };
+        let key = match cfg.sort {
             SortKey::Name => natural_cmp(&a.name, &b.name),
             SortKey::Size => b.size.cmp(&a.size).then_with(|| natural_cmp(&a.name, &b.name)),
             SortKey::Date => b.mtime.cmp(&a.mtime).then_with(|| natural_cmp(&a.name, &b.name)),
-        })
+            SortKey::Type => ext(a).cmp(&ext(b)).then_with(|| natural_cmp(&a.name, &b.name)),
+        };
+        dirs.then(if cfg.sort_reverse { key.reverse() } else { key })
     });
 }
 
@@ -327,6 +333,10 @@ pub enum Cmd {
     ToggleSidebar,
     SetView(ViewMode),
     Sort(SortKey),
+    ToggleSortReverse,
+    ToggleDirsFirst,
+    /// Opens a nested menu next to the current one.
+    Submenu(SubMenu),
     GoTo,
     SelectAll,
     Help,
@@ -334,20 +344,47 @@ pub enum Cmd {
     Nothing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubMenu {
+    View,
+    Sort,
+}
+
 pub struct MenuItem {
     pub label: String,
     pub cmd: Cmd,
     pub enabled: bool,
     pub checked: Option<bool>,
+    /// Toggles stay in the menu so several can be flipped in a row.
+    pub keep_open: bool,
 }
 
 pub struct Menu {
     pub title: String,
     pub items: Vec<MenuItem>,
     pub cursor: usize,
+    /// Which submenu this is, to rebuild it after a toggle.
+    pub kind: Option<SubMenu>,
+    /// Open nested menu, shown to the right.
+    pub sub: Option<Box<Menu>>,
 }
 
 impl Menu {
+    pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
+        Self { title: title.into(), items, cursor: 0, kind: None, sub: None }
+    }
+
+    pub fn depth(&self) -> usize {
+        self.sub.as_ref().map_or(0, |s| 1 + s.depth())
+    }
+
+    pub fn at_depth_mut(&mut self, d: usize) -> &mut Menu {
+        if d == 0 || self.sub.is_none() {
+            return self;
+        }
+        self.sub.as_mut().unwrap().at_depth_mut(d - 1)
+    }
+
     fn first_enabled(mut self) -> Self {
         self.cursor = self.items.iter().position(|i| i.enabled).unwrap_or(0);
         self
@@ -369,7 +406,12 @@ impl Menu {
 }
 
 fn item(label: &str, cmd: Cmd) -> MenuItem {
-    MenuItem { label: label.to_string(), cmd, enabled: true, checked: None }
+    MenuItem { label: label.to_string(), cmd, enabled: true, checked: None, keep_open: false }
+}
+
+/// A checkbox / radio entry that keeps its menu open.
+fn toggle(label: &str, cmd: Cmd, on: bool) -> MenuItem {
+    MenuItem { checked: Some(on), keep_open: true, ..item(label, cmd) }
 }
 
 pub enum OskPurpose {
@@ -584,8 +626,8 @@ impl App {
         if std::env::var_os("POLKA_NO_GAMEPAD").is_none() {
             let c = ctx.clone();
             crate::input::spawn_gamepad(pad_tx.clone(), move || c.request_repaint());
-            let c = ctx.clone();
-            crate::touchpad::spawn(pad_tx, std::sync::Arc::new(move || c.request_repaint()));
+            // Dropping the last sender would close the channel.
+            std::mem::forget(pad_tx);
         } else {
             // Keep the sender alive so the channel never reports disconnection.
             std::mem::forget(pad_tx);
@@ -792,8 +834,8 @@ impl App {
         let grid = cfg.view == ViewMode::Grid;
         let cols = if grid { self.pane().cols.max(1) as isize } else { 1 };
         match a {
-            Action::Up | Action::FastUp => self.move_and_paint(-cols),
-            Action::Down | Action::FastDown => self.move_and_paint(cols),
+            Action::Up => self.move_and_paint(-cols),
+            Action::Down => self.move_and_paint(cols),
             Action::Left => {
                 let p = self.pane();
                 if grid && p.cursor as isize % cols != 0 {
@@ -849,10 +891,8 @@ impl App {
                 }
             }
             Action::LeftStick => self.run(Cmd::ToggleSidebar),
-            Action::RightStick => self.run(Cmd::Properties),
             Action::HistoryBack => self.pane_mut().history(false, &cfg),
             Action::HistoryForward => self.pane_mut().history(true, &cfg),
-            Action::TouchClick => self.focus_sidebar(),
         }
     }
 
@@ -896,11 +936,11 @@ impl App {
     fn handle_sidebar(&mut self, a: Action) {
         let n = self.side_items.len();
         match a {
-            Action::Up | Action::FastUp => self.side_cursor = self.side_cursor.saturating_sub(1),
-            Action::Down | Action::FastDown => self.side_cursor = (self.side_cursor + 1).min(n.saturating_sub(1)),
+            Action::Up => self.side_cursor = self.side_cursor.saturating_sub(1),
+            Action::Down => self.side_cursor = (self.side_cursor + 1).min(n.saturating_sub(1)),
             Action::Home => self.side_cursor = 0,
             Action::End => self.side_cursor = n.saturating_sub(1),
-            Action::Right | Action::Back | Action::TouchClick => self.focus = Focus::Panes,
+            Action::Right | Action::Back => self.focus = Focus::Panes,
             Action::Accept => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
                     let cfg = self.cfg.clone();
@@ -914,7 +954,7 @@ impl App {
                     if let (true, Some(p)) = (it.pinned, it.loc.local_path()) {
                         items.push(item(tr("Unpin from sidebar"), Cmd::Unpin(p.to_path_buf())));
                     }
-                    self.overlay = Some(Overlay::Menu(Menu { title: it.label, items, cursor: 0 }));
+                    self.overlay = Some(Overlay::Menu(Menu::new(it.label, items)));
                 }
             }
             Action::Menu => self.open_app_menu(),
@@ -928,19 +968,24 @@ impl App {
     fn handle_overlay(&mut self, a: Action) {
         let Some(ov) = self.overlay.as_mut() else { return };
         match ov {
-            Overlay::Menu(m) => match a {
-                Action::Up | Action::FastUp => m.step(-1),
-                Action::Down | Action::FastDown => m.step(1),
-                Action::Accept | Action::TouchClick => {
-                    let cmd = m.items.get(m.cursor).filter(|i| i.enabled).map(|i| i.cmd.clone());
-                    self.overlay = None;
-                    if let Some(c) = cmd {
-                        self.run(c);
+            Overlay::Menu(root) => {
+                let depth = root.depth();
+                let m = root.at_depth_mut(depth);
+                match a {
+                    Action::Up => m.step(-1),
+                    Action::Down => m.step(1),
+                    Action::Accept => self.menu_accept(depth),
+                    // Right only opens submenus; it never runs a command.
+                    Action::Right => {
+                        if matches!(m.items.get(m.cursor).map(|i| &i.cmd), Some(Cmd::Submenu(_))) {
+                            self.menu_accept(depth);
+                        }
                     }
+                    Action::Left | Action::Back if depth > 0 => root.at_depth_mut(depth - 1).sub = None,
+                    Action::Back | Action::Menu | Action::Actions => self.overlay = None,
+                    _ => {}
                 }
-                Action::Back | Action::Menu | Action::Actions => self.overlay = None,
-                _ => {}
-            },
+            }
             Overlay::Osk(k) => match a {
                 Action::Up | Action::Down | Action::Left | Action::Right => k.nav(a),
                 Action::Accept => {
@@ -958,11 +1003,11 @@ impl App {
                 _ => {}
             },
             Overlay::Themes(t) => match a {
-                Action::Up | Action::FastUp => t.cursor = t.cursor.saturating_sub(1),
-                Action::Down | Action::FastDown => t.cursor = (t.cursor + 1).min(t.items.len().saturating_sub(1)),
+                Action::Up => t.cursor = t.cursor.saturating_sub(1),
+                Action::Down => t.cursor = (t.cursor + 1).min(t.items.len().saturating_sub(1)),
                 Action::LeftTrigger => t.cursor = t.cursor.saturating_sub(8),
                 Action::RightTrigger => t.cursor = (t.cursor + 8).min(t.items.len().saturating_sub(1)),
-                Action::Accept | Action::TouchClick => {
+                Action::Accept => {
                     let id = t.items[t.cursor].0.clone();
                     self.overlay = None;
                     self.run(Cmd::SetIconTheme(id));
@@ -971,7 +1016,7 @@ impl App {
                 _ => {}
             },
             Overlay::Props(_) | Overlay::Help => {
-                if matches!(a, Action::Back | Action::Accept | Action::RightStick | Action::Menu) {
+                if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
                 }
             }
@@ -1177,7 +1222,7 @@ impl App {
 
         let mut items = Vec::new();
         let mut add = |label: &str, cmd: Cmd, enabled: bool| {
-            items.push(MenuItem { label: label.into(), cmd, enabled, checked: None })
+            items.push(MenuItem { enabled, ..item(label, cmd) })
         };
         add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
         add(tr("Copy"), Cmd::Copy, any);
@@ -1214,12 +1259,10 @@ impl App {
         } else {
             targets.first().map(|e| e.name.clone()).unwrap_or_else(|| p.loc.title())
         };
-        self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }.first_enabled()));
+        self.overlay = Some(Overlay::Menu(Menu::new(title, items).first_enabled()));
     }
 
     fn open_app_menu(&mut self) {
-        let c = &self.cfg;
-        let check = |label: &str, cmd: Cmd, on: bool| MenuItem { label: label.into(), cmd, enabled: true, checked: Some(on) };
         let local = self.pane().loc.local_path().is_some();
         let writable = self.pane().loc.dest().is_some();
         let items = vec![
@@ -1231,20 +1274,83 @@ impl App {
             MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
             item(tr("Go to path…"), Cmd::GoTo),
             item(tr("Select all"), Cmd::SelectAll),
-            check(tr("Dual pane"), Cmd::ToggleDual, c.dual),
-            check(tr("Sidebar"), Cmd::ToggleSidebar, !c.sidebar_collapsed),
-            check(tr("Show hidden files"), Cmd::ToggleHidden, c.show_hidden),
-            check(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
-            item(tr("Icon theme…"), Cmd::IconThemes),
-            check(tr("List view"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
-            check(tr("Grid view"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
-            check(tr("Sort by name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
-            check(tr("Sort by size"), Cmd::Sort(SortKey::Size), c.sort == SortKey::Size),
-            check(tr("Sort by date"), Cmd::Sort(SortKey::Date), c.sort == SortKey::Date),
+            item(tr("View"), Cmd::Submenu(SubMenu::View)),
+            item(tr("Sorting"), Cmd::Submenu(SubMenu::Sort)),
             item(tr("Controls"), Cmd::Help),
             item(tr("Quit"), Cmd::Quit),
         ];
-        self.overlay = Some(Overlay::Menu(Menu { title: "Polka".into(), items, cursor: 0 }));
+        self.overlay = Some(Overlay::Menu(Menu::new("Polka", items)));
+    }
+
+    fn build_submenu(&self, kind: SubMenu) -> Menu {
+        let c = &self.cfg;
+        let (title, items) = match kind {
+            SubMenu::View => (
+                tr("View"),
+                vec![
+                    toggle(tr("List"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
+                    toggle(tr("Grid"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
+                    toggle(tr("Dual pane"), Cmd::ToggleDual, c.dual),
+                    toggle(tr("Sidebar"), Cmd::ToggleSidebar, !c.sidebar_collapsed),
+                    toggle(tr("Show hidden files"), Cmd::ToggleHidden, c.show_hidden),
+                    toggle(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
+                    item(tr("Icon theme…"), Cmd::IconThemes),
+                ],
+            ),
+            SubMenu::Sort => (
+                tr("Sorting"),
+                vec![
+                    toggle(tr("By name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
+                    toggle(tr("By size"), Cmd::Sort(SortKey::Size), c.sort == SortKey::Size),
+                    toggle(tr("By date"), Cmd::Sort(SortKey::Date), c.sort == SortKey::Date),
+                    toggle(tr("By type"), Cmd::Sort(SortKey::Type), c.sort == SortKey::Type),
+                    toggle(tr("Reverse order"), Cmd::ToggleSortReverse, c.sort_reverse),
+                    toggle(tr("Folders first"), Cmd::ToggleDirsFirst, c.dirs_first),
+                ],
+            ),
+        };
+        Menu { kind: Some(kind), ..Menu::new(title, items) }
+    }
+
+    /// Accept the cursor item of the menu at `depth`: open a submenu, run a
+    /// toggle in place, or run a command and close.
+    pub fn menu_accept(&mut self, depth: usize) {
+        let Some(Overlay::Menu(root)) = self.overlay.as_mut() else { return };
+        let m = root.at_depth_mut(depth);
+        m.sub = None;
+        let Some(it) = m.items.get(m.cursor).filter(|i| i.enabled) else { return };
+        let (cmd, keep_open, kind) = (it.cmd.clone(), it.keep_open, m.kind);
+        match cmd {
+            Cmd::Submenu(k) => {
+                let sub = self.build_submenu(k);
+                if let Some(Overlay::Menu(root)) = self.overlay.as_mut() {
+                    root.at_depth_mut(depth).sub = Some(Box::new(sub));
+                }
+            }
+            cmd if keep_open => {
+                self.run(cmd);
+                // Rebuild in place so the checkmarks follow.
+                if let Some(k) = kind {
+                    let fresh = self.build_submenu(k);
+                    if let Some(Overlay::Menu(root)) = self.overlay.as_mut() {
+                        let m = root.at_depth_mut(depth);
+                        m.items = fresh.items;
+                    }
+                }
+            }
+            cmd => {
+                self.overlay = None;
+                self.run(cmd);
+            }
+        }
+    }
+
+    /// Mouse: move the cursor at `depth` to `index` and accept it.
+    pub fn menu_click(&mut self, depth: usize, index: usize) {
+        if let Some(Overlay::Menu(root)) = self.overlay.as_mut() {
+            root.at_depth_mut(depth).cursor = index;
+        }
+        self.menu_accept(depth);
     }
 
     /// Copy/move, asking first if names clash at the destination.
@@ -1268,7 +1374,7 @@ impl App {
             item(tr("Skip"), go(Conflict::Skip)),
             item(tr("Cancel"), Cmd::Nothing),
         ];
-        self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }));
+        self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
     }
 
     /// Put the cursor on `name` once the pane next reloads (after a job).
@@ -1368,7 +1474,7 @@ impl App {
                 }
                 let title = trn("Delete %n item(s) permanently?", inners.len());
                 let items = vec![item(tr("Cancel"), Cmd::Nothing), item(tr("Delete"), Cmd::DeleteInArchive { archive, inners })];
-                self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }));
+                self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
             }
             Cmd::DeleteInArchive { archive, inners } => {
                 self.pane_mut().selected.clear();
@@ -1399,7 +1505,7 @@ impl App {
                 let go = if perm { Cmd::DeleteNow(paths) } else { Cmd::TrashNow(paths) };
                 // Cancel first, so a stray double press of A never deletes.
                 let items = vec![item(tr("Cancel"), Cmd::Nothing), item(if perm { tr("Delete") } else { tr("Move to trash") }, go)];
-                self.overlay = Some(Overlay::Menu(Menu { title, items, cursor: 0 }));
+                self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
             }
             Cmd::TrashNow(paths) => {
                 self.pane_mut().selected.clear();
@@ -1411,7 +1517,7 @@ impl App {
             }
             Cmd::CompressAsk => {
                 let items = ArchiveFormat::ALL.iter().map(|f| item(f.ext(), Cmd::Compress(*f))).collect();
-                self.overlay = Some(Overlay::Menu(Menu { title: tr("Archive format").into(), items, cursor: 0 }));
+                self.overlay = Some(Overlay::Menu(Menu::new(tr("Archive format"), items)));
             }
             Cmd::Compress(format) => {
                 let sources = self.local_targets();
@@ -1518,6 +1624,17 @@ impl App {
                 self.cfg.save();
                 self.reload_all();
             }
+            Cmd::ToggleSortReverse => {
+                self.cfg.sort_reverse = !self.cfg.sort_reverse;
+                self.cfg.save();
+                self.reload_all();
+            }
+            Cmd::ToggleDirsFirst => {
+                self.cfg.dirs_first = !self.cfg.dirs_first;
+                self.cfg.save();
+                self.reload_all();
+            }
+            Cmd::Submenu(_) => {}
             Cmd::GoTo => {
                 let cur = self.pane().loc.display();
                 self.overlay = Some(Overlay::Osk(Osk::new(tr("Path"), &cur, OskPurpose::GoTo)));

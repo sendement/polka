@@ -332,7 +332,7 @@ impl App {
 
     fn hints(&self) -> Vec<(Action, &'static str)> {
         match &self.overlay {
-            Some(Overlay::Menu(_)) => vec![(Action::Accept, tr("OK")), (Action::Back, tr("Close"))],
+            Some(Overlay::Menu(_)) => vec![(Action::Accept, tr("OK")), (Action::Back, tr("Back"))],
             Some(Overlay::Osk(_)) => vec![
                 (Action::Accept, "⌨"),
                 (Action::Select, tr("Backspace")),
@@ -505,6 +505,7 @@ impl App {
         }
         let pad = self.pad;
         let mut run: Option<Cmd> = None;
+        let mut menu_click: Option<(usize, usize)> = None;
         let mut osk_key: Option<OskKey> = None;
         let mut dismiss = false;
         let (overlay, icons) = (&mut self.overlay, &mut self.icons);
@@ -513,7 +514,7 @@ impl App {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
-                    Some(Overlay::Menu(m)) => run = draw_menu(ui, m),
+                    Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
@@ -530,6 +531,9 @@ impl App {
         }
         if let Some(k) = osk_key {
             self.osk_key(k);
+        }
+        if let Some((depth, index)) = menu_click {
+            self.menu_click(depth, index);
         }
     }
 }
@@ -729,22 +733,59 @@ fn elided_centered(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32
 
 // ---------------------------------------------------------------- overlays
 
-fn draw_menu(ui: &mut Ui, m: &mut Menu) -> Option<Cmd> {
-    let mut run = None;
-    ui.set_min_width(340.0);
+/// A menu and its open submenus side by side. Returns a click as
+/// (depth, item index).
+fn draw_menu_cascade(ui: &mut Ui, root: &mut Menu) -> Option<(usize, usize)> {
+    let mut click = None;
+    ui.horizontal_top(|ui| {
+        let mut depth = 0;
+        let mut m = Some(root);
+        while let Some(menu) = m {
+            let focused = menu.sub.is_none();
+            let height = ui
+                .vertical(|ui| {
+                    if let Some(i) = draw_menu(ui, menu, focused) {
+                        click = Some((depth, i));
+                    }
+                })
+                .response
+                .rect
+                .height();
+            if menu.sub.is_some() {
+                let (line, _) = ui.allocate_exact_size(vec2(13.0, height), Sense::hover());
+                ui.painter().vline(line.center().x, line.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
+            }
+            depth += 1;
+            m = menu.sub.as_deref_mut();
+        }
+    });
+    click
+}
+
+/// One menu column. `focused` is false while a submenu to its right has
+/// the cursor, which dims this column's highlight.
+fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
+    let mut click = None;
+    ui.set_min_width(300.0);
     ui.label(egui::RichText::new(&m.title).strong().size(16.0));
     ui.add_space(6.0);
     ui.spacing_mut().item_spacing.y = 2.0;
+    // Line labels up when some items have checkboxes and others don't.
+    let has_checks = m.items.iter().any(|i| i.checked.is_some());
     for (i, it) in m.items.iter().enumerate() {
-        let (rect, r) = ui.allocate_exact_size(vec2(340.0, 34.0), if it.enabled { Sense::click() } else { Sense::hover() });
+        let (rect, r) = ui.allocate_exact_size(vec2(300.0, 34.0), if it.enabled { Sense::click() } else { Sense::hover() });
         if r.hovered() && it.enabled && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
             m.cursor = i;
         }
         let cur = i == m.cursor;
         if cur {
             let a = ui.visuals().selection.bg_fill;
-            ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.55));
-            ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, a), StrokeKind::Inside);
+            if focused {
+                ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.55));
+                ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, a), StrokeKind::Inside);
+            } else {
+                ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.3));
+            }
         }
         let color = if it.enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color().gamma_multiply(0.6) };
         let mut x = rect.min.x + 12.0;
@@ -754,14 +795,19 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu) -> Option<Cmd> {
             if on {
                 ui.painter().rect_filled(b.shrink(3.5), 2.0, ui.visuals().selection.bg_fill.gamma_multiply(1.6));
             }
+        }
+        if has_checks {
             x += 24.0;
         }
         ui.painter().text(pos2(x, rect.center().y), Align2::LEFT_CENTER, &it.label, FontId::proportional(15.0), color);
+        if matches!(it.cmd, Cmd::Submenu(_)) {
+            ui.painter().text(pos2(rect.max.x - 12.0, rect.center().y), Align2::RIGHT_CENTER, "›", FontId::proportional(18.0), color);
+        }
         if r.clicked() && it.enabled {
-            run = Some(it.cmd.clone());
+            click = Some(i);
         }
     }
-    run
+    click
 }
 
 fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
@@ -898,7 +944,10 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                 }
             });
         });
-        ui.separator();
+        // A plain ui.separator() here would stretch to the window's height
+        // from the last frame, and the window would grow every frame.
+        let (line, _) = ui.allocate_exact_size(vec2(9.0, 380.0), Sense::hover());
+        ui.painter().vline(line.center().x, line.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
         // Preview of the highlighted theme.
         ui.vertical(|ui| {
             let theme = t.preview[t.cursor].clone();
@@ -948,7 +997,7 @@ fn draw_props(ui: &mut Ui, p: &Props) -> bool {
 fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
     ui.label(egui::RichText::new(tr("Controls")).strong().size(18.0));
     ui.add_space(8.0);
-    let rows: [(Action, &str, &str); 16] = [
+    let rows: [(Action, &str, &str); 13] = [
         (Action::Up, "", "←↑→↓"),
         (Action::Accept, tr("Open"), "Enter"),
         (Action::Back, tr("Back"), "Backspace / Esc"),
@@ -959,11 +1008,8 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
         (Action::PrevTab, tr("Tabs"), "Ctrl+Tab"),
         (Action::LeftTrigger, tr("Panes / page"), "Tab / PgUp PgDn"),
         (Action::LeftStick, tr("Sidebar"), "Ctrl+B"),
-        (Action::RightStick, tr("Properties"), ""),
         (Action::HistoryBack, tr("History"), "Alt+← →"),
-        (Action::FastDown, tr("Fast scroll"), ""),
         (Action::Home, tr("Rename"), "F2"),
-        (Action::TouchClick, tr("Touchpad: swipe to move, click for places"), ""),
         (Action::Menu, tr("Filter / search"), "Ctrl+F / Ctrl+Shift+F"),
     ];
     egui::Grid::new("help").num_columns(3).spacing([18.0, 8.0]).show(ui, |ui| {
@@ -975,6 +1021,8 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
             ui.horizontal(|ui| {
                 if a == Action::Home {
                     glyph(ui, Action::Actions, pad);
+                } else if a == Action::HistoryBack {
+                    ui.label(egui::RichText::new("—").weak()); // keyboard / toolbar only
                 } else {
                     glyph(ui, a, pad);
                     if a == Action::PrevTab {
@@ -990,10 +1038,6 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
             ui.end_row();
         }
     });
-    if crate::touchpad::TOUCHPAD_STATUS.load(std::sync::atomic::Ordering::Relaxed) == crate::touchpad::STATUS_DENIED {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new(tr("The touchpad needs the udev rule from the Polka package (see README).")).small().color(ui.visuals().warn_fg_color));
-    }
     ui.add_space(8.0);
     ui.button(tr("Close")).clicked()
 }
@@ -1010,10 +1054,6 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
         Action::LeftTrigger => Some(shoulder("L2", "LT")),
         Action::RightTrigger => Some(shoulder("R2", "RT")),
         Action::LeftStick => Some(shoulder("L3", "LS")),
-        Action::RightStick => Some(shoulder("R3", "RS")),
-        Action::TouchClick => Some("TP"),
-        Action::HistoryBack | Action::HistoryForward => Some("R ↔"),
-        Action::FastUp | Action::FastDown => Some("R ↕"),
         _ => None,
     };
     if let Some(l) = label {

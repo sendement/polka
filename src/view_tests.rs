@@ -224,6 +224,19 @@ fn features(h: &mut Harness<'static, App>) {
     settle(h);
     settle(h);
     shot(h, "14-themes");
+    // The picker must not grow while the cursor moves (it used to, every frame).
+    let height = |h: &Harness<'static, App>| {
+        h.ctx.memory(|m| m.area_rect(egui::Id::new("overlay"))).map(|r| r.height()).unwrap()
+    };
+    let before = height(h);
+    for _ in 0..6 {
+        press(h, &[Action::Down]);
+    }
+    press(h, &[Action::Up, Action::Up]);
+    assert!((height(h) - before).abs() < 1.0, "picker grew: {before} -> {}", height(h));
+    if let (Some(crate::app::Overlay::Themes(t)), Some(i)) = (h.state_mut().overlay.as_mut(), target) {
+        t.cursor = i;
+    }
     press(h, &[Action::Accept]);
     assert!(h.state().overlay.is_none());
     if target.is_some() {
@@ -231,4 +244,34 @@ fn features(h: &mut Harness<'static, App>) {
     }
     settle(h);
     shot(h, "15-theme-applied");
+
+    submenus(h);
+}
+
+fn submenus(h: &mut Harness<'static, App>) {
+    use crate::app::Overlay;
+    let menu_depth = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Menu(m)) => Some(m.depth()),
+        _ => None,
+    };
+    press(h, &[Action::Menu]);
+    let view = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().position(|i| matches!(i.cmd, crate::app::Cmd::Submenu(crate::app::SubMenu::View))).unwrap(),
+        _ => panic!("no menu"),
+    };
+    if let Some(Overlay::Menu(m)) = h.state_mut().overlay.as_mut() {
+        m.cursor = view;
+    }
+    press(h, &[Action::Right]);
+    assert_eq!(menu_depth(h), Some(1));
+    // List is first, Grid second: toggling keeps the submenu open.
+    let was = h.state().cfg.view;
+    press(h, &[Action::Down, Action::Accept]);
+    assert_eq!(h.state().cfg.view, crate::config::ViewMode::Grid, "was {was:?}");
+    assert_eq!(menu_depth(h), Some(1));
+    shot(h, "16-submenu");
+    press(h, &[Action::Left]);
+    assert_eq!(menu_depth(h), Some(0));
+    press(h, &[Action::Back]);
+    assert_eq!(menu_depth(h), None);
 }

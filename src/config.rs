@@ -19,6 +19,8 @@ pub enum SortKey {
     Name,
     Size,
     Date,
+    /// By extension, then name.
+    Type,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -29,6 +31,9 @@ pub struct Config {
     pub sidebar_collapsed: bool,
     pub view: ViewMode,
     pub sort: SortKey,
+    /// Flip the sort key's natural order.
+    pub sort_reverse: bool,
+    pub dirs_first: bool,
     pub dual: bool,
     pub thumbnails: bool,
     /// Overrides the detected icon theme.
@@ -45,6 +50,8 @@ impl Default for Config {
             sidebar_collapsed: false,
             view: ViewMode::List,
             sort: SortKey::Name,
+            sort_reverse: false,
+            dirs_first: true,
             dual: false,
             thumbnails: true,
             icon_theme: None,
