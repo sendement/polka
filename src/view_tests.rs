@@ -311,4 +311,10 @@ fn settings(h: &mut Harness<'static, App>) {
     press(h, &[Action::Back]);
     assert!(h.state().overlay.is_none());
     shot(h, "19-big-list-icons");
+
+    h.state_mut().run(Cmd::NewTab);
+    h.state_mut().run(Cmd::NewTab);
+    settle(h);
+    shot(h, "20-tabs");
+    assert_eq!(h.state().tabs.len(), 3);
 }

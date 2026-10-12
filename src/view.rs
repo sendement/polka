@@ -18,6 +18,8 @@ use crate::input::{Action, Input, PadKind};
 /// Top bar button size and the icon inside it.
 const TOOL_BTN: f32 = 38.0;
 const TOOL_ICON: f32 = 24.0;
+/// Tab height; L1/R1 glyphs next to the tabs match it.
+const TAB_H: f32 = 30.0;
 /// Theme size asked for small icons. Many themes (Breeze, Win11) draw their
 /// 16–24px sizes as monochrome glyphs; 32 gets the full-colour ones and is
 /// sharper on HiDPI anyway.
@@ -304,73 +306,91 @@ impl App {
         }
     }
 
-    /// Tabs strip at the top of the file area.
+    /// Tabs strip at the top of the file area: L1, tabs, "+", R1 centred
+    /// in a fixed-height row (laid out by hand so everything shares one
+    /// vertical centre).
     fn draw_tabs(&mut self, ui: &mut Ui) {
         let dual = self.cfg.dual;
         let mut switch = None;
         let mut close = None;
         let mut new_tab = false;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            glyph(ui, Action::PrevTab, self.pad);
-            let many = self.tabs.len() > 1;
-            for (i, t) in self.tabs.iter().enumerate() {
+        let v = ui.visuals().clone();
+        let many = self.tabs.len() > 1;
+        let gap = 6.0;
+        let shoulder_w = TAB_H * 1.4;
+
+        let titles: Vec<_> = self
+            .tabs
+            .iter()
+            .map(|t| {
                 let p = &t.panes[if dual { t.active } else { 0 }];
-                let is_active = i == self.tab;
-                let v = ui.visuals().clone();
-                let font = FontId::proportional(14.0);
-                let title = elided(ui, &p.loc.title(), font, v.text_color(), 180.0, 1);
-                let close_w = if many { 20.0 } else { 0.0 };
-                let w = (title.size().x + 28.0 + close_w).max(96.0);
-                let (rect, r) = ui.allocate_exact_size(vec2(w, 30.0), Sense::click());
-                let accent = v.selection.bg_fill;
-                let (fill, stroke) = if is_active {
-                    (accent.gamma_multiply(0.35), Stroke::new(1.5, accent))
-                } else if r.hovered() {
-                    (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
-                } else {
-                    (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
-                };
-                ui.painter().rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
-                let text_x = rect.min.x + 14.0;
-                ui.painter().galley(pos2(text_x, rect.center().y - title.size().y / 2.0), title, v.text_color());
-                if many {
-                    let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
-                    let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
-                    if is_active || r.hovered() || cresp.hovered() {
-                        if cresp.hovered() {
-                            ui.painter().circle_filled(cr.center(), 9.0, v.widgets.hovered.bg_fill);
-                        }
-                        ui.painter().text(cr.center(), Align2::CENTER_CENTER, "×", FontId::proportional(15.0), v.weak_text_color());
+                elided(ui, &p.loc.title(), FontId::proportional(14.0), v.text_color(), 180.0, 1)
+            })
+            .collect();
+        let close_w = if many { 20.0 } else { 0.0 };
+        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 28.0 + close_w).max(96.0)).collect();
+        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + 2) as f32;
+
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
+        let mut x = (row.center().x - total / 2.0).max(row.min.x);
+        let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
+        let painter = ui.painter().with_clip_rect(row.expand(2.0));
+
+        shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
+        x += shoulder_w + gap;
+        for (i, (title, w)) in titles.into_iter().zip(widths).enumerate() {
+            let rect = at(x, w);
+            x += w + gap;
+            let is_active = i == self.tab;
+            let r = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
+            let accent = v.selection.bg_fill;
+            let (fill, stroke) = if is_active {
+                (accent.gamma_multiply(0.35), Stroke::new(1.5, accent))
+            } else if r.hovered() {
+                (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
+            } else {
+                (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
+            };
+            painter.rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
+            painter.galley(pos2(rect.min.x + 14.0, rect.center().y - title.size().y / 2.0), title, v.text_color());
+            if many {
+                let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
+                let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
+                if is_active || r.hovered() || cresp.hovered() {
+                    if cresp.hovered() {
+                        painter.circle_filled(cr.center(), 9.0, v.widgets.hovered.bg_fill);
                     }
-                    if cresp.clicked() {
-                        close = Some(i);
-                        continue;
-                    }
+                    painter.text(cr.center(), Align2::CENTER_CENTER, "×", FontId::proportional(15.0), v.weak_text_color());
                 }
-                if r.clicked() {
-                    switch = Some(i);
-                }
-                if r.middle_clicked() {
+                if cresp.clicked() {
                     close = Some(i);
+                    continue;
                 }
             }
-            let (rect, r) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
-            let v = ui.visuals();
-            ui.painter().rect(
-                rect,
-                7.0,
-                if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT },
-                v.widgets.noninteractive.bg_stroke,
-                StrokeKind::Inside,
-            );
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
-            if r.on_hover_text(tr("New tab")).clicked() {
-                new_tab = true;
+            if r.clicked() {
+                switch = Some(i);
             }
-            glyph(ui, Action::NextTab, self.pad);
-        });
+            if r.middle_clicked() {
+                close = Some(i);
+            }
+        }
+        let plus = at(x, TAB_H);
+        x += TAB_H + gap;
+        let r = ui.interact(plus, ui.id().with("tab-new"), Sense::click());
+        painter.rect(
+            plus,
+            7.0,
+            if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT },
+            v.widgets.noninteractive.bg_stroke,
+            StrokeKind::Inside,
+        );
+        painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
+        if r.on_hover_text(tr("New tab")).clicked() {
+            new_tab = true;
+        }
+        shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
         ui.add_space(6.0);
+
         if let Some(i) = switch {
             self.tab = i;
         }
@@ -1166,21 +1186,32 @@ fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
 // ---------------------------------------------------------------- glyphs
 
 /// Draw a gamepad button glyph (font independent).
+fn shoulder_label(a: Action, pad: PadKind) -> Option<&'static str> {
+    let ps = pad == PadKind::PlayStation;
+    let pick = |l: &'static str, x: &'static str| if ps { l } else { x };
+    Some(match a {
+        Action::PrevTab => pick("L1", "LB"),
+        Action::NextTab => pick("R1", "RB"),
+        Action::LeftTrigger => pick("L2", "LT"),
+        Action::RightTrigger => pick("R2", "RT"),
+        Action::LeftStick => pick("L3", "LS"),
+        _ => return None,
+    })
+}
+
+/// Shoulder/trigger button glyph filling `rect`; the label scales with it.
+fn shoulder_glyph(painter: &egui::Painter, rect: Rect, a: Action, pad: PadKind) {
+    let Some(l) = shoulder_label(a, pad) else { return };
+    let radius = (rect.height() * 0.28).round() as u8;
+    painter.rect_filled(rect, CornerRadius::same(radius), Color32::from_gray(60));
+    painter.text(rect.center(), Align2::CENTER_CENTER, l, FontId::proportional(rect.height() * 0.6), Color32::from_gray(230));
+}
+
 pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
     let ps = pad == PadKind::PlayStation;
-    let shoulder = |l: &'static str, x: &'static str| if ps { l } else { x };
-    let label: Option<&str> = match a {
-        Action::PrevTab => Some(shoulder("L1", "LB")),
-        Action::NextTab => Some(shoulder("R1", "RB")),
-        Action::LeftTrigger => Some(shoulder("L2", "LT")),
-        Action::RightTrigger => Some(shoulder("R2", "RT")),
-        Action::LeftStick => Some(shoulder("L3", "LS")),
-        _ => None,
-    };
-    if let Some(l) = label {
+    if shoulder_label(a, pad).is_some() {
         let (rect, _) = ui.allocate_exact_size(vec2(28.0, 18.0), Sense::hover());
-        ui.painter().rect_filled(rect, CornerRadius::same(5), Color32::from_gray(60));
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, l, FontId::proportional(11.0), Color32::from_gray(230));
+        shoulder_glyph(ui.painter(), rect, a, pad);
         return;
     }
     let (rect, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
