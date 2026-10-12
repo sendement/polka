@@ -34,7 +34,7 @@ pub struct Pane {
     /// (extracted temp archive, location it was opened from, its name there).
     nest: Vec<(PathBuf, Location, String)>,
     pub loading: Option<Receiver<std::io::Result<Vec<Entry>>>>,
-    pending_focus: Option<String>,
+    pub pending_focus: Option<String>,
     pub scroll_to_cursor: bool,
     /// Viewport height from the last frame, for keeping the cursor visible.
     pub view_h: f32,
@@ -570,11 +570,16 @@ impl App {
         let icon_ctx = ctx.clone();
         let icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
-        let start = start.filter(|p| p.is_dir()).unwrap_or(home.clone());
-        let tab = Tab {
-            panes: [Pane::new(Location::Local(start), &cfg), Pane::new(Location::Local(home), &cfg)],
-            active: 0,
-        };
+        let (start, focus) = start.and_then(|p| start_location(&p)).unwrap_or((Location::Local(home.clone()), None));
+        let mut first = Pane::new(start, &cfg);
+        if let Some(name) = focus {
+            // Archives list in the background; the name is applied when ready.
+            first.pending_focus = Some(name.clone());
+            if let Some(i) = first.entries.iter().position(|e| e.name == name) {
+                first.set_cursor(i);
+            }
+        }
+        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0 };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         ctx.set_zoom_factor(cfg.zoom);
         let mut app = Self {
@@ -1514,6 +1519,44 @@ impl App {
     }
 }
 
+/// What to show for a command-line argument: a folder, an archive as a
+/// folder, or a file's folder with the cursor on it.
+fn start_location(p: &Path) -> Option<(Location, Option<String>)> {
+    let p = std::fs::canonicalize(p).ok()?;
+    if p.is_dir() {
+        return Some((Location::Local(p), None));
+    }
+    let name = p.file_name()?.to_string_lossy().into_owned();
+    if vfs::is_archive_name(&name) {
+        return Some((Location::Archive { archive: p, inner: String::new() }, None));
+    }
+    Some((Location::Local(p.parent()?.to_path_buf()), Some(name)))
+}
+
+/// A path from argv, which may be a file:// URI (from .desktop %U).
+pub fn arg_path(arg: &std::ffi::OsStr) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let s = arg.to_string_lossy();
+    let Some(rest) = s.strip_prefix("file://") else { return PathBuf::from(arg) };
+    // Skip an optional host part ("file://localhost/...").
+    let rest = &rest[rest.find('/').unwrap_or(0)..];
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
 fn expand_tilde(s: &str) -> PathBuf {
     if let (Some(rest), Some(h)) = (s.strip_prefix('~'), dirs::home_dir()) {
         return h.join(rest.trim_start_matches('/'));
@@ -1568,4 +1611,17 @@ fn fmt_mode(m: u32) -> String {
         s.push(if b & 1 != 0 { 'x' } else { '-' });
     }
     format!("{s} ({:o})", m & 0o7777)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn uri_args() {
+        use std::ffi::OsStr;
+        use std::path::PathBuf;
+        assert_eq!(super::arg_path(OsStr::new("file:///home/a%20b/%D0%B6.zip")), PathBuf::from("/home/a b/ж.zip"));
+        assert_eq!(super::arg_path(OsStr::new("file://localhost/tmp/x")), PathBuf::from("/tmp/x"));
+        assert_eq!(super::arg_path(OsStr::new("/plain/%20")), PathBuf::from("/plain/%20"));
+        assert_eq!(super::arg_path(OsStr::new("file:///end%2")), PathBuf::from("/end%2"));
+    }
 }

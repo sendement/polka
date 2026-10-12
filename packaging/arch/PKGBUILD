@@ -1,0 +1,63 @@
+# Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
+pkgname=polka
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Gamepad-first file manager: dual pane, archives as folders, themed and .exe icons"
+arch=('x86_64')
+url="https://github.com/sendement/polka"
+license=('MIT')
+depends=(
+  'libarchive'
+  'xz'
+  'zstd'
+  'systemd-libs'     # libudev, gamepad hotplug
+  'gcc-libs'
+  'glibc'
+  # loaded at runtime by winit/glow
+  'libxkbcommon'
+  'wayland'
+  'libglvnd'
+  'fontconfig'       # system UI font lookup
+  'hicolor-icon-theme'
+  'xdg-utils'        # opening files with their default apps
+)
+optdepends=(
+  'ffmpegthumbnailer: video thumbnails'
+  'papirus-icon-theme: a complete icon theme, if yours lacks mime icons'
+)
+makedepends=('cargo')
+# Local snapshot made by make-tarball.sh; switch to the GitHub tag tarball
+# once the repository is public.
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Keep the registry inside $srcdir so --remap-path-prefix hides it.
+  export CARGO_HOME="$srcdir/cargo-home"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export CARGO_HOME="$srcdir/cargo-home"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
+  POLKA_NO_GAMEPAD=1 cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/polka "$pkgdir/usr/bin/polka"
+  install -Dm644 packaging/polka.desktop "$pkgdir/usr/share/applications/polka.desktop"
+  install -Dm644 packaging/polka.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/polka.svg"
+  install -Dm644 packaging/70-polka-dualsense-touchpad.rules "$pkgdir/usr/lib/udev/rules.d/70-polka-dualsense-touchpad.rules"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

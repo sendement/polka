@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Polka
+GenericName=File Manager
+GenericName[ru]=Файловый менеджер
+Comment=Gamepad-first file manager
+Comment[ru]=Файловый менеджер с полной поддержкой геймпада
+Exec=polka %U
+Icon=polka
+Terminal=false
+Categories=System;FileTools;FileManager;
+Keywords=files;folders;archive;gamepad;controller;
+MimeType=inode/directory;application/zip;application/x-7z-compressed;application/x-tar;application/x-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-bzip-compressed-tar;application/vnd.rar;application/x-rar;application/x-cd-image;
+StartupWMClass=polka

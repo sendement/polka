@@ -15,7 +15,7 @@ mod view;
 mod view_tests;
 
 fn main() -> eframe::Result {
-    let start = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Polka")
