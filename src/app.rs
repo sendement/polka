@@ -1268,7 +1268,7 @@ impl App {
                 let items: Vec<Location> = p.targets().iter().map(|e| p.entry_loc(e)).collect();
                 if !items.is_empty() {
                     let cut = matches!(cmd, Cmd::Cut);
-                    self.toast(format!("{} {}", items.len(), if cut { tr("Cut") } else { tr("Copy") }), false);
+                    self.toast(trn(if cut { "Cut: %n" } else { "Copied: %n" }, items.len()), false);
                     self.clip = Some(Clip { items, cut });
                     self.pane_mut().selected.clear();
                 }

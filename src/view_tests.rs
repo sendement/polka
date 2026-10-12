@@ -15,6 +15,7 @@ fn harness(dir: PathBuf) -> Harness<'static, App> {
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
         std::env::set_var("POLKA_NO_GAMEPAD", "1");
+        std::env::set_var("XDG_CACHE_HOME", cfg.join("cache"));
     }
     Harness::builder()
         .with_size([1100.0, 680.0])
@@ -105,4 +106,107 @@ fn screens() {
     h.state_mut().run(crate::app::Cmd::Help);
     settle(&mut h);
     shot(&mut h, "08-help");
+
+    press(&mut h, &[Action::Back]);
+    press(&mut h, &[Action::View]); // back to single pane
+
+    features(&mut h);
+}
+
+fn osk_type(h: &mut Harness<'static, App>, text: &str) {
+    if let Some(crate::app::Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        k.text.clear();
+        k.caret = 0;
+        k.insert(text);
+    }
+    settle(h);
+}
+
+fn wait_jobs(h: &mut Harness<'static, App>) {
+    for _ in 0..200 {
+        settle(h);
+        if h.state().jobs.is_empty() {
+            return;
+        }
+    }
+    panic!("jobs did not finish");
+}
+
+fn features(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    h.state_mut().overlay = None;
+    h.state_mut().focus = crate::app::Focus::Panes;
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir.clone()), None, &cfg);
+    // A photo for thumbnails.
+    image::RgbaImage::from_fn(300, 200, |x, y| image::Rgba([(x % 255) as u8, (y % 255) as u8, 160, 255]))
+        .save(dir.join("photo.png"))
+        .unwrap();
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    settle(h);
+    shot(h, "09-thumbs-grid");
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+
+    // Live filter.
+    h.state_mut().run(Cmd::Filter);
+    osk_type(h, "o");
+    shot(h, "10-filter-live");
+    h.state_mut().osk_submit();
+    settle(h);
+    assert!(h.state().pane().entries.iter().all(|e| e.name.to_lowercase().contains('o')));
+    press(h, &[Action::Back]);
+    assert!(h.state().pane().filter.is_none());
+
+    // Conflict prompt: copy note.txt into folder twice.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "note.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Copy);
+    let f = h.state().pane().entries.iter().position(|e| e.name == "folder").unwrap();
+    h.state_mut().pane_mut().set_cursor(f);
+    press(h, &[Action::Accept]);
+    h.state_mut().run(Cmd::Paste);
+    wait_jobs(h);
+    h.state_mut().run(Cmd::Paste);
+    settle(h);
+    shot(h, "11-conflict");
+    assert!(matches!(h.state().overlay, Some(crate::app::Overlay::Menu(_))));
+    press(h, &[Action::Accept]); // keep both
+    wait_jobs(h);
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"note (2).txt".to_string()), "{names:?}");
+    press(h, &[Action::Back]);
+
+    // Paste into an archive, then rename inside it.
+    let a = h.state().pane().entries.iter().position(|e| e.name == "code.tar.gz").unwrap();
+    h.state_mut().pane_mut().set_cursor(a);
+    press(h, &[Action::Accept]);
+    h.state_mut().run(Cmd::Paste);
+    wait_jobs(h);
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"note.txt".to_string()), "{names:?}");
+    let n = names.iter().position(|e| e == "note.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(n);
+    h.state_mut().run(Cmd::Rename);
+    osk_type(h, "renamed.txt");
+    h.state_mut().osk_submit();
+    wait_jobs(h);
+    shot(h, "12-archive-edited");
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"renamed.txt".to_string()), "{names:?}");
+    assert_eq!(h.state().pane().current().map(|e| e.name.as_str()), Some("renamed.txt"));
+    press(h, &[Action::Back]);
+
+    // Recursive search.
+    h.state_mut().run(Cmd::Search);
+    osk_type(h, "note");
+    h.state_mut().osk_submit();
+    settle(h);
+    settle(h);
+    shot(h, "13-search");
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert!(names.contains(&"folder/note.txt".to_string()), "{names:?}");
 }

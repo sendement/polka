@@ -6,9 +6,14 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 
 - Classic layout: collapsible sidebar (places, pinned folders, drives), path bar, tabs
 - List and grid views, dual-pane mode
-- Archives open like folders (zip, 7z, rar, tar.*, iso… via libarchive); copy files out of them
+- Archives work like folders (libarchive): browse zip, 7z, rar, tar.*, iso…; copy, move, rename,
+  delete and create folders inside zip, 7z and tar.* (rar/iso are read-only)
 - Built-in archiver: zip, tar.zst, tar.gz, tar.xz; smart extract
+- Name clashes ask: keep both, replace (folders merge), skip
+- Quick filter (live, as you type) and recursive search
+- Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
+- DualSense / DualShock 4 touchpad: swipe to move, click to jump to the sidebar
 
 ## Controls
 
@@ -27,6 +32,12 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 | R3 | Properties | |
 | Right stick ↔ / ↕ | History back/forward / fast scroll | Alt+← → |
 
+Touchpad (DualSense / DS4): swipe up/down moves the cursor, left/right works like the arrows,
+a click jumps between the files and the sidebar. It needs read access to the touchpad device:
+the package installs `70-polka-dualsense-touchpad.rules` (reconnect the controller afterwards).
+
+Filter: app menu → Filter… or Ctrl+F (○/B clears it). Search in subfolders: app menu or Ctrl+Shift+F.
+
 On-screen keyboard: ✕/A types the key, □/X erases, △/Y inserts a space, L1/R1 move
 the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu confirms.
 
@@ -34,12 +45,16 @@ Gamepad input is ignored while Polka is not the focused window.
 
 ## Build
 
-Needs Rust and libarchive (`pacman -S libarchive`).
+Needs Rust, libarchive and zstd (`pacman -S libarchive zstd`).
 
 ```sh
 cargo build --release
-./target/release/polka [DIR]
+./target/release/polka [DIR | FILE | ARCHIVE | file://URI]
 ```
+
+Arch package: `packaging/arch/make-tarball.sh`, then `makepkg` in `packaging/arch`
+(installs the binary, desktop entry, icon and the touchpad udev rule).
+Video thumbnails need `ffmpegthumbnailer`.
 
 Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,
 `icon_theme` override, `zoom` for TV use; Ctrl+= / Ctrl+- also zoom).
