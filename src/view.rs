@@ -65,6 +65,13 @@ impl eframe::App for App {
         self.draw_center(ui);
         self.draw_overlay(&ctx);
 
+        // Closing the window with unsaved text asks first.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quit {
+            let dirty = (0..self.tabs.len()).find(|&i| self.confirm_unsaved(i, crate::viewer::glue::Then::Quit));
+            if dirty.is_some() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+        }
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -81,8 +88,12 @@ impl App {
         if self.range.as_ref().is_some_and(|r| r.keyboard) && !ctx.input(|i| i.modifiers.shift) {
             self.range = None;
         }
-        let events = ctx.input(|i| i.events.clone());
+        let mut events = ctx.input(|i| i.events.clone());
         let osk = matches!(self.overlay, Some(Overlay::Osk(_)));
+        // A text file open: the editor takes the keys first.
+        if self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
+            events = self.editor_keyboard(events);
+        }
         for ev in events {
             match ev {
                 egui::Event::Text(t) if osk => {
@@ -524,7 +535,15 @@ impl App {
                 (Action::Back, tr("Cancel")),
             ],
             Some(_) => vec![(Action::Back, tr("Close"))],
+            None if self.focus == Focus::Panes && self.text_editing() => vec![
+                (Action::Up, tr("Move")),
+                (Action::Accept, tr("Type in")),
+                (Action::Select, tr("Erase / select")),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Done")),
+            ],
             None if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) && self.focus == Focus::Panes => vec![
+                (Action::Accept, tr("Edit")),
                 (Action::Up, tr("Scroll")),
                 (Action::LeftTrigger, tr("Page")),
                 (Action::Actions, tr("Actions")),
@@ -674,9 +693,12 @@ impl App {
         if let Some(a) = viewer_act {
             use crate::viewer::draw::HeaderAct;
             match a {
-                HeaderAct::Close => self.close_viewer(),
+                HeaderAct::Close => self.request_close_viewer(),
                 HeaderAct::Settings => self.run(Cmd::ViewerSettings),
                 HeaderAct::External => self.run(Cmd::OpenExternal),
+                HeaderAct::Save => self.run(Cmd::ViewerSave),
+                HeaderAct::ToggleMd => self.run(Cmd::ViewerToggleMd),
+                HeaderAct::Link(l) => self.viewer_link(l),
             }
         }
         let divider = if self.tabs[tab].viewer.is_some() { self.divider_x } else { divider };

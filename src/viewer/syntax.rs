@@ -240,6 +240,14 @@ pub fn detect_shebang(first_line: &str) -> Option<&'static str> {
     })
 }
 
+/// Language for a Markdown fence info string (`rust`, `py`, `sh`…).
+pub fn by_alias(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        return None;
+    }
+    find(name).map(|l| l.name).or_else(|| detect(&format!("x.{name}")))
+}
+
 fn find(name: &str) -> Option<&'static Lang> {
     let n = name.to_lowercase();
     langs().iter().find(|l| l.name.eq_ignore_ascii_case(&n) || l.aliases.contains(&n.as_str()))

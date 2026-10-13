@@ -65,6 +65,10 @@ pub fn install_with(ctx: &egui::Context, viewer: Option<&str>) {
     add("system-sans", "sans-serif", egui::FontFamily::Proportional, 0);
     add("system-symbols", "sans-serif:charset=21e7 232b 25c9 2192 2195", egui::FontFamily::Proportional, 1);
     add("system-mono", "monospace", egui::FontFamily::Monospace, 0);
+    // Bold for Markdown: the bold face of the UI font, then the usual chain.
+    add("system-sans-bold", "sans-serif:bold", egui::FontFamily::Name("bold".into()), 0);
+    let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+    fonts.families.entry(egui::FontFamily::Name("bold".into())).or_default().extend(prop);
     // The viewer's family: the chosen font, then the usual monospace chain.
     let mut chain: Vec<String> = Vec::new();
     if let Some(path) = viewer.and_then(|v| mono_families().iter().find(|(f, _)| f == v)).map(|(_, p)| p) {

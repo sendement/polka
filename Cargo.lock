@@ -3135,7 +3135,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "compress-tools",
@@ -3154,6 +3154,8 @@ dependencies = [
  "mime_guess",
  "pelite",
  "png 0.17.16",
+ "pulldown-cmark",
+ "regex",
  "serde",
  "tar",
  "toml",
@@ -3266,6 +3268,17 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
 
 [[package]]
 name = "pxfm"

@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -59,6 +59,8 @@ tree-sitter-cmake = "0.7"
 tree-sitter-sequel = "0.3"
 tree-sitter-qmljs = "0.3"
 tree-sitter-glsl = "0.2"
+regex = "1"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [profile.release]
 lto = "thin"

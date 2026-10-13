@@ -9,56 +9,207 @@ use super::{Content, ImageState, TextState, Viewer, image::Pixels};
 use crate::config::ViewerPrefs;
 use crate::i18n::tr;
 
-/// Clicks in the viewer's header.
+/// Clicks in the viewer.
 pub enum HeaderAct {
     Close,
     Settings,
     External,
+    Save,
+    ToggleMd,
+    /// A link in rendered Markdown.
+    Link(String),
 }
 
 pub fn viewer_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("viewer".into()))
 }
 
+/// Is the Markdown drawn rendered right now?
+pub fn md_rendered(t: &TextState, prefs: &ViewerPrefs) -> bool {
+    t.doc.lang == Some("Markdown") && prefs.md_rendered && t.ed.find.is_none() && !t.ed.editing
+}
+
+fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool {
+    let vis = ui.visuals().clone();
+    let resp = ui.interact(r, ui.id().with(("viewer-btn", label, r.min.x as i32, r.min.y as i32)), Sense::click()).on_hover_text(tip);
+    if on {
+        ui.painter().rect_filled(r, 6.0, vis.selection.bg_fill.gamma_multiply(0.45));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(r, 6.0, vis.widgets.hovered.weak_bg_fill);
+    }
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), vis.text_color());
+    resp.clicked()
+}
+
 /// The whole viewer: a header line, then the content.
 pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> Option<HeaderAct> {
     let mut act = None;
     let vis = ui.visuals().clone();
-    // Header: name, details, buttons.
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
-    let p = ui.painter();
     let mut x = head.min.x + 6.0;
-    let name = p.layout_no_wrap(v.name.clone(), FontId::proportional(16.0), vis.strong_text_color());
-    p.galley(pos2(x, head.center().y - name.size().y / 2.0), name.clone(), vis.strong_text_color());
+    let dirty = matches!(&v.content, Content::Text(t) if t.ed.dirty);
+    let title = if dirty { format!("● {}", v.name) } else { v.name.clone() };
+    let name = ui.painter().layout_no_wrap(title, FontId::proportional(16.0), vis.strong_text_color());
+    ui.painter().galley(pos2(x, head.center().y - name.size().y / 2.0), name.clone(), vis.strong_text_color());
     x += name.size().x + 14.0;
-    let details = details(v);
-    p.text(pos2(x, head.center().y), Align2::LEFT_CENTER, details, FontId::proportional(13.0), vis.weak_text_color());
+    ui.painter().text(pos2(x, head.center().y), Align2::LEFT_CENTER, details(v), FontId::proportional(13.0), vis.weak_text_color());
     let mut bx = head.max.x - 30.0;
-    let mut buttons: Vec<(&str, &str, HeaderAct)> = vec![("✕", tr("Close"), HeaderAct::Close), ("↗", tr("Open in another app"), HeaderAct::External)];
-    if v.is_text() {
-        buttons.push(("⚙", tr("Viewer settings"), HeaderAct::Settings));
+    let btn = |bx: f32, w: f32| Rect::from_min_size(pos2(bx, head.min.y + 3.0), vec2(w, 28.0));
+    if header_button(ui, btn(bx, 28.0), "✕", tr("Close"), false) {
+        act = Some(HeaderAct::Close);
     }
-    for (glyph, tip, a) in buttons {
-        let r = Rect::from_min_size(pos2(bx, head.min.y + 3.0), Vec2::splat(28.0));
-        let resp = ui.interact(r, ui.id().with(("viewer-btn", glyph)), Sense::click()).on_hover_text(tip);
-        if resp.hovered() {
-            ui.painter().rect_filled(r, 6.0, vis.widgets.hovered.weak_bg_fill);
-        }
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(16.0), vis.text_color());
-        if resp.clicked() {
-            act = Some(a);
-        }
+    bx -= 32.0;
+    if header_button(ui, btn(bx, 28.0), "↗", tr("Open in another app"), false) {
+        act = Some(HeaderAct::External);
+    }
+    if let Content::Text(t) = &v.content {
         bx -= 32.0;
+        if header_button(ui, btn(bx, 28.0), "⚙", tr("Viewer settings"), false) {
+            act = Some(HeaderAct::Settings);
+        }
+        if dirty {
+            let w = 110.0;
+            bx -= w + 4.0;
+            if header_button(ui, btn(bx, w), tr("Save"), "Ctrl+S", true) {
+                act = Some(HeaderAct::Save);
+            }
+        }
+        if t.doc.lang == Some("Markdown") {
+            // GitHub view ↔ source.
+            let rendered = md_rendered(t, prefs);
+            for (label, on) in [(tr("Source"), !rendered), (tr("Rendered"), rendered)] {
+                let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+                bx -= w + 4.0;
+                if header_button(ui, btn(bx, w), label, tr("Markdown: as on GitHub or as source"), on) && !on {
+                    act = Some(HeaderAct::ToggleMd);
+                }
+            }
+        }
     }
     ui.add_space(4.0);
     match &mut v.content {
-        Content::Text(t) => draw_text(ui, t, prefs, theme),
+        Content::Text(t) => {
+            if t.ed.find.is_some() {
+                draw_find(ui, t, theme);
+            }
+            if md_rendered(t, prefs) {
+                if let Some(l) = draw_md(ui, t, prefs, theme, v.path.parent().unwrap_or(std::path::Path::new("/"))) {
+                    act = Some(HeaderAct::Link(l));
+                }
+            } else {
+                draw_text(ui, t, prefs, theme);
+            }
+        }
         Content::Image(im) => draw_image(ui, im),
         Content::Error(e) => {
             ui.centered_and_justified(|ui| ui.label(egui::RichText::new(e.as_str()).color(vis.error_fg_color)));
         }
     }
     act
+}
+
+/// Search bar: query, options, count, arrows.
+fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) {
+    let vis = ui.visuals().clone();
+    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    ui.add_space(4.0);
+    let Some(f) = t.ed.find.as_mut() else { return };
+    let field = Rect::from_min_size(bar.min + vec2(4.0, 3.0), vec2((bar.width() * 0.45).clamp(200.0, 520.0), 30.0));
+    let fr = ui.interact(field, ui.id().with("find-field"), Sense::click());
+    if fr.clicked() {
+        f.typing = true;
+    }
+    let border = if f.error.is_some() { vis.error_fg_color } else if f.typing { vis.selection.bg_fill } else { vis.widgets.noninteractive.bg_stroke.color };
+    ui.painter().rect(field, 6.0, vis.extreme_bg_color, Stroke::new(1.5, border), StrokeKind::Inside);
+    let font = FontId::proportional(15.0);
+    let painter = ui.painter().with_clip_rect(field.shrink(2.0));
+    let (shown, color) = if f.query.is_empty() && !f.typing { (tr("Search…").to_string(), vis.weak_text_color()) } else { (f.query.clone(), vis.text_color()) };
+    let g = painter.layout_no_wrap(shown, font.clone(), color);
+    let tx = field.min.x + 10.0 - (g.size().x - field.width() + 30.0).max(0.0);
+    painter.galley(pos2(tx, field.center().y - g.size().y / 2.0), g.clone(), color);
+    if f.typing {
+        let cx = tx + if f.query.is_empty() { 0.0 } else { g.size().x } + 1.0;
+        painter.vline(cx, (field.center().y - 9.0)..=(field.center().y + 9.0), Stroke::new(1.5, vis.text_color()));
+    }
+    let mut x = field.max.x + 8.0;
+    let mut toggles: Vec<(&str, &str, bool, u8)> = vec![("Aa", tr("Match case"), f.case, 0), ("W", tr("Whole words"), f.word, 1), (".*", tr("Regular expression"), f.regex, 2)];
+    let mut clicked = None;
+    for (label, tip, on, id) in toggles.drain(..) {
+        let r = Rect::from_min_size(pos2(x, bar.min.y + 4.0), vec2(34.0, 28.0));
+        if header_button(ui, r, label, tip, on) {
+            clicked = Some(id);
+        }
+        x += 38.0;
+    }
+    if let Some(id) = clicked {
+        let f = t.ed.find.as_mut().unwrap();
+        match id {
+            0 => f.case = !f.case,
+            1 => f.word = !f.word,
+            _ => f.regex = !f.regex,
+        }
+    }
+    t.find_refresh();
+    let f = t.ed.find.as_ref().unwrap();
+    let status = match (&f.error, f.matches.len(), f.current) {
+        (Some(e), ..) => e.clone(),
+        (None, 0, _) if !f.query.is_empty() => tr("No matches").to_string(),
+        (None, 0, _) => String::new(),
+        (None, n, Some(c)) => format!("{} {} {}{}", c + 1, tr("of"), n, if n >= super::edit::MAX_MATCHES { "+" } else { "" }),
+        (None, n, None) => n.to_string(),
+    };
+    let sc = if f.error.is_some() { vis.error_fg_color } else { vis.weak_text_color() };
+    ui.painter().text(pos2(x + 6.0, bar.center().y), Align2::LEFT_CENTER, status, FontId::proportional(14.0), sc);
+    let mut rx = bar.max.x - 30.0;
+    let mut step = None;
+    for (label, tip, d) in [("✕", tr("Close"), 0), ("↓", tr("Next"), 1), ("↑", tr("Previous"), -1)] {
+        if header_button(ui, Rect::from_min_size(pos2(rx, bar.min.y + 4.0), vec2(28.0, 28.0)), label, tip, false) {
+            step = Some(d);
+        }
+        rx -= 32.0;
+    }
+    match step {
+        Some(0) => t.ed.find = None,
+        Some(d) => t.find_step(d),
+        None => {}
+    }
+    let _ = theme;
+}
+
+/// Rendered Markdown; returns a clicked link.
+fn draw_md(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme, dir: &std::path::Path) -> Option<String> {
+    if t.md.as_ref().is_none_or(|(g, _)| *g != t.doc.generation) {
+        t.md = Some((t.doc.generation, super::md::parse(&t.doc.text)));
+        t.anchors.clear();
+    }
+    let area = ui.available_rect_before_wrap();
+    ui.painter().rect_filled(area, 6.0, theme.bg);
+    let mut sa = egui::ScrollArea::vertical().id_salt("viewer-md").auto_shrink([false, false]);
+    if let Some(y) = t.md_scroll_to.take() {
+        sa = sa.vertical_scroll_offset(y.max(0.0));
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area.shrink2(vec2(0.0, 2.0))));
+    let mut click = None;
+    let (doc, anchors) = (&t.md.as_ref().unwrap().1, &mut t.anchors);
+    let out = sa.show(&mut child, |ui| {
+        let avail = ui.available_width();
+        let w = (avail - 64.0).min(900.0);
+        let top = ui.min_rect().min.y;
+        ui.add_space(20.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(((avail - w) / 2.0).max(16.0));
+            ui.vertical(|ui| {
+                ui.set_width(w);
+                let mut c = super::md::Ctx { theme, base: prefs.font_size + 1.0, mono: prefs.font_size * 0.92, dir, anchors, top, click: None };
+                super::md::show(ui, doc, &mut c);
+                click = c.click.map(|super::md::Click::Link(l)| l);
+            });
+        });
+    });
+    t.md_scroll = out.state.offset.y;
+    t.page_rows = ((out.inner_rect.height() / (prefs.font_size * 1.6)) as usize).max(1);
+    ui.advance_cursor_after_rect(area);
+    click
 }
 
 fn details(v: &Viewer) -> String {
@@ -114,7 +265,7 @@ fn row_job(t: &TextState, row: Row, font: &FontId, theme: &Theme, colors: &[Colo
         job.append(&text, 0.0, egui::TextFormat { font_id: font.clone(), color, italics, underline, ..Default::default() });
     };
     let empty = Vec::new();
-    let spans = t.doc.spans.get().and_then(|s| s.get(row.line as usize)).unwrap_or(&empty);
+    let spans = t.doc.spans.get(row.line as usize).unwrap_or(&empty);
     let mut at = start;
     for s in spans.iter().filter(|s| s.end > start && s.start < end) {
         let (a, b) = (s.start.max(start), s.end.min(end));
@@ -133,6 +284,10 @@ fn row_job(t: &TextState, row: Row, font: &FontId, theme: &Theme, colors: &[Colo
 }
 
 fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme) {
+    if let Some(wait) = t.doc.poll_highlight() {
+        ui.ctx().request_repaint_after(wait);
+    }
+    t.find_refresh();
     let font = viewer_font(prefs.font_size);
     let (char_w, font_h) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let row_h = (font_h * 1.25).round();
@@ -145,12 +300,37 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
     let cols = prefs.wrap.then(|| ((area.width() - gutter - 24.0) / char_w).floor().max(8.0) as usize);
     if t.rows_for != Some(cols) {
         // Keep the same line at the top across re-wrapping.
+        let rewrap = t.rows_for.is_some_and(|c| c != cols);
         let top_line = t.rows.get((t.scroll.y / row_h) as usize).map(|r| r.line);
         t.rows = super::text::rows(&t.doc, cols);
         t.rows_for = Some(cols);
-        if let Some(l) = top_line {
+        if let (true, Some(l)) = (rewrap, top_line) {
             let r = t.rows.iter().position(|r| r.line == l).unwrap_or(0);
             t.scroll_to = Some(vec2(0.0, r as f32 * row_h));
+        }
+    }
+    let view_h = area.height();
+    // Keep the caret on screen after it moved.
+    if t.ed.reveal {
+        t.ed.reveal = false;
+        let row = t.row_of(t.ed.caret) as f32;
+        let mut s = t.scroll_to.unwrap_or(t.scroll);
+        if row * row_h < s.y {
+            s.y = row * row_h;
+        } else if (row + 2.0) * row_h > s.y + view_h {
+            s.y = (row + 2.0) * row_h - view_h;
+        }
+        if !prefs.wrap {
+            let x = t.col_of(t.ed.caret) as f32 * char_w;
+            let room = area.width() - gutter - 30.0;
+            if x < s.x {
+                s.x = (x - room / 3.0).max(0.0);
+            } else if x > s.x + room {
+                s.x = x - room * 2.0 / 3.0;
+            }
+        }
+        if s != t.scroll {
+            t.scroll_to = Some(s);
         }
     }
     let colors = theme.table();
@@ -160,15 +340,50 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
     if let Some(s) = t.scroll_to.take() {
         sa = sa.scroll_offset(s);
     }
+    let sel = t.ed.selection();
+    let sel_c = ui.visuals().selection.bg_fill.gamma_multiply(0.55);
+    let match_c = Color32::from_rgba_unmultiplied(0xe5, 0xb5, 0x3a, 70);
+    let current_c = Color32::from_rgba_unmultiplied(0xff, 0x9f, 0x1a, 150);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
     let out = sa.show_viewport(&mut child, |ui, vp| {
-        ui.set_min_size(vec2(content_w, content_h));
-        let origin = ui.min_rect().min;
+        let (content, resp) = ui.allocate_exact_size(vec2(content_w.max(vp.width()), content_h.max(vp.height())), Sense::click_and_drag());
+        let origin = content.min;
         let first = (vp.min.y / row_h).floor().max(0.0) as usize;
         let last = ((vp.max.y / row_h).ceil() as usize + 1).min(t.rows.len());
         let painter = ui.painter().clone();
+        // Mouse: click places the caret, drag selects, double click a word.
+        let at_pos = |t: &TextState, p: egui::Pos2| {
+            let row = (((p.y - origin.y) / row_h).floor().max(0.0) as usize).min(t.rows.len().saturating_sub(1));
+            let col = ((p.x - origin.x - gutter) / char_w).round().max(0.0) as usize;
+            t.at_col(row, col)
+        };
+        if let Some(p) = resp.interact_pointer_pos() {
+            let at = at_pos(t, p);
+            let shift = ui.input(|i| i.modifiers.shift);
+            if resp.double_clicked() {
+                let w = t.word_at(at);
+                t.ed.anchor = Some(w.start);
+                t.ed.caret = w.end;
+            } else if resp.drag_started() || (resp.clicked() && !shift) {
+                if shift {
+                    t.ed.anchor.get_or_insert(t.ed.caret);
+                } else {
+                    t.ed.anchor = Some(at);
+                }
+                t.ed.caret = at;
+            } else if resp.dragged() || (resp.clicked() && shift) {
+                t.ed.anchor.get_or_insert(t.ed.caret);
+                t.ed.caret = at;
+            }
+            if let Some(f) = t.ed.find.as_mut() {
+                f.typing = false;
+            }
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
         // The line under the mouse.
-        if let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| ui.clip_rect().contains(*p)) {
+        if let Some(p) = resp.hover_pos() {
             let hl = ((p.y - origin.y) / row_h).floor() as usize;
             if let Some(line) = t.rows.get(hl).map(|r| r.line) {
                 let (mut a, mut b) = (hl, hl);
@@ -182,11 +397,59 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
                 painter.rect_filled(r, 0.0, theme.line);
             }
         }
+        // Background ranges (selection, matches) on a row.
+        let x_of = |t: &TextState, row: Row, in_line: usize| -> f32 {
+            let line = t.doc.line(row.line as usize);
+            origin.x + gutter + super::text::columns(&line[row.start as usize..in_line.clamp(row.start as usize, row.end as usize)]) as f32 * char_w
+        };
+        let paint_range = |t: &TextState, i: usize, r: &std::ops::Range<usize>, c: Color32| {
+            let row = t.rows[i];
+            let base = t.doc.lines[row.line as usize].0;
+            let (rs, re) = (base + row.start as usize, base + row.end as usize);
+            // A range running past the line end shows a little extra.
+            let eol = row.end as usize == t.doc.line(row.line as usize).len();
+            if r.end < rs || r.start > re || (r.start == re && !eol) || (r.end == rs && r.start < rs) {
+                return;
+            }
+            let a = x_of(t, row, r.start.max(rs) - base);
+            let mut b = x_of(t, row, r.end.min(re) - base);
+            if eol && r.end > re {
+                b += char_w * 0.6;
+            }
+            if b > a {
+                let y = origin.y + i as f32 * row_h;
+                painter.rect_filled(Rect::from_min_max(pos2(a, y), pos2(b, y + row_h)), 2.0, c);
+            }
+        };
+        if let Some(f) = &t.ed.find {
+            let (vs, ve) = (t.rows.get(first).map(|r| t.doc.lines[r.line as usize].0).unwrap_or(0), t.rows.get(last.saturating_sub(1)).map(|r| t.doc.lines[r.line as usize].1).unwrap_or(0));
+            let from = f.matches.partition_point(|m| m.end < vs);
+            for (k, m) in f.matches[from..].iter().enumerate().take_while(|(_, m)| m.start <= ve) {
+                let c = if f.current == Some(from + k) { current_c } else { match_c };
+                for i in first..last {
+                    paint_range(t, i, m, c);
+                }
+            }
+        }
+        if let Some(s) = &sel {
+            for i in first..last {
+                paint_range(t, i, s, sel_c);
+            }
+        }
         for i in first..last {
             let row = t.rows[i];
             let y = origin.y + i as f32 * row_h;
             let g = painter.layout_job(row_job(t, row, &font, theme, &colors));
             painter.galley(pos2(origin.x + gutter, y + (row_h - font_h) / 2.0), g, theme.fg);
+        }
+        // Caret.
+        let crow = t.row_of(t.ed.caret);
+        if (first..last).contains(&crow) {
+            let base = t.doc.lines[t.rows[crow].line as usize].0;
+            let x = x_of(t, t.rows[crow], t.ed.caret - base);
+            let y = origin.y + crow as f32 * row_h;
+            let w = if t.ed.editing { 2.5 } else { 1.5 };
+            painter.rect_filled(Rect::from_min_size(pos2(x - w / 2.0, y + 2.0), vec2(w, row_h - 4.0)), 0.0, theme.fg);
         }
         // Line numbers stay put when scrolling sideways.
         let gx = origin.x + vp.min.x;
@@ -194,11 +457,13 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
         painter.rect_filled(strip, 0.0, theme.bg);
         if prefs.line_numbers {
             let nf = FontId::new(prefs.font_size * 0.85, font.family.clone());
+            let cur_line = t.doc.line_of(t.ed.caret) as u32;
             for i in first..last {
                 let row = t.rows[i];
                 if row.start == 0 {
                     let y = origin.y + i as f32 * row_h + row_h / 2.0;
-                    painter.text(pos2(gx + gutter - 16.0, y), Align2::RIGHT_CENTER, (row.line + 1).to_string(), nf.clone(), theme.gutter);
+                    let c = if row.line == cur_line { theme.fg } else { theme.gutter };
+                    painter.text(pos2(gx + gutter - 16.0, y), Align2::RIGHT_CENTER, (row.line + 1).to_string(), nf.clone(), c);
                 }
             }
             painter.vline(gx + gutter - 8.0, strip.y_range(), Stroke::new(1.0, theme.gutter.gamma_multiply(0.3)));

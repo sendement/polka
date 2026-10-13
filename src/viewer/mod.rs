@@ -2,7 +2,10 @@
 //! place of a tab's panes.
 
 pub mod draw;
+pub mod edit;
+pub mod glue;
 pub mod image;
+pub mod md;
 pub mod syntax;
 pub mod text;
 pub mod theme;
@@ -41,6 +44,14 @@ pub fn kind(path: &Path, name: &str) -> Option<Kind> {
 
 pub struct TextState {
     pub doc: text::TextDoc,
+    pub ed: edit::Editor,
+    /// Can't be saved (e.g. in a read-only archive).
+    pub read_only: bool,
+    /// Rendered Markdown for a document generation, its scroll and anchors.
+    pub md: Option<(u64, md::MdDoc)>,
+    pub md_scroll: f32,
+    pub md_scroll_to: Option<f32>,
+    pub anchors: std::collections::HashMap<String, f32>,
     pub rows: Vec<text::Row>,
     /// What `rows` was built for: wrap columns.
     pub rows_for: Option<Option<usize>>,
@@ -81,6 +92,8 @@ pub struct Viewer {
     /// Pane the file was opened from, and the folder it showed then.
     pub origin: usize,
     pub folder: Option<crate::vfs::Location>,
+    /// For files opened from an archive: (archive, inner path).
+    pub source: Option<(PathBuf, String)>,
     pub content: Content,
 }
 
@@ -115,6 +128,12 @@ impl Viewer {
                 let c = ctx.clone();
                 match text::TextDoc::load(&path, &name, move || c.request_repaint()) {
                     Ok(doc) => Content::Text(Box::new(TextState {
+                        ed: edit::Editor::new(&doc.text),
+                        read_only: false,
+                        md: None,
+                        md_scroll: 0.0,
+                        md_scroll_to: None,
+                        anchors: Default::default(),
                         doc,
                         rows: Vec::new(),
                         rows_for: None,
@@ -128,7 +147,7 @@ impl Viewer {
                 }
             }
         };
-        Viewer { path, name, origin, folder: None, content }
+        Viewer { path, name, origin, folder: None, source: None, content }
     }
 
     pub fn is_text(&self) -> bool {

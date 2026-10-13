@@ -65,13 +65,15 @@ pub struct ViewerPrefs {
     pub font_size: f32,
     pub wrap: bool,
     pub line_numbers: bool,
+    /// Markdown drawn as on GitHub (else its source).
+    pub md_rendered: bool,
 }
 
 pub const VIEWER_FONT: (f32, f32, f32) = (9.0, 40.0, 1.0);
 
 impl Default for ViewerPrefs {
     fn default() -> Self {
-        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true }
+        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true }
     }
 }
 

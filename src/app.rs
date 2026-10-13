@@ -339,6 +339,21 @@ pub enum Cmd {
     OpenInViewer,
     CloseViewer,
     ViewerSettings,
+    ViewerEdit,
+    ViewerInsertAsk,
+    ViewerNewline,
+    ViewerUndo,
+    ViewerRedo,
+    ViewerCopy,
+    ViewerCut,
+    ViewerPaste,
+    ViewerSelectAll,
+    ViewerFindAsk,
+    ViewerFindOpt(u8),
+    ViewerToggleMd,
+    ViewerSave,
+    ViewerSaveThen(crate::viewer::glue::Then),
+    ViewerDiscardThen(crate::viewer::glue::Then),
     ViewerWrap,
     ViewerNumbers,
     ExtractHere,
@@ -438,12 +453,12 @@ impl Menu {
     }
 }
 
-fn item(label: &str, cmd: Cmd) -> MenuItem {
+pub(crate) fn item(label: &str, cmd: Cmd) -> MenuItem {
     MenuItem { label: label.to_string(), cmd, enabled: true, checked: None, keep_open: false }
 }
 
 /// A checkbox / radio entry that keeps its menu open.
-fn toggle(label: &str, cmd: Cmd, on: bool) -> MenuItem {
+pub(crate) fn toggle(label: &str, cmd: Cmd, on: bool) -> MenuItem {
     MenuItem { checked: Some(on), keep_open: true, ..item(label, cmd) }
 }
 
@@ -456,6 +471,9 @@ pub enum OskPurpose {
     Filter { prev: Option<String> },
     Search { root: PathBuf },
     Password { archive: PathBuf, retry: Retry },
+    /// Text typed into the viewer's document / its search.
+    ViewerInsert,
+    ViewerFind,
     /// A text field of the archive dialog, which comes back afterwards.
     CompressField { dlg: Box<CompressDlg>, field: CField },
 }
@@ -500,7 +518,7 @@ pub const OSK_SPECIAL: [OskKey; 6] =
     [OskKey::Shift, OskKey::Layout, OskKey::Space, OskKey::Backspace, OskKey::Left, OskKey::Ok];
 
 impl Osk {
-    fn new(title: &str, text: &str, purpose: OskPurpose) -> Self {
+    pub(crate) fn new(title: &str, text: &str, purpose: OskPurpose) -> Self {
         let text: Vec<char> = text.chars().collect();
         // Put the caret before the extension when renaming files.
         let caret = match &purpose {
@@ -872,7 +890,7 @@ pub enum Msg {
     Toast(String, bool),
     NeedPassword(PathBuf, bool, Retry),
     /// A file from an archive was extracted for the viewer.
-    View { tab: usize, path: PathBuf, name: String, origin: usize },
+    View { tab: usize, path: PathBuf, name: String, origin: usize, source: Option<(PathBuf, String)> },
 }
 
 // ---------------------------------------------------------------- app
@@ -903,6 +921,10 @@ pub struct App {
     /// x of the line between the two panes (last frame), to split the
     /// address bar at the same place.
     pub divider_x: Option<f32>,
+    /// □ held while editing text: Some(moved since).
+    pub edit_hold: Option<bool>,
+    /// Text copied in the viewer (when the system clipboard can't be read).
+    pub text_clip: Option<String>,
 }
 
 impl App {
@@ -958,6 +980,8 @@ impl App {
             ctx,
             quit: false,
             divider_x: None,
+            edit_hold: None,
+            text_clip: None,
         };
         app.refresh_sidebar();
         app
@@ -999,9 +1023,17 @@ impl App {
             match m {
                 Msg::Toast(s, e) => self.toast(s, e),
                 Msg::NeedPassword(a, wrong, retry) => self.ask_password(a, wrong, retry),
-                Msg::View { tab, path, name, origin } => {
+                Msg::View { tab, path, name, origin, source } => {
                     if tab < self.tabs.len() {
                         self.show_viewer(tab, path, name, origin, Vec::new());
+                        // Saving goes back into the archive, if it can be written.
+                        let writable = self.tabs[tab].panes[origin].loc.dest().is_some();
+                        if let Some(v) = self.tabs[tab].viewer.as_mut() {
+                            v.source = source;
+                            if let crate::viewer::Content::Text(t) = &mut v.content {
+                                t.read_only = !writable;
+                            }
+                        }
                     }
                 }
             }
@@ -1134,6 +1166,9 @@ impl App {
             }
             Input::Release(Action::Select) => {
                 self.range = None;
+                if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
+                    self.viewer_select_released();
+                }
                 return;
             }
             Input::Release(_) => return,
@@ -1479,6 +1514,9 @@ impl App {
         if let OskPurpose::CompressField { dlg, field } = k.purpose {
             return self.compress_field(*dlg, field, raw);
         }
+        if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind) {
+            return self.viewer_osk(k.purpose, raw);
+        }
         if text.is_empty() {
             return;
         }
@@ -1584,7 +1622,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind => unreachable!(),
         }
     }
 
@@ -1632,7 +1670,10 @@ impl App {
                     let (tab, origin, name) = (self.tab, self.cur_tab().active, e.name.clone());
                     std::thread::spawn(move || {
                         let msg = match vfs::extract_to_temp(&archive, &inner_path) {
-                            Ok(p) if crate::viewer::kind(&p, &name).is_some() => Some(Msg::View { tab, path: p, name, origin }),
+                            Ok(p) if crate::viewer::kind(&p, &name).is_some() => {
+                                let source = Some((archive.clone(), inner_path.clone()));
+                                Some(Msg::View { tab, path: p, name, origin, source })
+                            }
                             Ok(p) => crate::launch::open(&p).err().map(|e| Msg::Toast(format!("{}: {e}", tr("Failed")), true)),
                             Err(e) => Some(match vfs::need_password(&e) {
                                 Some(n) => Msg::NeedPassword(n.archive.clone(), n.wrong, Retry::Activate),
@@ -1685,11 +1726,14 @@ impl App {
     }
 
     fn viewer_input(&mut self, a: Action) {
+        if self.viewer_text_input(a) {
+            return;
+        }
         let ctx = self.ctx.clone();
         let Some(v) = self.tabs[self.tab].viewer.as_mut() else { return };
         match v.input(a, &ctx) {
             crate::viewer::Out::Nothing => {}
-            crate::viewer::Out::Close => self.close_viewer(),
+            crate::viewer::Out::Close => self.request_close_viewer(),
             crate::viewer::Out::Settings => self.run(Cmd::ViewerSettings),
             crate::viewer::Out::Actions => self.open_actions_menu(),
             crate::viewer::Out::Moved(path) => {
@@ -1758,6 +1802,9 @@ impl App {
     }
 
     fn open_actions_menu(&mut self) {
+        if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
+            return self.viewer_text_menu();
+        }
         if let Some(v) = &self.cur_tab().viewer {
             let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
             if v.is_text() {
@@ -2204,12 +2251,12 @@ impl App {
         self.pane_mut().pending_focus = Some(name);
     }
 
-    fn start(&mut self, op: Op) {
+    pub(crate) fn start(&mut self, op: Op) {
         let j = ops::spawn(op, self.wake());
         self.jobs.push(j);
     }
 
-    fn reload_all(&mut self) {
+    pub(crate) fn reload_all(&mut self) {
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -2352,7 +2399,22 @@ impl App {
                 }
             }
             Cmd::OpenInViewer => self.view_current(),
-            Cmd::CloseViewer => self.close_viewer(),
+            Cmd::ViewerEdit
+            | Cmd::ViewerInsertAsk
+            | Cmd::ViewerNewline
+            | Cmd::ViewerUndo
+            | Cmd::ViewerRedo
+            | Cmd::ViewerCopy
+            | Cmd::ViewerCut
+            | Cmd::ViewerPaste
+            | Cmd::ViewerSelectAll
+            | Cmd::ViewerFindAsk
+            | Cmd::ViewerFindOpt(_)
+            | Cmd::ViewerToggleMd
+            | Cmd::ViewerSave
+            | Cmd::ViewerSaveThen(_)
+            | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
+            Cmd::CloseViewer => self.request_close_viewer(),
             Cmd::ViewerSettings => {
                 self.overlay = Some(Overlay::ViewerSettings(ViewerSettings { row: vrow::THEME }));
             }
@@ -2419,7 +2481,7 @@ impl App {
             }
             Cmd::CloseTab => self.run(Cmd::CloseTabAt(self.tab)),
             Cmd::CloseTabAt(i) => {
-                if self.tabs.len() > 1 && i < self.tabs.len() {
+                if self.tabs.len() > 1 && i < self.tabs.len() && !self.confirm_unsaved(i, crate::viewer::glue::Then::CloseTab(i)) {
                     self.tabs.remove(i);
                     // Closing a tab left of the current one shifts it; closing
                     // the current one lands on its neighbour.
@@ -2553,7 +2615,12 @@ impl App {
                 p.selected = p.entries.iter().map(|e| e.name.clone()).collect();
             }
             Cmd::Help => self.overlay = Some(Overlay::Help),
-            Cmd::Quit => self.quit = true,
+            Cmd::Quit => {
+                let dirty = (0..self.tabs.len()).find(|&i| self.confirm_unsaved(i, crate::viewer::glue::Then::Quit));
+                if dirty.is_none() {
+                    self.quit = true;
+                }
+            }
         }
     }
 

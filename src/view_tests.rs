@@ -381,6 +381,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     compress_dialog(h);
     volumes(h);
     viewer(h);
+    editing(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -669,7 +670,7 @@ fn viewer(h: &mut Harness<'static, App>) {
     std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/src/viewer/text.rs"), work.join("text.rs")).unwrap();
     std::fs::write(
         work.join("README.md"),
-        "# Polka\n\nФайловый менеджер для **геймпада**, с [ссылкой](https://example.org).\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n- пункт\n- `код`\n",
+        "# Polka\n\nФайловый менеджер для **геймпада**, с [ссылкой](https://example.org) и [переходом](#установка).\n\n> [!NOTE]\n> Работает с *DualSense* и Xbox.\n\n![пример](a-red.png)\n\n## Возможности\n\n- [x] архивы\n- [ ] видео\n  1. вложенный\n  2. список\n\n| Кнопка | Действие |\n|:--|--:|\n| A | Открыть |\n| B | Назад |\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n---\n\n## Установка\n\n- пункт\n- `код`\n",
     )
     .unwrap();
     for (name, w, hgt, c) in [("a-red.png", 640u32, 400u32, [200u8, 60, 60]), ("b-wide.png", 9000, 300, [60, 160, 90]), ("c-blue.png", 300, 500, [50, 90, 210])] {
@@ -709,7 +710,7 @@ fn viewer(h: &mut Harness<'static, App>) {
         for _ in 0..30 {
             settle(h);
             let ready = match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
-                Some(Content::Text(t)) => t.doc.lang.is_none() || t.doc.spans.get().is_some(),
+                Some(Content::Text(t)) => t.doc.lang.is_none() || t.doc.highlighted,
                 Some(Content::Image(im)) => im.pic.pixels.is_some() || im.pic.error.is_some(),
                 _ => false,
             };
@@ -832,4 +833,165 @@ fn viewer(h: &mut Harness<'static, App>) {
     press(h, &[Action::Back]);
     h.state_mut().run(Cmd::ToggleDual);
     settle(h);
+}
+
+fn key(h: &mut Harness<'static, App>, key: egui::Key, modifiers: egui::Modifiers) {
+    h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+    h.step();
+    h.event(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+    h.step();
+}
+
+fn type_text(h: &mut Harness<'static, App>, s: &str) {
+    h.event(egui::Event::Text(s.into()));
+    h.step();
+}
+
+fn editing(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay};
+    use crate::vfs::Location;
+    use crate::viewer::Content;
+    use egui::{Key, Modifiers};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let work = dir.join("view");
+    std::fs::write(work.join("notes.txt"), "first line\nfoo bar foo\nfood fork\n").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg);
+    settle(h);
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Accept]);
+        settle(h);
+    };
+    let text = |h: &mut Harness<'static, App>| -> (String, bool) {
+        match h.state_mut().text_mut() {
+            Some(t) => (t.doc.text.clone(), t.ed.dirty),
+            None => panic!("no text viewer"),
+        }
+    };
+    let ctrl = Modifiers::COMMAND;
+
+    // Keyboard: type at the end of the first line, then save.
+    open(h, "notes.txt");
+    key(h, Key::End, Modifiers::NONE);
+    type_text(h, "!");
+    assert_eq!(text(h), ("first line!\nfoo bar foo\nfood fork\n".into(), true));
+    settle(h);
+    shot(h, "43-edit-keyboard");
+    // Search: words, then a regex.
+    key(h, Key::F, ctrl);
+    type_text(h, "foo");
+    settle(h);
+    let found = |h: &mut Harness<'static, App>| h.state_mut().text_mut().and_then(|t| t.ed.find.as_ref().map(|f| f.matches.len())).unwrap_or(0);
+    assert_eq!(found(h), 3);
+    key(h, Key::W, Modifiers::ALT);
+    assert_eq!(found(h), 2);
+    key(h, Key::Enter, Modifiers::NONE);
+    shot(h, "44-find");
+    key(h, Key::W, Modifiers::ALT);
+    key(h, Key::R, Modifiers::ALT);
+    for _ in 0..3 {
+        key(h, Key::Backspace, Modifiers::NONE);
+    }
+    type_text(h, "fo+[dr]");
+    assert_eq!(found(h), 2, "regex fo+[dr] in 'food fork'");
+    key(h, Key::Escape, Modifiers::NONE);
+    key(h, Key::Escape, Modifiers::NONE);
+    assert!(h.state_mut().text_mut().unwrap().ed.find.is_none());
+    key(h, Key::S, ctrl);
+    settle(h);
+    assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "first line!\nfoo bar foo\nfood fork\n");
+    assert!(!text(h).1);
+
+    // Gamepad: ✕ edits, ✕ types on the OSK, □ erases, □ held selects.
+    {
+        // As if picking up the pad after the keyboard was put away.
+        let t = h.state_mut().text_mut().unwrap();
+        t.ed.caret = 0;
+        t.ed.editing = false;
+    }
+    press(h, &[Action::Accept]);
+    assert!(h.state().text_editing());
+    press(h, &[Action::Down, Action::Accept]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
+    type_and_submit(h, "ab ");
+    assert!(text(h).0.contains("\nab foo bar"), "{:?}", text(h).0);
+    press(h, &[Action::Select]);
+    h.state_mut().handle(Input::Release(Action::Select));
+    assert!(text(h).0.contains("\nabfoo bar"), "{:?}", text(h).0);
+    h.state_mut().handle(Input::Press(Action::Select));
+    press(h, &[Action::Right, Action::Right, Action::Right]);
+    h.state_mut().handle(Input::Release(Action::Select));
+    assert_eq!(h.state_mut().text_mut().unwrap().selected_text().as_deref(), Some("foo"));
+    press(h, &[Action::Actions]);
+    shot(h, "45-edit-menu");
+    press(h, &[Action::Back]);
+    // Leaving with changes asks.
+    press(h, &[Action::Back, Action::Back]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))), "no unsaved-changes prompt");
+    shot(h, "46-unsaved");
+    press(h, &[Action::Down, Action::Accept]); // don't save
+    assert!(h.state().cur_tab().viewer.is_none());
+    assert_eq!(std::fs::read_to_string(work.join("notes.txt")).unwrap(), "first line!\nfoo bar foo\nfood fork\n");
+
+    // Markdown: GitHub view by default, ⧉ flips to the source.
+    open(h, "README.md");
+    for _ in 0..5 {
+        settle(h);
+    }
+    shot(h, "47-md-rendered");
+    press(h, &[Action::Down, Action::Down, Action::Down]);
+    settle(h);
+    shot(h, "48-md-rendered-scrolled");
+    press(h, &[Action::RightTrigger]);
+    settle(h);
+    shot(h, "48a-md-lists-table-code");
+    h.state_mut().viewer_link("#установка".into());
+    settle(h);
+    shot(h, "48b-md-anchor");
+    let (scroll, anchor) = {
+        let t = h.state_mut().text_mut().unwrap();
+        (t.md_scroll, t.anchors.get("установка").copied())
+    };
+    assert!(anchor.is_some_and(|a| a > 100.0 && (scroll - a).abs() < 60.0 || scroll > 100.0), "anchor {anchor:?} scroll {scroll}");
+    press(h, &[Action::View]);
+    assert!(!h.state().cfg.viewer.md_rendered);
+    shot(h, "49-md-source");
+    press(h, &[Action::View, Action::Back]);
+    assert!(h.state().cfg.viewer.md_rendered);
+
+    // A file inside an archive is saved back into it.
+    h.state_mut().pane_mut().navigate(Location::Archive { archive: dir.join("code.tar.gz"), inner: "src".into() }, None, &cfg);
+    for _ in 0..20 {
+        settle(h);
+        if h.state().pane().loading.is_none() {
+            break;
+        }
+    }
+    open(h, "fonts.rs");
+    for _ in 0..30 {
+        if h.state().cur_tab().viewer.is_some() {
+            break;
+        }
+        settle(h);
+    }
+    assert!(matches!(h.state().cur_tab().viewer.as_ref().map(|v| &v.content), Some(Content::Text(_))));
+    key(h, Key::Home, ctrl);
+    type_text(h, "// edited in Polka\n");
+    assert!(h.state_mut().text_mut().unwrap().ed.dirty);
+    key(h, Key::S, ctrl);
+    wait_jobs(h);
+    let out = dir.join("x-fonts");
+    std::fs::create_dir_all(&out).unwrap();
+    crate::vfs::extract(&dir.join("code.tar.gz"), &["src/fonts.rs".into()], &out, |_| true).unwrap();
+    assert!(std::fs::read_to_string(out.join("fonts.rs")).unwrap().starts_with("// edited in Polka\n"));
+    assert!(!h.state_mut().text_mut().unwrap().ed.dirty);
+    // ○ leaves editing first, then closes.
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_some());
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_none());
+    let _ = Cmd::Nothing;
 }
