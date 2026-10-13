@@ -52,6 +52,27 @@ pub struct Config {
     pub grid_icon: f32,
     /// Last archive settings (never the password).
     pub compress: Option<CompressPrefs>,
+    pub viewer: ViewerPrefs,
+}
+
+/// Text viewer look.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewerPrefs {
+    pub theme: String,
+    /// Monospace font family; None = the system's.
+    pub font: Option<String>,
+    pub font_size: f32,
+    pub wrap: bool,
+    pub line_numbers: bool,
+}
+
+pub const VIEWER_FONT: (f32, f32, f32) = (9.0, 40.0, 1.0);
+
+impl Default for ViewerPrefs {
+    fn default() -> Self {
+        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +132,7 @@ impl Default for Config {
             list_icon: 22.0,
             grid_icon: 56.0,
             compress: None,
+            viewer: ViewerPrefs::default(),
         }
     }
 }

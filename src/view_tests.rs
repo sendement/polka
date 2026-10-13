@@ -380,6 +380,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     passwords(h);
     compress_dialog(h);
     volumes(h);
+    viewer(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -656,4 +657,179 @@ fn volumes(h: &mut Harness<'static, App>) {
     wait_jobs(h);
     // "pack" exists already (the source), so it lands as "pack (2)".
     assert_eq!(std::fs::read_to_string(work.join("pack (2)/readme.txt")).unwrap(), "volumes");
+}
+
+fn viewer(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay};
+    use crate::vfs::Location;
+    use crate::viewer::Content;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let work = dir.join("view");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/src/viewer/text.rs"), work.join("text.rs")).unwrap();
+    std::fs::write(
+        work.join("README.md"),
+        "# Polka\n\nФайловый менеджер для **геймпада**, с [ссылкой](https://example.org).\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n- пункт\n- `код`\n",
+    )
+    .unwrap();
+    for (name, w, hgt, c) in [("a-red.png", 640u32, 400u32, [200u8, 60, 60]), ("b-wide.png", 9000, 300, [60, 160, 90]), ("c-blue.png", 300, 500, [50, 90, 210])] {
+        image::RgbaImage::from_fn(w, hgt, |x, y| {
+            let k = ((x / 40 + y / 40) % 2) as u8 * 40;
+            image::Rgba([c[0].saturating_sub(k), c[1].saturating_sub(k), c[2], 255])
+        })
+        .save(work.join(name))
+        .unwrap();
+    }
+    std::fs::write(
+        work.join("d-logo.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120"><rect width="200" height="120" rx="20" fill="#3584e4"/><circle cx="60" cy="60" r="35" fill="#f6d32d"/></svg>"##,
+    )
+    .unwrap();
+    {
+        use image::codecs::gif::GifEncoder;
+        let f = std::fs::File::create(work.join("e-anim.gif")).unwrap();
+        let mut enc = GifEncoder::new(f);
+        for c in [[220u8, 50, 50, 255], [50, 200, 80, 255]] {
+            let frame = image::Frame::from_parts(image::RgbaImage::from_pixel(120, 80, image::Rgba(c)), 0, 0, image::Delay::from_numer_denom_ms(200, 1));
+            enc.encode_frame(frame).unwrap();
+        }
+    }
+    assert!(crate::viewer::kind(&dir.join("ail-cli.desktop"), "ail-cli.desktop").is_none() || !dir.join("ail-cli.desktop").exists());
+    assert!(crate::viewer::kind(&dir.join("code.tar.gz"), "code.tar.gz").is_none());
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().focus = crate::app::Focus::Panes;
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg);
+    settle(h);
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Accept]);
+        for _ in 0..30 {
+            settle(h);
+            let ready = match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+                Some(Content::Text(t)) => t.doc.lang.is_none() || t.doc.spans.get().is_some(),
+                Some(Content::Image(im)) => im.pic.pixels.is_some() || im.pic.error.is_some(),
+                _ => false,
+            };
+            if ready {
+                break;
+            }
+        }
+        settle(h);
+    };
+    let text_scroll = |h: &Harness<'static, App>| match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Text(t)) => t.scroll,
+        _ => panic!("no text viewer"),
+    };
+
+    // Code with highlighting.
+    open(h, "text.rs");
+    assert!(h.state().cur_tab().viewer.is_some(), "viewer did not open");
+    shot(h, "34-text-viewer");
+    press(h, &[Action::Down, Action::Down, Action::Down, Action::RightTrigger]);
+    assert!(text_scroll(h).y > 0.0, "did not scroll");
+    // Settings beside the file: theme, font size, wrapping.
+    press(h, &[Action::Menu]);
+    assert!(matches!(h.state().overlay, Some(Overlay::ViewerSettings(_))));
+    press(h, &[Action::Right]);
+    assert_eq!(h.state().cfg.viewer.theme, "One Dark");
+    press(h, &[Action::Down, Action::Right]);
+    let font = h.state().cfg.viewer.font.clone();
+    press(h, &[Action::Down, Action::Right, Action::Right]);
+    assert_eq!(h.state().cfg.viewer.font_size, 17.0);
+    shot(h, "35-viewer-settings");
+    press(h, &[Action::Down, Action::Accept]);
+    assert!(!h.state().cfg.viewer.wrap);
+    press(h, &[Action::Back]);
+    press(h, &[Action::Right, Action::Right]);
+    assert!(text_scroll(h).x > 0.0, "no sideways scroll without wrapping");
+    shot(h, "36-text-nowrap");
+    eprintln!("viewer font picked: {font:?}");
+    // Back to the list, on the same file.
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_none());
+    assert_eq!(h.state().pane().current().unwrap().name, "text.rs");
+    h.state_mut().cfg.viewer.wrap = true;
+
+    open(h, "README.md");
+    shot(h, "37-markdown");
+    press(h, &[Action::Back]);
+
+    // Pictures: ←/→ walks the folder, L2/R2 zoom, ✕ 1:1.
+    open(h, "a-red.png");
+    shot(h, "38-image");
+    press(h, &[Action::Right]);
+    for _ in 0..30 {
+        settle(h);
+        if let Some(Content::Image(im)) = h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+            if im.pic.pixels.is_some() {
+                break;
+            }
+        }
+    }
+    let (full, scale, actual) = match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Image(im)) => (im.pic.full, im.scale(), im.actual),
+        _ => panic!("no image viewer"),
+    };
+    assert_eq!(full, Some([9000, 300]), "wide picture");
+    assert!(actual > 1.0, "huge picture should be scaled down into the texture: {actual}");
+    assert_eq!(h.state().pane().current().unwrap().name, "b-wide.png", "pane cursor follows");
+    shot(h, "39-image-wide");
+    press(h, &[Action::RightTrigger, Action::RightTrigger]);
+    let zoomed = match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Image(im)) => im.scale(),
+        _ => unreachable!(),
+    };
+    assert!(zoomed > scale * 1.5);
+    press(h, &[Action::Accept]);
+    let pct = match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Image(im)) => im.scale() / im.actual,
+        _ => unreachable!(),
+    };
+    assert!((pct - 1.0).abs() < 1e-3, "✕ should show 1:1, got {pct}");
+    shot(h, "40-image-actual");
+    press(h, &[Action::Actions]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))));
+    shot(h, "41-viewer-actions");
+    press(h, &[Action::Back, Action::Back]);
+    // SVG and GIF go through egui's loaders.
+    for name in ["d-logo.svg", "e-anim.gif"] {
+        open(h, name);
+        for _ in 0..10 {
+            settle(h);
+        }
+        match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+            Some(Content::Image(im)) => assert!(im.pic.error.is_none() && im.pic.pixels.is_some(), "{name}"),
+            _ => panic!("{name} not shown"),
+        }
+        shot(h, &format!("40b-{name}"));
+        press(h, &[Action::Back]);
+    }
+    assert!(h.state().cur_tab().viewer.is_none());
+
+    // A text file inside an archive.
+    h.state_mut().pane_mut().navigate(Location::Archive { archive: dir.join("code.tar.gz"), inner: "src".into() }, None, &cfg);
+    for _ in 0..20 {
+        settle(h);
+        if h.state().pane().loading.is_none() {
+            break;
+        }
+    }
+    open(h, "main.rs");
+    for _ in 0..30 {
+        if h.state().cur_tab().viewer.is_some() {
+            break;
+        }
+        settle(h);
+    }
+    assert_eq!(h.state().cur_tab().viewer.as_ref().map(|v| v.name.as_str()), Some("main.rs"));
+    // Dual mode: the viewer takes both panes.
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(h);
+    shot(h, "42-viewer-dual-archive");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(h);
 }

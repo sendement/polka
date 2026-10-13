@@ -13,6 +13,7 @@ use crate::i18n::{tr, trn};
 use crate::icons::Icons;
 use crate::input::{Action, Input, PadKind};
 use crate::ops::{self, ArchiveFormat, CompressOpts, Conflict, Job, Op};
+use crate::viewer::Viewer;
 use crate::vfs::{self, Dest, Entry, Location};
 
 // ---------------------------------------------------------------- panes
@@ -307,6 +308,8 @@ fn sort_entries(v: &mut [Entry], cfg: &Config) {
 pub struct Tab {
     pub panes: [Pane; 2],
     pub active: usize,
+    /// A file shown in place of the panes.
+    pub viewer: Option<Box<Viewer>>,
 }
 
 // ---------------------------------------------------------------- overlays
@@ -330,6 +333,14 @@ pub enum Cmd {
     Filter,
     Search,
     CompressAsk,
+    /// Hand the file to the desktop's default app.
+    OpenExternal,
+    /// Show the current file in the built-in viewer.
+    OpenInViewer,
+    CloseViewer,
+    ViewerSettings,
+    ViewerWrap,
+    ViewerNumbers,
     ExtractHere,
     ExtractOther,
     Pin(PathBuf),
@@ -581,6 +592,21 @@ pub enum Overlay {
     Settings(Settings),
     IconPicker(IconPicker),
     Compress(Box<CompressDlg>),
+    ViewerSettings(ViewerSettings),
+}
+
+/// Text viewer settings, shown beside the open file.
+pub struct ViewerSettings {
+    pub row: usize,
+}
+
+pub mod vrow {
+    pub const THEME: usize = 0;
+    pub const FONT: usize = 1;
+    pub const SIZE: usize = 2;
+    pub const WRAP: usize = 3;
+    pub const NUMBERS: usize = 4;
+    pub const CLOSE: usize = 5;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -845,6 +871,8 @@ pub struct Clip {
 pub enum Msg {
     Toast(String, bool),
     NeedPassword(PathBuf, bool, Retry),
+    /// A file from an archive was extracted for the viewer.
+    View { tab: usize, path: PathBuf, name: String, origin: usize },
 }
 
 // ---------------------------------------------------------------- app
@@ -902,10 +930,11 @@ impl App {
                 first.set_cursor(i);
             }
         }
-        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0 };
+        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         ctx.set_zoom_factor(cfg.zoom);
         apply_accent(&ctx, &cfg);
+        crate::fonts::install_with(&ctx, cfg.viewer.font.as_deref());
         let mut app = Self {
             cfg,
             tabs: vec![tab],
@@ -970,6 +999,19 @@ impl App {
             match m {
                 Msg::Toast(s, e) => self.toast(s, e),
                 Msg::NeedPassword(a, wrong, retry) => self.ask_password(a, wrong, retry),
+                Msg::View { tab, path, name, origin } => {
+                    if tab < self.tabs.len() {
+                        self.show_viewer(tab, path, name, origin, Vec::new());
+                    }
+                }
+            }
+        }
+        // Leaving the folder (sidebar, address bar…) closes the viewer.
+        for t in &mut self.tabs {
+            if let Some(v) = &t.viewer {
+                if v.folder.as_ref().is_some_and(|f| *f != t.panes[v.origin].loc) {
+                    t.viewer = None;
+                }
             }
         }
         // The filter keyboard filters live.
@@ -1104,6 +1146,9 @@ impl App {
         if self.focus == Focus::Sidebar {
             self.handle_sidebar(a);
             return;
+        }
+        if self.cur_tab().viewer.is_some() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
+            return self.viewer_input(a);
         }
         let cfg = self.cfg.clone();
         let grid = cfg.view == ViewMode::Grid;
@@ -1329,6 +1374,7 @@ impl App {
                 _ => {}
             },
             Overlay::Settings(_) => self.settings_input(a),
+            Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::Compress(d) => match a {
                 Action::Up => d.move_row(-1),
                 Action::Down => d.move_row(1),
@@ -1558,6 +1604,8 @@ impl App {
                 let path = p.entry_path(&e).expect("local entry");
                 if vfs::is_archive_name(&e.name) {
                     self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
+                } else if crate::viewer::kind(&path, &e.name).is_some() {
+                    self.view_current();
                 } else if let Err(err) = crate::launch::open(&path) {
                     self.toast(format!("{}: {err}", tr("Failed")), true);
                 }
@@ -1581,8 +1629,10 @@ impl App {
                 } else {
                     let (archive, tx) = (archive.clone(), self.msg_tx.clone());
                     let wake = self.wake();
+                    let (tab, origin, name) = (self.tab, self.cur_tab().active, e.name.clone());
                     std::thread::spawn(move || {
                         let msg = match vfs::extract_to_temp(&archive, &inner_path) {
+                            Ok(p) if crate::viewer::kind(&p, &name).is_some() => Some(Msg::View { tab, path: p, name, origin }),
                             Ok(p) => crate::launch::open(&p).err().map(|e| Msg::Toast(format!("{}: {e}", tr("Failed")), true)),
                             Err(e) => Some(match vfs::need_password(&e) {
                                 Some(n) => Msg::NeedPassword(n.archive.clone(), n.wrong, Retry::Activate),
@@ -1599,7 +1649,126 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------ viewer
+
+    /// Open the pane's current file in this tab's viewer.
+    pub fn view_current(&mut self) {
+        let p = self.pane();
+        let Some(e) = p.current().filter(|e| !e.is_dir).cloned() else { return };
+        let Some(path) = p.entry_path(&e) else { return self.activate() };
+        // Pictures of the folder, in the pane's order, for ←/→.
+        let siblings: Vec<PathBuf> = if crate::viewer::image::is_image(&e.name) {
+            p.entries.iter().filter(|x| !x.is_dir && crate::viewer::image::is_image(&x.name)).filter_map(|x| p.entry_path(x)).collect()
+        } else {
+            Vec::new()
+        };
+        let (tab, origin) = (self.tab, self.cur_tab().active);
+        self.show_viewer(tab, path, e.name, origin, siblings);
+    }
+
+    pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
+        let mut v = Viewer::open(path, name, origin, siblings, &self.ctx);
+        v.folder = Some(self.tabs[tab].panes[origin].loc.clone());
+        self.tabs[tab].viewer = Some(Box::new(v));
+        self.range = None;
+    }
+
+    pub fn close_viewer(&mut self) {
+        let t = &mut self.tabs[self.tab];
+        if let Some(v) = t.viewer.take() {
+            // Back on the file that was shown last.
+            let p = &mut t.panes[v.origin];
+            if let Some(i) = p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(v.path.as_path())) {
+                p.set_cursor(i);
+            }
+        }
+    }
+
+    fn viewer_input(&mut self, a: Action) {
+        let ctx = self.ctx.clone();
+        let Some(v) = self.tabs[self.tab].viewer.as_mut() else { return };
+        match v.input(a, &ctx) {
+            crate::viewer::Out::Nothing => {}
+            crate::viewer::Out::Close => self.close_viewer(),
+            crate::viewer::Out::Settings => self.run(Cmd::ViewerSettings),
+            crate::viewer::Out::Actions => self.open_actions_menu(),
+            crate::viewer::Out::Moved(path) => {
+                let t = &mut self.tabs[self.tab];
+                let origin = t.viewer.as_ref().map_or(0, |v| v.origin);
+                let p = &mut t.panes[origin];
+                if let Some(i) = p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(path.as_path())) {
+                    p.set_cursor(i);
+                }
+            }
+        }
+    }
+
+    fn viewer_settings_input(&mut self, a: Action) {
+        let Some(Overlay::ViewerSettings(st)) = self.overlay.as_mut() else { return };
+        match a {
+            Action::Up => st.row = st.row.saturating_sub(1),
+            Action::Down => st.row = (st.row + 1).min(vrow::CLOSE),
+            Action::Left | Action::Right => {
+                let row = st.row;
+                self.viewer_step(row, if a == Action::Left { -1 } else { 1 });
+            }
+            Action::Accept => {
+                let row = st.row;
+                self.viewer_step(row, 0);
+            }
+            Action::Back | Action::Menu => self.overlay = None,
+            _ => {}
+        }
+    }
+
+    /// ←/→ (d = ±1) or ✕ (d = 0) on a viewer settings row.
+    pub fn viewer_step(&mut self, row: usize, d: isize) {
+        if let Some(Overlay::ViewerSettings(st)) = self.overlay.as_mut() {
+            st.row = row;
+        }
+        let v = &mut self.cfg.viewer;
+        let cycle = |n: usize, i: usize, d: isize| (i as isize + if d == 0 { 1 } else { d }).rem_euclid(n as isize) as usize;
+        match row {
+            vrow::THEME => {
+                let names: Vec<&str> = crate::viewer::theme::presets().iter().map(|t| t.name).collect();
+                let i = names.iter().position(|n| *n == v.theme).unwrap_or(0);
+                v.theme = names[cycle(names.len(), i, d)].to_string();
+            }
+            vrow::FONT => {
+                // None (the system monospace) first, then installed families.
+                let mut all: Vec<Option<String>> = vec![None];
+                all.extend(crate::fonts::mono_families().iter().map(|(f, _)| Some(f.clone())));
+                let i = all.iter().position(|f| *f == v.font).unwrap_or(0);
+                v.font = all[cycle(all.len(), i, d)].clone();
+                crate::fonts::install_with(&self.ctx, v.font.as_deref());
+            }
+            vrow::SIZE => {
+                let (lo, hi, st) = crate::config::VIEWER_FONT;
+                v.font_size = (v.font_size + d as f32 * st).clamp(lo, hi);
+            }
+            vrow::WRAP => v.wrap = !v.wrap,
+            vrow::NUMBERS => v.line_numbers = !v.line_numbers,
+            vrow::CLOSE => {
+                self.overlay = None;
+                return;
+            }
+            _ => return,
+        }
+        self.cfg.save();
+    }
+
     fn open_actions_menu(&mut self) {
+        if let Some(v) = &self.cur_tab().viewer {
+            let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
+            if v.is_text() {
+                items.push(toggle(tr("Wrap lines"), Cmd::ViewerWrap, self.cfg.viewer.wrap));
+                items.push(toggle(tr("Line numbers"), Cmd::ViewerNumbers, self.cfg.viewer.line_numbers));
+                items.push(item(tr("Viewer settings…"), Cmd::ViewerSettings));
+            }
+            items.push(item(tr("Close"), Cmd::CloseViewer));
+            self.overlay = Some(Overlay::Menu(Menu::new(&v.name, items)));
+            return;
+        }
         let p = self.pane();
         let targets = p.targets();
         // Real files (a folder or search results) vs. a writable archive.
@@ -1621,6 +1790,14 @@ impl App {
             items.push(MenuItem { enabled, ..item(label, cmd) })
         };
         add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
+        if let Some(path) = targets.first().filter(|e| single && !e.is_dir).and_then(|e| p.entry_path(e)) {
+            let name = targets[0].name.clone();
+            if crate::viewer::kind(&path, &name).is_some() {
+                add(tr("Open in another app"), Cmd::OpenExternal, true);
+            } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
+                add(tr("View as text"), Cmd::OpenInViewer, true);
+            }
+        }
         add(tr("Copy"), Cmd::Copy, any);
         add(tr("Cut"), Cmd::Cut, any && editable);
         add(tr("Paste"), Cmd::Paste, self.clip.is_some() && writable);
@@ -2160,6 +2337,27 @@ impl App {
                 self.pane_mut().selected.clear();
                 self.start(Op::Delete { paths });
             }
+            Cmd::OpenExternal => {
+                let path = match &self.cur_tab().viewer {
+                    Some(v) => Some(v.path.clone()),
+                    None => self.pane().current().and_then(|e| self.pane().entry_path(e)),
+                };
+                if let Some(p) = path {
+                    // Not the in-app viewer: straight to xdg-open.
+                    let mut cmd = std::process::Command::new("xdg-open");
+                    cmd.arg(&p);
+                    if let Err(e) = crate::launch::spawn_cmd(cmd) {
+                        self.toast(format!("{}: {e}", tr("Failed")), true);
+                    }
+                }
+            }
+            Cmd::OpenInViewer => self.view_current(),
+            Cmd::CloseViewer => self.close_viewer(),
+            Cmd::ViewerSettings => {
+                self.overlay = Some(Overlay::ViewerSettings(ViewerSettings { row: vrow::THEME }));
+            }
+            Cmd::ViewerWrap => self.viewer_step(vrow::WRAP, 0),
+            Cmd::ViewerNumbers => self.viewer_step(vrow::NUMBERS, 0),
             Cmd::CompressAsk => {
                 let sources = self.local_targets();
                 let Some(dir) = self.pane().loc.local_path().map(Path::to_path_buf) else { return };
@@ -2210,7 +2408,7 @@ impl App {
             }
             Cmd::OpenInNewTab(loc) => {
                 let other = loc.clone();
-                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0 });
+                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None });
                 self.tab = self.tabs.len() - 1;
                 self.focus = Focus::Panes;
             }

@@ -11,6 +11,7 @@ mod thumbs;
 mod vfs;
 mod volumes;
 mod view;
+mod viewer;
 #[cfg(test)]
 mod view_tests;
 

@@ -34,6 +34,16 @@ pub fn open(path: &Path) -> Result<(), String> {
     spawn(cmd)
 }
 
+pub fn spawn_cmd(cmd: Command) -> Result<(), String> {
+    spawn(cmd)
+}
+
+/// Opening this runs something (a launcher or a program) rather than
+/// showing a document.
+pub fn runs(path: &Path) -> bool {
+    path.to_string_lossy().to_lowercase().ends_with(".desktop") || is_native_executable(path)
+}
+
 /// ELF binaries and scripts with a shebang that have the exec bit.
 fn is_native_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;

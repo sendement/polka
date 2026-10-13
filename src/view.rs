@@ -159,7 +159,7 @@ impl App {
         }
         // Shift + movement selects a range, like holding □.
         let moving = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight | Key::Home | Key::End | Key::PageUp | Key::PageDown);
-        if m.shift && moving && self.overlay.is_none() && self.focus == Focus::Panes && self.range.is_none() {
+        if m.shift && moving && self.overlay.is_none() && self.focus == Focus::Panes && self.range.is_none() && self.cur_tab().viewer.is_none() {
             self.begin_range(true);
         }
         let a = match key {
@@ -270,7 +270,10 @@ impl App {
             let addr_end = rx + TOOL_BTN - 6.0;
 
             // Address field(s); in dual mode split where the panes split.
-            let fields: Vec<(usize, Rect)> = if dual {
+            let viewing = self.tabs[self.tab].viewer.as_ref().map(|v| (v.origin, v.name.clone()));
+            let fields: Vec<(usize, Rect)> = if let Some((origin, _)) = &viewing {
+                vec![(*origin, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
+            } else if dual {
                 let mid = self
                     .divider_x
                     .filter(|d| *d > addr_start + 120.0 && *d < addr_end - 120.0)
@@ -284,8 +287,9 @@ impl App {
             };
             for (idx, rect) in fields {
                 let pane = &self.tabs[self.tab].panes[idx];
-                let highlight = dual && idx == active;
-                if let Some(a) = address_field(ui, rect, pane, highlight, idx) {
+                let highlight = dual && idx == active && viewing.is_none();
+                let file = viewing.as_ref().map(|(_, n)| n.as_str());
+                if let Some(a) = address_field(ui, rect, pane, highlight, idx, file) {
                     act = Some(a);
                 }
             }
@@ -352,7 +356,8 @@ impl App {
             .iter()
             .map(|t| {
                 let p = &t.panes[if dual { t.active } else { 0 }];
-                elided(ui, &p.loc.title(), FontId::proportional(14.0), v.text_color(), 180.0, 1)
+                let title = t.viewer.as_ref().map_or_else(|| p.loc.title(), |v| v.name.clone());
+                elided(ui, &title, FontId::proportional(14.0), v.text_color(), 180.0, 1)
             })
             .collect();
         let close_w = if many { 20.0 } else { 0.0 };
@@ -500,6 +505,11 @@ impl App {
                 (Action::Actions, tr("Delete color")),
                 (Action::Back, tr("Close")),
             ],
+            Some(Overlay::ViewerSettings(_)) => vec![
+                (Action::Left, tr("Adjust")),
+                (Action::Accept, tr("OK")),
+                (Action::Back, tr("Close")),
+            ],
             Some(Overlay::Compress(_)) => vec![
                 (Action::Left, tr("Adjust")),
                 (Action::Accept, tr("OK")),
@@ -514,6 +524,20 @@ impl App {
                 (Action::Back, tr("Cancel")),
             ],
             Some(_) => vec![(Action::Back, tr("Close"))],
+            None if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) && self.focus == Focus::Panes => vec![
+                (Action::Up, tr("Scroll")),
+                (Action::LeftTrigger, tr("Page")),
+                (Action::Actions, tr("Actions")),
+                (Action::Menu, tr("Settings")),
+                (Action::Back, tr("Close")),
+            ],
+            None if self.cur_tab().viewer.is_some() && self.focus == Focus::Panes => vec![
+                (Action::Left, tr("Previous / next")),
+                (Action::LeftTrigger, tr("Zoom")),
+                (Action::Accept, "1:1"),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Close")),
+            ],
             None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -609,9 +633,15 @@ impl App {
         let mut events: Vec<(usize, PaneEvent)> = Vec::new();
         let mut divider = None;
         let mut tab_act = None;
+        let mut viewer_act = None;
         egui::CentralPanel::default().show(ui, |ui| {
             self.draw_icon_pick_banner(ui);
             tab_act = self.draw_tabs(ui);
+            if let Some(v) = self.tabs[tab].viewer.as_mut() {
+                let theme = crate::viewer::theme::by_name(&self.cfg.viewer.theme);
+                viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                return;
+            }
             let App { tabs, icons, cfg, .. } = self;
             let [a, b] = &mut tabs[tab].panes;
             if dual {
@@ -641,6 +671,15 @@ impl App {
                 }
             }
         });
+        if let Some(a) = viewer_act {
+            use crate::viewer::draw::HeaderAct;
+            match a {
+                HeaderAct::Close => self.close_viewer(),
+                HeaderAct::Settings => self.run(Cmd::ViewerSettings),
+                HeaderAct::External => self.run(Cmd::OpenExternal),
+            }
+        }
+        let divider = if self.tabs[tab].viewer.is_some() { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
             self.divider_x = divider;
@@ -721,9 +760,11 @@ impl App {
         }
         let screen = ctx.content_rect();
         let mut close = false;
+        // Viewer settings sit beside the file so changes show live.
+        let side = matches!(self.overlay, Some(Overlay::ViewerSettings(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(140));
+            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side { 0 } else { 140 }));
             close = resp.clicked();
         });
         if close {
@@ -737,10 +778,13 @@ impl App {
         let mut dismiss = false;
         let mut settings_ev: Option<SettingsEvent> = None;
         let mut compress_ev: Option<(usize, isize)> = None;
+        let mut viewer_ev: Option<(usize, isize)> = None;
         let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
+        let (anchor, offset) = if side { (Align2::RIGHT_TOP, vec2(-16.0, 110.0)) } else { (Align2::CENTER_CENTER, vec2(0.0, 0.0)) };
+        let vprefs = self.cfg.viewer.clone();
         egui::Area::new("overlay".into())
             .order(Order::Foreground)
-            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .anchor(anchor, offset)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
@@ -751,6 +795,7 @@ impl App {
                     Some(Overlay::Settings(st)) => settings_ev = draw_settings(ui, st, cfg, icons),
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
+                    Some(Overlay::ViewerSettings(st)) => viewer_ev = crate::viewer::draw::draw_settings(ui, st, &vprefs),
                     None => {}
                 });
             });
@@ -769,6 +814,9 @@ impl App {
         }
         if let Some(ev) = settings_ev {
             self.settings_event(ev);
+        }
+        if let Some((row, d)) = viewer_ev {
+            self.viewer_step(row, d);
         }
         if let Some((row, d)) = compress_ev {
             if d == 0 {
@@ -1059,6 +1107,11 @@ fn layout(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: u
         job.halign = Align::Center;
     }
     ui.painter().layout_job(job)
+}
+
+/// One line of text cut with "…" to `width`.
+pub fn elided_text(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Arc<Galley> {
+    layout(ui, text, font, color, width, 1, false)
 }
 
 fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
@@ -1524,7 +1577,7 @@ fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&str], fallb
 
 /// One address field: breadcrumbs (trimmed from the left when long), a
 /// read-only lock and the filter chip.
-fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usize) -> Option<TopAction> {
+fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usize, file: Option<&str>) -> Option<TopAction> {
     let mut act = None;
     let bg = ui.interact(rect, ui.id().with(("addr", idx)), Sense::click());
     let v = ui.visuals().clone();
@@ -1559,7 +1612,11 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
     }
 
     // Breadcrumbs: keep the last ones that fit.
-    let crumbs = pane.loc.crumbs();
+    let mut crumbs = pane.loc.crumbs();
+    // The viewed file ends the path.
+    if let Some(f) = file {
+        crumbs.push((f.to_string(), pane.loc.clone()));
+    }
     let n = crumbs.len();
     let font = FontId::proportional(16.0);
     let galleys: Vec<_> = crumbs
