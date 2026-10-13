@@ -1999,6 +1999,18 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         ev = Some(SettingsEvent::Toggle(row::VOLUMES));
     }
 
+    // Pictures from the internet in Markdown.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::WEB_IMAGES, "web-images");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Load Markdown pictures from the internet"), label_font.clone(), v.text_color());
+    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+    if cfg.viewer.web_images {
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+    }
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::WEB_IMAGES));
+    }
+
     // Close.
     let (rect, r) = settings_row(ui, 40.0, st.row == row::CLOSE, "close");
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("Close"), label_font, v.text_color());

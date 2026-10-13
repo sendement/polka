@@ -77,13 +77,15 @@ pub struct ViewerPrefs {
     /// Music player: volume 0..1 and repeat (0 off, 1 all, 2 one).
     pub volume: f32,
     pub repeat: u8,
+    /// Markdown may fetch pictures from the internet.
+    pub web_images: bool,
 }
 
 pub const VIEWER_FONT: (f32, f32, f32) = (9.0, 40.0, 1.0);
 
 impl Default for ViewerPrefs {
     fn default() -> Self {
-        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true, volume: 0.8, repeat: 0 }
+        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true, volume: 0.8, repeat: 0, web_images: true }
     }
 }
 

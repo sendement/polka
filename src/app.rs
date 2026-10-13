@@ -858,7 +858,7 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 9;
+pub const SETTINGS_ROWS: usize = 10;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const SIDE_ICON: usize = 1;
@@ -868,7 +868,8 @@ pub mod row {
     pub const THEME: usize = 5;
     pub const OPEN_IN: usize = 6;
     pub const VOLUMES: usize = 7;
-    pub const CLOSE: usize = 8;
+    pub const WEB_IMAGES: usize = 8;
+    pub const CLOSE: usize = 9;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1036,6 +1037,9 @@ pub struct App {
     pub edit_hold: Option<bool>,
     /// Text copied in the viewer (when the system clipboard can't be read).
     pub text_clip: Option<String>,
+    /// The system clipboard, read straight from the display connection
+    /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
+    pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
     /// Template folders for the "New document" submenus.
     pub templates: Vec<PathBuf>,
 }
@@ -1097,6 +1101,7 @@ impl App {
             divider_x: None,
             edit_hold: None,
             text_clip: None,
+            sys_clip: None,
             templates: Vec::new(),
         };
         app.refresh_sidebar();
@@ -2263,7 +2268,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES => self.settings_step(row::VOLUMES, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES => self.settings_step(row, 0.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
                 }
@@ -2403,6 +2408,10 @@ impl App {
                     st.chip = (st.chip as isize + d as isize).clamp(0, OPEN_KINDS as isize - 1) as usize;
                 }
                 return;
+            }
+            row::WEB_IMAGES => {
+                self.cfg.viewer.web_images = !self.cfg.viewer.web_images;
+                self.cfg.save();
             }
             row::VOLUMES => {
                 self.cfg.collapse_volumes = !self.cfg.collapse_volumes;

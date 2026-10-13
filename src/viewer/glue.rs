@@ -252,13 +252,8 @@ impl App {
                 }
             }
             Cmd::ViewerPaste => {
-                // The system clipboard when a tool can read it, else ours.
-                let sys = std::process::Command::new("wl-paste")
-                    .arg("--no-newline")
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+                // The system clipboard, else what was copied here.
+                let sys = self.sys_clip.as_mut().and_then(|c| c.get()).filter(|s| !s.is_empty());
                 if let Some(s) = sys.or_else(|| self.text_clip.clone()) {
                     if let Some(t) = self.text_mut() {
                         if !t.insert(&s) {

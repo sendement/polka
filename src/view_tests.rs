@@ -1055,6 +1055,13 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     }
     press(h, &[Action::Accept]);
     assert!(h.state().cfg.collapse_volumes);
+    // Pictures from the internet: on by default, ✕ flips it.
+    press(h, &[Action::Down]);
+    assert!(h.state().cfg.viewer.web_images);
+    press(h, &[Action::Accept]);
+    assert!(!h.state().cfg.viewer.web_images);
+    press(h, &[Action::Accept]);
+    assert!(h.state().cfg.viewer.web_images);
     shot(h, "50-settings-open-in");
     press(h, &[Action::Back]);
     // Pictures off: they go to the desktop app, and the menu offers Polka.
@@ -1501,4 +1508,94 @@ fn replace_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     replacing(&mut h);
+}
+
+/// Markdown pictures from the internet (a local server stands in for it),
+/// inline `data:` pictures, and the switch that keeps them all offline.
+fn web_pictures(h: &mut Harness<'static, App>) {
+    use crate::vfs::Location;
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("web");
+    let _ = std::fs::remove_dir_all(crate::vfs::temp_root().join("web-images"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(320, 160, |x, y| image::Rgba([40 + (x % 64) as u8 * 3, 120, 200 - (y % 50) as u8 * 2, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let badge = r##"<svg xmlns="http://www.w3.org/2000/svg" width="110" height="20"><rect width="60" height="20" fill="#555"/><rect x="60" width="50" height="20" fill="#4c1"/><g fill="#fff" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="8" y="14">build</text><text x="66" y="14">passing</text></g></svg>"##;
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let hits = hits.clone();
+        std::thread::spawn(move || {
+            for s in server.incoming().flatten() {
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                while r.read_line(&mut String::new()).map(|n| n > 2).unwrap_or(false) {}
+                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let path = line.split(' ').nth(1).unwrap_or("").split('?').next().unwrap_or("").to_string();
+                // No extension in the URL: the type comes from the header.
+                let (status, ct, body): (&str, &str, Vec<u8>) = match path.as_str() {
+                    "/shot" => ("200 OK", "image/png", png.clone()),
+                    "/badge" => ("200 OK", "image/svg+xml;charset=utf-8", badge.as_bytes().to_vec()),
+                    _ => ("404 Not Found", "text/plain", b"nope".to_vec()),
+                };
+                let mut s = s;
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = s.write_all(&body);
+            }
+        });
+    }
+    use base64::Engine;
+    let mut dot = Vec::new();
+    image::RgbaImage::from_pixel(48, 48, image::Rgba([230, 80, 160, 255])).write_to(&mut std::io::Cursor::new(&mut dot), image::ImageFormat::Png).unwrap();
+    let data = base64::engine::general_purpose::STANDARD.encode(&dot);
+    let base = format!("http://127.0.0.1:{port}");
+    std::fs::write(
+        dir.join("README.md"),
+        format!("# Сеть\n\n[![build]({base}/badge)](https://example.org) [![tests]({base}/badge?2)](#)\n\nСкриншот:\n\n![скрин]({base}/shot)\n\n![нет такой]({base}/missing.png)\n\nВстроенная: ![точка](data:image/png;base64,{data})\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("offline.md"), format!("# Без сети\n\n![скрин]({base}/shot?offline)\n")).unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Accept]);
+    };
+    open(h, "README.md");
+    for _ in 0..10 {
+        settle(h);
+    }
+    shot(h, "81-md-web-pictures");
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 4, "pictures not fetched");
+    let cached: Vec<String> = std::fs::read_dir(crate::vfs::temp_root().join("web-images")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(cached.iter().filter(|n| n.ends_with(".svg")).count() >= 2, "{cached:?}");
+    assert!(cached.iter().any(|n| n.ends_with(".png")), "{cached:?}");
+    assert!(!cached.iter().any(|n| n.ends_with(".part")), "{cached:?}");
+    // Switched off: nothing is asked for.
+    press(h, &[Action::Back]);
+    h.state_mut().cfg.viewer.web_images = false;
+    let before = hits.load(std::sync::atomic::Ordering::SeqCst);
+    open(h, "offline.md");
+    for _ in 0..4 {
+        settle(h);
+    }
+    shot(h, "82-md-web-off");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), before, "fetched while switched off");
+    h.state_mut().cfg.viewer.web_images = true;
+    press(h, &[Action::Back]);
+}
+
+#[test]
+#[ignore]
+fn web_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    web_pictures(&mut h);
 }

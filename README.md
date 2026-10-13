@@ -27,7 +27,9 @@ Files open in the same window, in place of the panes (each kind can be sent to i
 instead: Settings → "Open in Polka"):
 
 - Text: tree-sitter highlighting for 30 languages, themes and fonts, editing from the pad or
-  keyboard, search and replace by words or regular expressions (Ctrl+H; `$1` groups); Markdown rendered as on GitHub or as source
+  keyboard, search and replace by words or regular expressions (Ctrl+H; `$1` groups); Markdown rendered as on GitHub
+  (pictures from the web too, through `curl`; a switch in the settings keeps it offline) or as source;
+  paste from the pad reads the system clipboard
 - Pictures: zoom, pan, EXIF rotation, browsing the folder; animated X cursors with their hotspot
 - Music: mp3, flac, ogg, m4a/aac, alac, wav, aiff and more (Symphonia); Opus, WMA, APE and other
   formats through `ffmpeg` if installed. Tags and cover art (embedded or `cover.jpg` next to the

@@ -269,7 +269,7 @@ fn draw_md(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme, d
             ui.add_space(((avail - w) / 2.0).max(16.0));
             ui.vertical(|ui| {
                 ui.set_width(w);
-                let mut c = super::md::Ctx { theme, base: prefs.font_size + 1.0, mono: prefs.font_size * 0.92, dir, anchors, top, click: None };
+                let mut c = super::md::Ctx { theme, base: prefs.font_size + 1.0, mono: prefs.font_size * 0.92, dir, web: prefs.web_images, anchors, top, click: None };
                 super::md::show(ui, doc, &mut c);
                 click = c.click.map(|super::md::Click::Link(l)| l);
             });

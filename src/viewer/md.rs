@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Galley, Rect, Sense, Stroke, Ui, pos2, vec2};
 use pulldown_cmark::{Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -359,6 +359,8 @@ pub struct Ctx<'a> {
     pub base: f32,
     pub mono: f32,
     pub dir: &'a Path,
+    /// Pictures may come from the internet.
+    pub web: bool,
     /// Heading anchors → y offset in the content.
     pub anchors: &'a mut HashMap<String, f32>,
     pub top: f32,
@@ -426,11 +428,142 @@ fn text(ui: &mut Ui, c: &mut Ctx, inline: &Inline, size: f32, color: Color32, bo
     }
 }
 
-fn image_uri(src: &str, dir: &Path) -> Option<String> {
-    if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
-        return None; // no network fetching
+enum Fetch {
+    Pending,
+    Ready(String),
+    Failed,
+}
+
+/// Every remote picture asked for in this run, by URL.
+static FETCHED: LazyLock<Mutex<HashMap<String, Fetch>>> = LazyLock::new(Default::default);
+
+/// How long a downloaded picture is used before it's fetched again.
+const WEB_FRESH: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+fn web_dir() -> Option<PathBuf> {
+    let d = if cfg!(test) { crate::vfs::temp_root().join("web-images") } else { dirs::cache_dir()?.join("polka/web-images") };
+    std::fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+/// A picture's file extension from its type, its first bytes or its URL.
+fn picture_ext(content_type: &str, head: &[u8], url: &str) -> Option<&'static str> {
+    let ct = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let by_type = match ct.as_str() {
+        "image/svg+xml" => Some("svg"),
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Some("ico"),
+        "image/tiff" => Some("tiff"),
+        _ => None,
+    };
+    if by_type.is_some() {
+        return by_type;
     }
-    let p = src.strip_prefix("file://").map(PathBuf::from).unwrap_or_else(|| dir.join(src.split(['?', '#']).next().unwrap_or(src)));
+    let text = String::from_utf8_lossy(&head[..head.len().min(512)]).to_ascii_lowercase();
+    if text.contains("<svg") {
+        return Some("svg");
+    }
+    match image::guess_format(head) {
+        Ok(image::ImageFormat::Png) => return Some("png"),
+        Ok(image::ImageFormat::Jpeg) => return Some("jpg"),
+        Ok(image::ImageFormat::Gif) => return Some("gif"),
+        Ok(image::ImageFormat::WebP) => return Some("webp"),
+        Ok(image::ImageFormat::Bmp) => return Some("bmp"),
+        Ok(image::ImageFormat::Ico) => return Some("ico"),
+        Ok(image::ImageFormat::Tiff) => return Some("tiff"),
+        _ => {}
+    }
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    ["svg", "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"].into_iter().find(|e| *e == ext)
+}
+
+/// Download a picture into the cache (curl, so no TLS stack of our own).
+fn download(url: &str) -> Option<PathBuf> {
+    let dir = web_dir()?;
+    let stem = format!("{:x}", md5::compute(url));
+    // A fresh enough copy from an earlier run.
+    for e in std::fs::read_dir(&dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.strip_prefix(&stem).is_some_and(|r| r.starts_with('.') && r != ".part") {
+            let age = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+            if age.is_some_and(|a| a < WEB_FRESH) {
+                return Some(e.path());
+            }
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let part = dir.join(format!("{stem}.part"));
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "30", "--max-filesize", "26214400", "--proto", "=http,https", "--proto-redir", "=http,https"])
+        .args(["-A", concat!("Polka/", env!("CARGO_PKG_VERSION")), "-w", "%{content_type}", "-o"])
+        .arg(&part)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok();
+    let ok = out.as_ref().is_some_and(|o| o.status.success());
+    let head = std::fs::read(&part).unwrap_or_default();
+    let ext = ok.then(|| picture_ext(&String::from_utf8_lossy(&out.unwrap().stdout), &head, url)).flatten();
+    let Some(ext) = ext else {
+        let _ = std::fs::remove_file(&part);
+        return None;
+    };
+    let file = dir.join(format!("{stem}.{ext}"));
+    std::fs::rename(&part, &file).ok()?;
+    Some(file)
+}
+
+/// A remote picture: its file once downloaded, None until then (the
+/// download runs in the background and repaints when it's done).
+fn web_image(url: &str, ctx: &egui::Context) -> Option<String> {
+    let mut m = FETCHED.lock().unwrap();
+    match m.get(url) {
+        Some(Fetch::Ready(u)) => return Some(u.clone()),
+        Some(_) => return None,
+        None => {}
+    }
+    m.insert(url.to_string(), Fetch::Pending);
+    let (url, ctx) = (url.to_string(), ctx.clone());
+    std::thread::spawn(move || {
+        let got = download(&url).map(|p| format!("file://{}", p.display()));
+        FETCHED.lock().unwrap().insert(url, got.map_or(Fetch::Failed, Fetch::Ready));
+        ctx.request_repaint();
+    });
+    None
+}
+
+/// `data:image/png;base64,…` (or a plain-text SVG) → a file of its own.
+fn data_image(src: &str) -> Option<String> {
+    use base64::Engine;
+    let (head, body) = src.strip_prefix("data:")?.split_once(',')?;
+    let bytes = if head.ends_with(";base64") {
+        base64::engine::general_purpose::STANDARD.decode(body.trim()).ok()?
+    } else {
+        percent_encoding::percent_decode_str(body).collect()
+    };
+    let ext = picture_ext(head.split(';').next().unwrap_or(""), &bytes, "")?;
+    let file = crate::vfs::temp_root().join("md-data").join(format!("{:x}.{ext}", md5::compute(src)));
+    if !file.exists() {
+        std::fs::create_dir_all(file.parent()?).ok()?;
+        std::fs::write(&file, &bytes).ok()?;
+    }
+    Some(format!("file://{}", file.display()))
+}
+
+fn image_uri(src: &str, c: &Ctx, ctx: &egui::Context) -> Option<String> {
+    if src.starts_with("http://") || src.starts_with("https://") {
+        return c.web.then(|| web_image(src, ctx)).flatten();
+    }
+    if src.starts_with("data:") {
+        return data_image(src);
+    }
+    let p = src.strip_prefix("file://").map(PathBuf::from).unwrap_or_else(|| c.dir.join(src.split(['?', '#']).next().unwrap_or(src)));
     p.exists().then(|| format!("file://{}", p.display()))
 }
 
@@ -450,9 +583,12 @@ fn para(ui: &mut Ui, c: &mut Ctx, inline: &Inline) {
                         let r = std::mem::take(&mut run);
                         if r.iter().any(|p| !p.text.trim().is_empty()) {
                             text(ui, c, &r, c.base, c.theme.fg, false);
+                        } else {
+                            // Pictures in a row (badges) keep the space between them.
+                            ui.add_space(c.base * 0.3);
                         }
                     }
-                    match image_uri(src, c.dir) {
+                    match image_uri(src, c, ui.ctx()) {
                         Some(uri) => {
                             let max = ui.available_width().min(900.0);
                             let resp = ui.add(egui::Image::new(uri).max_width(max).fit_to_original_size(1.0).sense(Sense::click()));
@@ -461,7 +597,7 @@ fn para(ui: &mut Ui, c: &mut Ctx, inline: &Inline) {
                             }
                         }
                         None => {
-                            // Remote pictures (badges…) show their alt text.
+                            // Pictures not here (yet, or at all) show their alt text.
                             let label = if alt.is_empty() { src.rsplit('/').next().unwrap_or(src).to_string() } else { alt.clone() };
                             let piece = Piece { text: format!("🖼 {label}"), link: p.link.clone().or(Some(src.clone())), ..Default::default() };
                             text(ui, c, &vec![piece], c.base * 0.9, c.theme.fg, false);
@@ -564,7 +700,7 @@ fn block(ui: &mut Ui, c: &mut Ctx, b: &Block, depth: usize) {
                         // Quotes are dimmer, as on GitHub.
                         let fg = c.theme.fg;
                         let dim = Theme { fg: fg.gamma_multiply(0.75), ..c.theme.clone() };
-                        let mut cc = Ctx { theme: &dim, base: c.base, mono: c.mono, dir: c.dir, anchors: c.anchors, top: c.top, click: None };
+                        let mut cc = Ctx { theme: &dim, base: c.base, mono: c.mono, dir: c.dir, web: c.web, anchors: c.anchors, top: c.top, click: None };
                         blocks(ui, &mut cc, inner, depth);
                         if cc.click.is_some() {
                             c.click = cc.click;

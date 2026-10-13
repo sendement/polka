@@ -239,6 +239,7 @@ const RU: &[(&str, &str)] = &[
     ("frames", "кадров"),
     ("Open in Polka", "Открывать в Polka"),
     ("Fold multi-volume archives", "Сворачивать многотомные архивы"),
+    ("Load Markdown pictures from the internet", "Загружать картинки из интернета в Markdown"),
     ("Caution", "Осторожно"),
     ("Don't save", "Не сохранять"),
     ("Edit", "Редактировать"),
