@@ -9,6 +9,7 @@ mod launch;
 mod ops;
 mod thumbs;
 mod vfs;
+mod volumes;
 mod view;
 #[cfg(test)]
 mod view_tests;

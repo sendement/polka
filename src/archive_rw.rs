@@ -28,6 +28,10 @@ unsafe extern "C" {
     fn archive_read_support_filter_all(a: *mut Archive) -> c_int;
     fn archive_read_support_format_all(a: *mut Archive) -> c_int;
     fn archive_read_open_filename(a: *mut Archive, name: *const c_char, block: usize) -> c_int;
+    fn archive_read_set_callback_data(a: *mut Archive, data: *mut c_void) -> c_int;
+    fn archive_read_set_read_callback(a: *mut Archive, f: ReadCb) -> c_int;
+    fn archive_read_set_seek_callback(a: *mut Archive, f: SeekCb) -> c_int;
+    fn archive_read_open1(a: *mut Archive) -> c_int;
     fn archive_read_next_header(a: *mut Archive, e: *mut *mut ArchiveEntry) -> c_int;
     fn archive_read_data(a: *mut Archive, buf: *mut c_void, len: usize) -> isize;
     fn archive_read_free(a: *mut Archive) -> c_int;
@@ -65,6 +69,37 @@ unsafe extern "C" {
     fn archive_entry_is_encrypted(e: *mut ArchiveEntry) -> c_int;
 }
 
+type ReadCb = unsafe extern "C" fn(*mut Archive, *mut c_void, *mut *const c_void) -> isize;
+type SeekCb = unsafe extern "C" fn(*mut Archive, *mut c_void, i64, c_int) -> i64;
+
+/// A Rust reader handed to libarchive (for split volumes read as one).
+struct Feed {
+    src: Box<dyn crate::volumes::Source>,
+    buf: Vec<u8>,
+}
+
+unsafe extern "C" fn feed_read(_: *mut Archive, data: *mut c_void, out: *mut *const c_void) -> isize {
+    let f = unsafe { &mut *(data as *mut Feed) };
+    match f.src.read(&mut f.buf) {
+        Ok(n) => {
+            unsafe { *out = f.buf.as_ptr() as *const c_void };
+            n as isize
+        }
+        Err(_) => -1,
+    }
+}
+
+unsafe extern "C" fn feed_seek(_: *mut Archive, data: *mut c_void, off: i64, whence: c_int) -> i64 {
+    use std::io::{Seek, SeekFrom};
+    let f = unsafe { &mut *(data as *mut Feed) };
+    let to = match whence {
+        0 => SeekFrom::Start(off.max(0) as u64),
+        1 => SeekFrom::Current(off),
+        _ => SeekFrom::End(off),
+    };
+    f.src.seek(to).map_or(-30, |p| p as i64) // ARCHIVE_FATAL
+}
+
 const ARCHIVE_EOF: c_int = 1;
 const ARCHIVE_WARN: c_int = -20;
 const ARCHIVE_FAILED: c_int = -25;
@@ -78,6 +113,10 @@ const READ_ONLY_SUFFIXES: &[&str] =
     &[".rar", ".cbr", ".iso", ".deb", ".apk", ".cab", ".lha", ".lzh", ".a", ".ar", ".xpi", ".msi", ".exe"];
 
 pub fn writable_name(name: &str) -> bool {
+    // Split volumes are as writable as the archive they make up; RAR never.
+    if let Some(v) = crate::volumes::parse(name) {
+        return v.kind == crate::volumes::Kind::Split && writable_name(&v.archive);
+    }
     let l = name.to_lowercase();
     crate::vfs::is_archive_name(&l) && !READ_ONLY_SUFFIXES.iter().any(|s| l.ends_with(s))
 }
@@ -185,7 +224,13 @@ pub fn estimate(archive: &Path, plan: &Plan) -> u64 {
 
 /// Apply `plan` to `archive`. `progress(bytes)` returning false cancels.
 pub fn rewrite(archive: &Path, plan: &Plan, mut progress: impl FnMut(u64) -> bool) -> io::Result<()> {
-    let name = archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let file_name = archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    if !writable_name(&file_name) {
+        return Err(io::Error::other(crate::i18n::tr("This archive format is read-only")));
+    }
+    // Split volumes: read joined, write whole, then cut again.
+    let split = crate::volumes::set_of(archive).filter(|s| s.kind == crate::volumes::Kind::Split);
+    let name = crate::volumes::archive_name(archive);
     if !writable_name(&name) {
         return Err(io::Error::other(crate::i18n::tr("This archive format is read-only")));
     }
@@ -196,16 +241,30 @@ pub fn rewrite(archive: &Path, plan: &Plan, mut progress: impl FnMut(u64) -> boo
     let replaced: HashSet<&str> = adds.iter().map(|(_, i)| i.as_str()).collect();
     let mkdirs: Vec<String> = plan.mkdir.iter().map(|s| normalize_inner(s)).collect();
 
-    let tmp = archive.with_file_name(format!(".{name}.polka-tmp"));
+    let tmp = archive.with_file_name(format!(".{file_name}.polka-tmp"));
     let tmp_c = CString::new(tmp.as_os_str().as_bytes()).map_err(|_| io::Error::other("bad path"))?;
     let src_c = CString::new(archive.as_os_str().as_bytes()).map_err(|_| io::Error::other("bad path"))?;
 
     let result = (|| -> io::Result<()> {
+        // Declared before the handles so it outlives the reader.
+        let mut feed = match &split {
+            Some(s) => Some(Feed { src: Box::new(crate::volumes::Joined::open(&s.files)?), buf: vec![0; 1 << 16] }),
+            None => None,
+        };
         let mut h = Handles { r: ptr_or(unsafe { archive_read_new() })?, w: std::ptr::null_mut(), w_open: false };
         unsafe {
             archive_read_support_filter_all(h.r);
             archive_read_support_format_all(h.r);
-            if archive_read_open_filename(h.r, src_c.as_ptr(), 1 << 16) != 0 {
+            let rc = match feed.as_mut() {
+                Some(f) => {
+                    archive_read_set_callback_data(h.r, f as *mut Feed as *mut c_void);
+                    archive_read_set_read_callback(h.r, feed_read);
+                    archive_read_set_seek_callback(h.r, feed_seek);
+                    archive_read_open1(h.r)
+                }
+                None => archive_read_open_filename(h.r, src_c.as_ptr(), 1 << 16),
+            };
+            if rc != 0 {
                 return Err(err(h.r, "open"));
             }
         }
@@ -377,6 +436,16 @@ pub fn rewrite(archive: &Path, plan: &Plan, mut progress: impl FnMut(u64) -> boo
 
     match result {
         Ok(()) => {
+            if let Some(set) = &split {
+                // Same volume size as before (the first volume is a full one).
+                let size = std::fs::metadata(&set.files[0])?.len().max(1);
+                let r = crate::volumes::resplit(&tmp, set, size);
+                if r.is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                crate::vfs::invalidate(archive);
+                return r;
+            }
             if let Ok(m) = std::fs::metadata(archive) {
                 let _ = std::fs::set_permissions(&tmp, m.permissions());
             }

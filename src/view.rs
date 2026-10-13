@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Galley, Key, Order, Rect, Sense, Shape,
+    Align, Align2, Color32, CornerRadius, FontId, Galley, Key, Order, Pos2, Rect, Sense, Shape,
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
@@ -443,6 +443,14 @@ impl App {
                     s += &format!(" · {} {}", p.selected.len(), tr("selected"));
                 }
                 ui.label(s);
+                if let Some(m) = p.current().and_then(|e| p.volumes.get(&e.name)) {
+                    ui.separator();
+                    let t = format!("{} {} {} {} · {}", tr("Volume"), m.index + 1, tr("of"), m.count, m.archive);
+                    ui.label(egui::RichText::new(t).color(volume_color(ui.visuals())));
+                    if m.gap {
+                        ui.label(egui::RichText::new(tr("some volumes are missing")).color(ui.visuals().error_fg_color));
+                    }
+                }
                 for (i, j) in self.jobs.iter().enumerate() {
                     ui.separator();
                     ui.label(&j.label);
@@ -850,6 +858,12 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         pane.scroll_to_cursor = false;
     }
     ui.spacing_mut().item_spacing.y = 0.0;
+    // The volume set under the mouse (last frame), else under the cursor.
+    let active_set = pane.hover_volume.take().or_else(|| {
+        focused.then(|| pane.current().and_then(|e| pane.volumes.get(&e.name)).map(|m| m.key.clone())).flatten()
+    });
+    let mut hover_set = None;
+    let vol_c = volume_color(ui.visuals());
     let out = sa.show_rows(ui, row_h, rows, |ui, range| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
         for row in range {
@@ -865,7 +879,23 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let r = ui.interact(rect, ui.id().with(("entry", i)), Sense::click());
                 let sel = pane.selected.contains(&e.name);
                 let is_cursor = i == pane.cursor;
-                paint_entry_bg(ui, rect, is_cursor, focused, sel, r.hovered());
+                let vol = pane.volumes.get(&e.name);
+                let in_set = vol.is_some_and(|m| active_set.as_ref() == Some(&m.key));
+                if let (Some(m), true) = (vol, r.hovered()) {
+                    hover_set = Some(m.key.clone());
+                }
+                if in_set {
+                    ui.painter().rect_filled(rect, 6.0, vol_c.gamma_multiply(0.22));
+                }
+                paint_entry_bg(ui, rect, is_cursor, focused, sel, r.hovered() && !in_set);
+                if in_set {
+                    if grid {
+                        ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.5, vol_c), StrokeKind::Inside);
+                    } else {
+                        let bar = Rect::from_min_size(rect.min + vec2(1.0, 2.0), vec2(4.0, rect.height() - 4.0));
+                        ui.painter().rect_filled(bar, 2.0, vol_c);
+                    }
+                }
                 let path = pane.loc.entry_path(&e.name);
                 let icon_size = if grid { grid_icon } else { list_icon };
                 let thumb = match (&path, e.mtime) {
@@ -879,12 +909,28 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     paint_icon(ui, ir, icon, thumb);
                     let g = elided_centered(ui, &e.name, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
+                    if let Some(m) = vol {
+                        let font = FontId::proportional((grid_font - 2.0).max(10.0));
+                        let at = pos2(ir.max.x + 2.0, ir.min.y + 2.0);
+                        volume_tag(ui, m, None, at, Align2::RIGHT_TOP, font, in_set, vol_c);
+                    }
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
-                    let name_w = rect.width() - name_x - name_room;
+                    let tag_font = FontId::proportional((list_font - 2.0).max(10.0));
+                    // Room for the volume tag: "archive · 2/4" on the active set.
+                    let tag_w = vol.map_or(0.0, |m| {
+                        let t = volume_tag_text(m, in_set.then_some(m.archive.as_str()));
+                        ui.painter().layout_no_wrap(t, tag_font.clone(), Color32::WHITE).size().x + 22.0
+                    });
+                    let name_w = rect.width() - name_x - name_room - tag_w;
                     let g = elided(ui, &e.name, FontId::proportional(list_font), text_c, name_w.max(60.0), 1);
+                    let name_end = rect.min.x + name_x + g.size().x;
                     ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
+                    if let Some(m) = vol {
+                        let at = pos2(name_end + 10.0, rect.center().y);
+                        volume_tag(ui, m, in_set.then_some(m.archive.as_str()), at, Align2::LEFT_CENTER, tag_font, in_set, vol_c);
+                    }
                     let weak = ui.visuals().weak_text_color();
                     let f = FontId::proportional(list_font - 1.0);
                     let size = if e.is_dir { String::new() } else { human_size(e.size) };
@@ -903,10 +949,52 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
             }
         }
     });
+    pane.hover_volume = hover_set;
     pane.scroll_y = out.state.offset.y;
     pane.view_h = out.inner_rect.height();
     pane.page_rows = ((pane.view_h / row_h) as usize).saturating_sub(1).max(1);
     events
+}
+
+/// Highlight for the volumes of one archive: the accent's complement, so it
+/// never reads as selection.
+fn volume_color(v: &egui::Visuals) -> Color32 {
+    let mut c = egui::ecolor::Hsva::from(v.selection.bg_fill);
+    c.h = (c.h + 0.5).fract();
+    c.s = c.s.max(0.6);
+    c.v = c.v.max(0.85);
+    c.into()
+}
+
+fn volume_tag_text(m: &crate::volumes::Member, archive: Option<&str>) -> String {
+    let n = format!("{}/{}", m.index + 1, m.count);
+    match archive {
+        Some(a) => format!("{a} · {n}"),
+        None => n,
+    }
+}
+
+/// "2/4" pill on a volume; on the highlighted set it names the archive too.
+#[allow(clippy::too_many_arguments)]
+fn volume_tag(ui: &Ui, m: &crate::volumes::Member, archive: Option<&str>, at: Pos2, align: Align2, font: FontId, on: bool, c: Color32) {
+    let v = ui.visuals();
+    let fg = if m.gap { v.error_fg_color } else if on { v.strong_text_color() } else { v.weak_text_color() };
+    let g = ui.painter().layout_no_wrap(volume_tag_text(m, archive), font, fg);
+    let size = g.size() + vec2(if on { 22.0 } else { 10.0 }, 4.0);
+    let rect = align.anchor_size(at, size);
+    let (fill, stroke) = if on { (v.window_fill.lerp_to_gamma(c, 0.35), Stroke::new(1.0, c)) } else { (v.window_fill, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color)) };
+    ui.painter().rect(rect, rect.height() / 2.0, fill, stroke, StrokeKind::Inside);
+    let mut x = rect.min.x + 5.0;
+    if on {
+        // A little stack of volumes.
+        let cy = rect.center().y;
+        for k in 0..3 {
+            let r = Rect::from_min_size(pos2(x + k as f32 * 2.0, cy - 4.0 + k as f32 * 1.0 - 1.0), vec2(6.0, 7.0));
+            ui.painter().rect(r, 1.0, c, Stroke::new(0.8, v.extreme_bg_color), StrokeKind::Middle);
+        }
+        x += 12.0;
+    }
+    ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fg);
 }
 
 /// Theme icon, or a thumbnail fitted into the square keeping its aspect.

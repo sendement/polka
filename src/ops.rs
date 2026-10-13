@@ -223,6 +223,17 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             (*label, vec![Location::Archive { archive: archive.clone(), inner: String::new() }])
         }
     };
+    // Editing an archive changes its folder too (size, and the number of
+    // volumes for a split one).
+    let mut touches = touches;
+    let folders: Vec<Location> = touches
+        .iter()
+        .filter_map(|t| match t {
+            Location::Archive { archive, .. } => archive.parent().map(|p| Location::Local(p.into())),
+            _ => None,
+        })
+        .collect();
+    touches.extend(folders);
     let job = Arc::new(Job {
         label: label.to_string(),
         done: AtomicU64::new(0),
@@ -889,7 +900,7 @@ fn extract_all(archive: &Path, dest: &Path, job: &Job) -> io::Result<()> {
         let into = if single_dir {
             stage.clone()
         } else {
-            let name = archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let name = crate::volumes::archive_name(archive);
             let d = stage.join(split_ext(&name).0);
             std::fs::create_dir_all(&d)?;
             d

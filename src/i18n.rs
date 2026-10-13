@@ -180,6 +180,9 @@ const RU: &[(&str, &str)] = &[
     ("Repeat the password", "Повторите пароль"),
     ("Passwords don't match", "Пароли не совпадают"),
     ("Create", "Создать"),
+    ("Volume", "Том"),
+    ("of", "из"),
+    ("some volumes are missing", "не хватает томов"),
     ("install 7zip to create 7z archives", "для создания 7z установите 7zip"),
 ];
 

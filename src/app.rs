@@ -1,7 +1,7 @@
 //! Application state and input/command handling. Rendering lives in view.rs.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +44,10 @@ pub struct Pane {
     /// Grid columns from the last frame.
     pub cols: usize,
     pub page_rows: usize,
+    /// Volumes of multi-volume archives in this folder, by entry name.
+    pub volumes: HashMap<String, crate::volumes::Member>,
+    /// Volume set under the mouse in the last frame.
+    pub hover_volume: Option<String>,
 }
 
 impl Pane {
@@ -67,6 +71,8 @@ impl Pane {
             scroll_y: 0.0,
             cols: 1,
             page_rows: 10,
+            volumes: HashMap::new(),
+            hover_volume: None,
         };
         p.load(loc, None, cfg);
         p
@@ -158,6 +164,11 @@ impl Pane {
     /// Rebuild `entries` from `all` with the current filter.
     pub fn refilter(&mut self, focus: Option<String>) {
         let focus = focus.or_else(|| self.current().map(|e| e.name.clone()));
+        self.volumes = if matches!(self.loc, Location::Local(_)) {
+            crate::volumes::groups(self.all.iter().filter(|e| !e.is_dir).map(|e| e.name.as_str()))
+        } else {
+            HashMap::new()
+        };
         self.entries = match self.filter.as_deref() {
             Some(f) if !f.is_empty() => self.all.iter().filter(|e| vfs::name_matches(&e.name, f)).cloned().collect(),
             _ => self.all.clone(),
@@ -1522,7 +1533,7 @@ impl App {
                 if path.is_dir() {
                     self.pane_mut().navigate(Location::Local(path), None, &cfg);
                 } else if path.is_file() && vfs::is_archive_name(&text) {
-                    self.pane_mut().navigate(Location::Archive { archive: path, inner: String::new() }, None, &cfg);
+                    self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
                 } else {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
@@ -1546,7 +1557,7 @@ impl App {
             Location::Local(_) | Location::Search { .. } => {
                 let path = p.entry_path(&e).expect("local entry");
                 if vfs::is_archive_name(&e.name) {
-                    self.pane_mut().navigate(Location::Archive { archive: path, inner: String::new() }, None, &cfg);
+                    self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
                 } else if let Err(err) = crate::launch::open(&path) {
                     self.toast(format!("{}: {err}", tr("Failed")), true);
                 }
@@ -2181,6 +2192,7 @@ impl App {
                     archive.parent().map(Path::to_path_buf)
                 };
                 if let Some(dest) = dest {
+                    let archive = crate::volumes::first(&archive);
                     self.start(Op::Extract { archive, dest });
                 }
             }
@@ -2398,7 +2410,7 @@ fn start_location(p: &Path) -> Option<(Location, Option<String>)> {
     }
     let name = p.file_name()?.to_string_lossy().into_owned();
     if vfs::is_archive_name(&name) {
-        return Some((Location::Archive { archive: p, inner: String::new() }, None));
+        return Some((vfs::archive_loc(p), None));
     }
     Some((Location::Local(p.parent()?.to_path_buf()), Some(name)))
 }

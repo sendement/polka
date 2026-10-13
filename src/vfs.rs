@@ -201,7 +201,19 @@ const ARCHIVE_SUFFIXES: &[&str] = &[
 
 pub fn is_archive_name(name: &str) -> bool {
     let lower = name.to_lowercase();
-    ARCHIVE_SUFFIXES.iter().any(|s| lower.ends_with(s))
+    if ARCHIVE_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return true;
+    }
+    // Volumes: name.7z.002, name.r00 (opened through their first volume).
+    match crate::volumes::parse(name) {
+        Some(v) => v.kind == crate::volumes::Kind::Rar || is_archive_name(&v.archive),
+        None => false,
+    }
+}
+
+/// Where to browse the archive at `path`: volume sets open at volume one.
+pub fn archive_loc(path: PathBuf) -> Location {
+    Location::Archive { archive: crate::volumes::first(&path), inner: String::new() }
 }
 
 pub fn list(loc: &Location) -> std::io::Result<Vec<Entry>> {
@@ -295,7 +307,7 @@ pub struct ArchiveIndex {
     pub dirs: HashMap<String, Vec<Entry>>,
 }
 
-type IndexCache = Mutex<HashMap<PathBuf, (Option<SystemTime>, Arc<ArchiveIndex>)>>;
+type IndexCache = Mutex<HashMap<PathBuf, (Option<(SystemTime, u64)>, Arc<ArchiveIndex>)>>;
 
 fn cache() -> &'static IndexCache {
     static C: OnceLock<IndexCache> = OnceLock::new();
@@ -469,21 +481,38 @@ fn merge_into(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::rename(src, dst)
 }
 
+/// Stand-in password for `7z` when we have none: an encrypted archive then
+/// fails with "Wrong password" instead of prompting.
+const NO_PASSWORD: &str = "polka-no-password";
+
+/// Run `7z` on a RAR volume set (libarchive can't follow one).
+fn with_rar_set<T>(archive: &Path, f: impl FnOnce(&str) -> std::io::Result<T>) -> std::io::Result<T> {
+    let pw = password(archive);
+    f(pw.as_deref().unwrap_or(NO_PASSWORD)).map_err(|e| match need_password(&e) {
+        Some(_) if pw.is_none() => need(archive, false),
+        _ => e,
+    })
+}
+
 pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
-    let mtime = std::fs::metadata(archive).and_then(|m| m.modified()).ok();
+    let mtime = crate::volumes::stamp(archive);
     if let Some((t, idx)) = cache().lock().unwrap().get(archive) {
         if *t == mtime {
             return Ok(idx.clone());
         }
     }
-    let headers = match headers_libarchive(archive) {
-        Ok(h) => h,
-        // Encrypted names (7z -mhe): only 7z with the password can list it.
-        Err(e) if matches!(classify(&e.to_string()), Some(_)) => match password(archive) {
-            Some(pw) => headers_7z(archive, &pw)?,
-            None => return Err(need(archive, false)),
-        },
-        Err(e) => return Err(e),
+    let headers = if crate::volumes::is_rar_set(archive) {
+        with_rar_set(archive, |pw| headers_7z(archive, pw))?
+    } else {
+        match headers_libarchive(archive) {
+            Ok(h) => h,
+            // Encrypted names (7z -mhe): only 7z with the password can list it.
+            Err(e) if matches!(classify(&e.to_string()), Some(_)) => match password(archive) {
+                Some(pw) => headers_7z(archive, &pw)?,
+                None => return Err(need(archive, false)),
+            },
+            Err(e) => return Err(e),
+        }
     };
     let idx = Arc::new(build_index(headers));
     cache().lock().unwrap().insert(archive.to_path_buf(), (mtime, idx.clone()));
@@ -493,7 +522,7 @@ pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
 fn headers_libarchive(archive: &Path) -> std::io::Result<Vec<(String, u32, u64, i64)>> {
     let headers: Arc<Mutex<Vec<(String, u32, u64, i64)>>> = Default::default();
     let sink = headers.clone();
-    let file = File::open(archive)?;
+    let file = crate::volumes::open(archive)?;
     // Rejecting every entry in the filter makes libarchive skip the data, so
     // indexing only reads headers.
     let mut iter = ArchiveIteratorBuilder::new(file)
@@ -591,6 +620,9 @@ fn libc_s_ifmt() -> u32 {
 /// `progress` gets the number of bytes written so far; returning `false`
 /// cancels.
 pub fn extract(archive: &Path, items: &[String], dest: &Path, progress: impl FnMut(u64) -> bool) -> std::io::Result<()> {
+    if crate::volumes::is_rar_set(archive) {
+        return with_rar_set(archive, |pw| extract_7z(archive, items, dest, pw));
+    }
     let pw = password(archive);
     match extract_libarchive(archive, items, dest, progress, pw.as_deref()) {
         Ok(()) => Ok(()),
@@ -632,7 +664,7 @@ fn extract_libarchive(
             .map(|(_, strip)| *strip)
     };
     let m2 = matches.clone();
-    let mut builder = ArchiveIteratorBuilder::new(File::open(archive)?).filter(move |name, _| m2(name).is_some());
+    let mut builder = ArchiveIteratorBuilder::new(crate::volumes::open(archive)?).filter(move |name, _| m2(name).is_some());
     if let Some(pw) = pw {
         builder = builder.with_password(compress_tools::ArchivePassword::new(pw).map_err(io_err)?);
     }
@@ -957,5 +989,91 @@ mod password_tests {
         compress(vec![dir.join("src/a.txt")], &a, CompressOpts { split: Some(100 * 1024), ..CompressOpts::new(F::Zip) });
         assert!(a.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    /// Split archives: browse from any volume, extract, edit (re-split).
+    #[test]
+    fn split_volumes() {
+        use crate::ops::{ArchiveFormat as F, CompressOpts};
+        use crate::archive_rw::{rewrite, Plan};
+        let dir = std::env::temp_dir().join(format!("polka-split-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "secret").unwrap();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let noise: Vec<u8> = (0..250_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        std::fs::write(dir.join("src/sub/noise.bin"), &noise).unwrap();
+        let mut formats = vec![F::Zip, F::TarZst, F::TarGz];
+        if crate::ops::have_7z() {
+            formats.push(F::SevenZ);
+        }
+        for f in formats {
+            let a = dir.join(format!("v{}", f.ext()));
+            compress(vec![dir.join("src")], &a, CompressOpts { split: Some(64 * 1024), ..CompressOpts::new(f) });
+            let v1 = crate::ops::volume_path(&a, 1);
+            let v3 = crate::ops::volume_path(&a, 3);
+            assert!(v3.exists(), "{f:?}");
+            // Any volume leads to the first one.
+            let Location::Archive { archive, .. } = archive_loc(v3.clone()) else { panic!() };
+            assert_eq!(archive, v1);
+            assert!(is_archive_name(&v3.file_name().unwrap().to_string_lossy()));
+            assert!(archive_index(&v1).unwrap().dirs["src/sub"].iter().any(|e| e.name == "noise.bin"), "{f:?}");
+            assert_eq!(read(&v1, "src/a.txt").unwrap(), "secret", "{f:?}");
+            let d = dir.join(format!("x{}", f.ext()));
+            std::fs::create_dir_all(&d).unwrap();
+            extract(&v1, &["src/sub/noise.bin".into()], &d, |_| true).unwrap();
+            assert_eq!(std::fs::read(d.join("noise.bin")).unwrap(), noise, "{f:?}");
+
+            // Edit: delete the big file, add a small one → fewer volumes.
+            let before = crate::volumes::set_of(&v1).unwrap().files.len();
+            std::fs::write(dir.join("new.txt"), "N").unwrap();
+            let plan = Plan { remove: vec!["src/sub/noise.bin".into()], add: vec![(dir.join("new.txt"), "src/new.txt".into())], ..Default::default() };
+            rewrite(&v1, &plan, |_| true).unwrap();
+            let set = crate::volumes::set_of(&v1).unwrap();
+            assert!(set.files.len() < before, "{f:?}: {} volumes", set.files.len());
+            assert!(!v3.exists(), "{f:?}: stale volume");
+            assert_eq!(read(&v1, "src/new.txt").unwrap(), "N", "{f:?}");
+            assert_eq!(read(&v1, "src/a.txt").unwrap(), "secret", "{f:?}");
+            assert!(!archive_index(&v1).unwrap().dirs["src/sub"].iter().any(|e| e.name == "noise.bin"));
+        }
+        if crate::ops::have_7z() {
+            // An encrypted split 7z goes through 7z, password and all.
+            let a = dir.join("enc.7z");
+            compress(vec![dir.join("src")], &a, CompressOpts { split: Some(64 * 1024), password: Some("pw".into()), encrypt_names: true, ..CompressOpts::new(F::SevenZ) });
+            let v1 = crate::ops::volume_path(&a, 1);
+            assert_eq!(needs(archive_index(&v1).map(|_| ())), Some(false));
+            set_password(&v1, "pw");
+            assert_eq!(read(&v1, "src/a.txt").unwrap(), "secret");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RAR volume sets (POLKA_RAR_VOLUMES: a folder with name.partN.rar).
+    #[test]
+    fn rar_volumes() {
+        let Some(src) = std::env::var_os("POLKA_RAR_VOLUMES") else { return };
+        let src = PathBuf::from(src);
+        let first = std::fs::read_dir(&src).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with("part1.rar")).unwrap();
+        let last = crate::volumes::set_of(&first).unwrap().files.last().unwrap().clone();
+        let Location::Archive { archive, .. } = archive_loc(last.clone()) else { panic!() };
+        assert_eq!(archive, first);
+        let idx = archive_index(&first).unwrap();
+        let files: Vec<_> = idx.dirs.values().flatten().filter(|e| !e.is_dir).collect();
+        assert!(files.len() >= 2, "{files:?}");
+        let biggest = idx.dirs.iter().flat_map(|(d, es)| es.iter().map(move |e| (d, e))).filter(|(_, e)| !e.is_dir).max_by_key(|(_, e)| e.size).unwrap();
+        let inner = if biggest.0.is_empty() { biggest.1.name.clone() } else { format!("{}/{}", biggest.0, biggest.1.name) };
+        let d = std::env::temp_dir().join(format!("polka-rarv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        extract(&first, &[inner.clone()], &d, |_| true).unwrap();
+        assert_eq!(std::fs::metadata(d.join(&biggest.1.name)).unwrap().len(), biggest.1.size, "{inner}");
+        assert!(!crate::archive_rw::writable_name(&last.file_name().unwrap().to_string_lossy()));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

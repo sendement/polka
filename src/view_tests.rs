@@ -379,6 +379,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     closing_tabs(h);
     passwords(h);
     compress_dialog(h);
+    volumes(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -556,4 +557,103 @@ fn compress_dialog(h: &mut Harness<'static, App>) {
     assert_eq!((o.format, o.method, o.level, o.password), (ArchiveFormat::SevenZ, Method::Bzip2, Level::Max, None));
     press(h, &[Action::Back]);
     assert!(h.state().overlay.is_none());
+}
+
+fn volumes(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    use crate::ops::{ArchiveFormat, CompressOpts};
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let work = dir.join("vols");
+    std::fs::create_dir_all(work.join("pack/sub")).unwrap();
+    let mut x = 0x1234_5678_9abc_def1u64;
+    let noise: Vec<u8> = (0..200_000)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect();
+    std::fs::write(work.join("pack/sub/noise.bin"), &noise).unwrap();
+    std::fs::write(work.join("pack/readme.txt"), "volumes").unwrap();
+    let job = crate::ops::spawn(
+        crate::ops::Op::Compress { sources: vec![work.join("pack")], out: work.join("pack.zip"), opts: CompressOpts { split: Some(64 * 1024), ..CompressOpts::new(ArchiveFormat::Zip) } },
+        || {},
+    );
+    while job.finished_at.lock().unwrap().is_none() {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    std::fs::write(work.join("notes.txt"), "x").unwrap();
+    if let Some(rar) = std::env::var_os("POLKA_RAR_VOLUMES") {
+        for e in std::fs::read_dir(rar).unwrap().flatten() {
+            std::fs::copy(e.path(), work.join(e.file_name())).unwrap();
+        }
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    let cfg2 = h.state().cfg.clone();
+    h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg2);
+    settle(h);
+    let pos = |h: &Harness<'static, App>, n: &str| h.state().pane().entries.iter().position(|e| e.name == n).unwrap();
+    let i = pos(h, "pack.zip.002");
+    h.state_mut().pane_mut().set_cursor(i);
+    settle(h);
+    let m = h.state().pane().volumes.get("pack.zip.002").cloned().expect("volume group");
+    assert_eq!((m.index, m.count, m.archive.as_str()), (1, 4, "pack.zip"));
+    shot(h, "31-volumes-list");
+    if h.state().pane().volumes.contains_key("multi.part2.rar") {
+        // The mouse over another set takes the highlight over from the cursor.
+        let row = h.state().pane().entries.iter().position(|e| e.name == "multi.part2.rar").unwrap();
+        assert_eq!(row, 2, "layout changed; adjust the hover point");
+        h.hover_at(egui::pos2(320.0, 218.0));
+        settle(h);
+        let key = h.state().pane().volumes["multi.part2.rar"].key.clone();
+        assert_eq!(h.state().pane().hover_volume.as_ref(), Some(&key));
+        shot(h, "31b-volumes-hover");
+        h.hover_at(egui::pos2(1000.0, 600.0));
+        settle(h);
+    }
+    if h.state().pane().volumes.contains_key("multi.part1.rar") {
+        let i = pos(h, "multi.part3.rar");
+        h.state_mut().pane_mut().set_cursor(i);
+        h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+        settle(h);
+        shot(h, "32-volumes-grid");
+        // Into the RAR set from its third volume.
+        press(h, &[Action::Accept]);
+        settle(h);
+        match &h.state().pane().loc {
+            Location::Archive { archive, .. } => assert!(archive.ends_with("multi.part1.rar")),
+            l => panic!("{l:?}"),
+        }
+        assert!(!h.state().pane().entries.is_empty());
+        press(h, &[Action::Back]);
+        h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    }
+    let _ = cfg;
+    // Into the split zip from its second volume.
+    let i = pos(h, "pack.zip.002");
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    settle(h);
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert_eq!(names, ["pack"]);
+    press(h, &[Action::Accept]);
+    shot(h, "33-inside-split");
+    // Delete inside: the archive is cut again into fewer volumes.
+    h.state_mut().run(Cmd::DeleteInArchive { archive: work.join("pack.zip.001"), inners: vec!["pack/sub".into()] });
+    wait_jobs(h);
+    assert!(!work.join("pack.zip.003").exists(), "volumes were not re-cut");
+    press(h, &[Action::Back, Action::Back]);
+    settle(h);
+    assert!(h.state().pane().entries.iter().all(|e| e.name != "pack.zip.002"));
+    // Extract from a volume.
+    let i = pos(h, "pack.zip.001");
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::ExtractHere);
+    wait_jobs(h);
+    // "pack" exists already (the source), so it lands as "pack (2)".
+    assert_eq!(std::fs::read_to_string(work.join("pack (2)/readme.txt")).unwrap(), "volumes");
 }
