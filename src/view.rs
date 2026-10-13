@@ -381,7 +381,8 @@ impl App {
             .iter()
             .map(|t| {
                 let p = &t.panes[if dual { t.active } else { 0 }];
-                let title = t.viewer.as_ref().map_or_else(|| p.loc.title(), |v| v.name.clone());
+                let usage = t.usage.as_ref().is_some_and(|u| u.shown);
+                let title = t.viewer.as_ref().map_or_else(|| if usage { tr("Disk usage").to_string() } else { p.loc.title() }, |v| v.name.clone());
                 elided(ui, &title, FontId::proportional(14.0), v.text_color(), 180.0, 1)
             })
             .collect();
@@ -589,6 +590,7 @@ impl App {
                 (Action::Actions, tr("Actions")),
                 (Action::Back, tr("Close")),
             ],
+            None if self.usage_shown() && self.focus == Focus::Panes => self.usage_hints(),
             None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -609,6 +611,7 @@ impl App {
         let collapsed = self.cfg.sidebar_collapsed;
         let focused = self.focus == Focus::Sidebar && self.overlay.is_none();
         let cur_loc = self.pane().loc.clone();
+        let usage_here = self.usage_shown();
         let mut clicked = None;
         let mut actions = None;
         let side_icon = self.cfg.side_icon;
@@ -632,7 +635,7 @@ impl App {
                         }
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
                         let is_cursor = focused && i == self.side_cursor;
-                        let here = it.loc == cur_loc;
+                        let here = if it.usage { usage_here } else { it.loc == cur_loc && !usage_here };
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
                         let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon));
                         let px = lookup_px(ui, side_icon);
@@ -685,6 +688,7 @@ impl App {
         let mut divider = None;
         let mut tab_act = None;
         let mut viewer_act = None;
+        let mut usage_act = None;
         let full = self.video_full();
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -695,6 +699,10 @@ impl App {
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
                 let theme = crate::viewer::theme::by_name(&self.cfg.viewer.theme);
                 viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                return;
+            }
+            if let Some(u) = self.tabs[tab].usage.as_deref_mut().filter(|u| u.shown) {
+                usage_act = crate::usage::draw::draw(ui, u, &mut self.icons);
                 return;
             }
             let App { tabs, icons, cfg, .. } = self;
@@ -739,7 +747,11 @@ impl App {
                 HeaderAct::Volume(v) => self.audio_set_volume(v),
             }
         }
-        let divider = if self.tabs[tab].viewer.is_some() { self.divider_x } else { divider };
+        if let Some(a) = usage_act {
+            self.usage_act(a);
+        }
+        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown);
+        let divider = if self.tabs[tab].viewer.is_some() || usage { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
             self.divider_x = divider;
@@ -1206,7 +1218,7 @@ fn paint_entry_bg(ui: &Ui, rect: Rect, cursor: bool, focused: bool, selected: bo
     }
 }
 
-fn paint_row_bg(ui: &Ui, rect: Rect, cursor: bool, current: bool, hovered: bool) {
+pub(crate) fn paint_row_bg(ui: &Ui, rect: Rect, cursor: bool, current: bool, hovered: bool) {
     let v = ui.visuals();
     let accent = v.selection.bg_fill;
     if cursor {
@@ -1675,7 +1687,7 @@ enum TopAction {
 /// Theme size to ask for an icon drawn `pt` points wide, rounded up to a
 /// size themes ship natively. Odd sizes (48, 56…) make lookups fall back to
 /// scaled-up small icons (Breeze's `16@3x`), which are monochrome glyphs.
-fn lookup_px(ui: &Ui, pt: f32) -> u16 {
+pub(crate) fn lookup_px(ui: &Ui, pt: f32) -> u16 {
     let px = (pt * ui.pixels_per_point()).ceil() as u16;
     [SMALL_ICON_LOOKUP, 64, 128, 256].into_iter().find(|s| *s >= px).unwrap_or(256)
 }

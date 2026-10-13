@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64",
  "chrono",
@@ -3448,6 +3448,7 @@ dependencies = [
  "freedesktop-icons",
  "gilrs",
  "image",
+ "libc",
  "lofty",
  "md5",
  "mime_guess",
@@ -3456,6 +3457,7 @@ dependencies = [
  "png 0.17.16",
  "pulldown-cmark",
  "raw-window-handle",
+ "rayon",
  "regex",
  "rodio",
  "serde",

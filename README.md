@@ -57,6 +57,22 @@ instead: Settings → "Open in Polka"):
 | Full screen | Create / View, double click | F, F11 |
 | Subtitles / audio track | □ / X tap / △ menu | S / A |
 
+## Disk usage
+
+**Tools → Disk usage** in the sidebar (or △ on a folder) measures home, the current folder or a
+whole disk in the background (space on disk; hard links counted once; other file systems mounted
+inside are skipped) and shows it as **rings** like Filelight, **tiles** (a treemap) or a **list**.
+The result stays in its tab while you browse and can be measured again in place.
+
+| Disk usage | Gamepad | Mouse |
+|---|---|---|
+| Around the ring / neighbours | ← → | hover for details |
+| Out / in a ring | ↓ ↑ | |
+| Into a folder / show a file in the panel | ✕ / A, R2 | click |
+| Up a level | ○ / B, L2 | click the middle, the path |
+| Rings → tiles → list | □ / X | the buttons in the header |
+| Open in the panel, new tab, measure again | △ / Y | right click |
+
 ## Controls
 
 | Gamepad (PlayStation / Xbox) | Action | Keyboard |

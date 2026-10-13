@@ -381,6 +381,8 @@ pub struct Tab {
     pub active: usize,
     /// A file shown in place of the panes.
     pub viewer: Option<Box<Viewer>>,
+    /// The disk usage page (kept while hidden).
+    pub usage: Option<Box<crate::usage::Usage>>,
 }
 
 // ---------------------------------------------------------------- overlays
@@ -477,6 +479,15 @@ pub enum Cmd {
     /// New file from a template (None = empty).
     NewFile(Option<PathBuf>),
     OpenTemplates,
+    /// The disk usage page; with a folder, measured right away.
+    UsageOpen(Option<PathBuf>),
+    UsageReveal,
+    UsageZoomIn,
+    UsageZoomOut,
+    UsageMode(u8),
+    UsageRescan,
+    UsageStart,
+    UsageClose,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -965,6 +976,8 @@ pub struct SideItem {
     pub loc: Location,
     pub pinned: bool,
     pub section: &'static str,
+    /// Opens the disk usage page instead of a place.
+    pub usage: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1069,7 +1082,7 @@ impl App {
                 first.set_cursor(i);
             }
         }
-        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None };
+        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None, usage: None };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         ctx.set_zoom_factor(cfg.zoom);
         apply_accent(&ctx, &cfg);
@@ -1135,6 +1148,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.tick_audio();
+        self.tick_usage();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -1244,7 +1258,7 @@ impl App {
         ];
         for (label, p, icon) in places {
             if let Some(p) = p.filter(|p| p.is_dir() && (label == "Home" || *p != home)) {
-                v.push(SideItem { label: tr(label).into(), icon, custom_icon: None, loc: Location::Local(p), pinned: false, section: "Places" });
+                v.push(SideItem { label: tr(label).into(), icon, custom_icon: None, loc: Location::Local(p), pinned: false, section: "Places", usage: false });
             }
         }
         v.push(SideItem {
@@ -1254,10 +1268,11 @@ impl App {
             loc: Location::Local("/".into()),
             pinned: false,
             section: "Places",
+            usage: false,
         });
         let trash = dirs::data_dir().map(|d| d.join("Trash/files"));
         if let Some(t) = trash.filter(|t| t.is_dir()) {
-            v.push(SideItem { label: tr("Trash").into(), custom_icon: None, icon: &["user-trash", "user-trash-full"], loc: Location::Local(t), pinned: false, section: "Places" });
+            v.push(SideItem { label: tr("Trash").into(), custom_icon: None, icon: &["user-trash", "user-trash-full"], loc: Location::Local(t), pinned: false, section: "Places", usage: false });
         }
         for p in &self.cfg.pinned {
             v.push(SideItem {
@@ -1267,12 +1282,22 @@ impl App {
                 loc: Location::Local(p.clone()),
                 pinned: true,
                 section: "Pinned",
+                usage: false,
             });
         }
         for (dev, mnt) in mounts() {
             let label = mnt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dev);
-            v.push(SideItem { label, custom_icon: None, icon: &["drive-removable-media", "drive-harddisk", "media-flash"], loc: Location::Local(mnt), pinned: false, section: "Devices" });
+            v.push(SideItem { label, custom_icon: None, icon: &["drive-removable-media", "drive-harddisk", "media-flash"], loc: Location::Local(mnt), pinned: false, section: "Devices", usage: false });
         }
+        v.push(SideItem {
+            label: tr("Disk usage").into(),
+            icon: &["baobab", "org.gnome.baobab", "filelight", "disk-usage-analyzer", "drive-harddisk"],
+            custom_icon: None,
+            loc: Location::Local("/".into()),
+            pinned: false,
+            section: "Tools",
+            usage: true,
+        });
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
     }
@@ -1310,6 +1335,9 @@ impl App {
         }
         if self.cur_tab().viewer.is_some() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.viewer_input(a);
+        }
+        if self.usage_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
+            return self.usage_input(a);
         }
         let cfg = self.cfg.clone();
         let grid = cfg.view == ViewMode::Grid;
@@ -1402,7 +1430,7 @@ impl App {
         }
     }
 
-    fn focus_sidebar(&mut self) {
+    pub(crate) fn focus_sidebar(&mut self) {
         self.focus = Focus::Sidebar;
         // Land on the sidebar entry for the current folder if there is one.
         let loc = self.pane().loc.clone();
@@ -1461,13 +1489,20 @@ impl App {
             Action::Right | Action::Back => self.focus = Focus::Panes,
             Action::Accept => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
+                    if it.usage {
+                        return self.open_usage(None);
+                    }
                     let cfg = self.cfg.clone();
+                    // A place replaces the disk usage page (kept for later).
+                    if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
+                        u.shown = false;
+                    }
                     self.pane_mut().navigate(it.loc, None, &cfg);
                     self.focus = Focus::Panes;
                 }
             }
             Action::Actions => {
-                if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
+                if let Some(it) = self.side_items.get(self.side_cursor).cloned().filter(|it| !it.usage) {
                     let mut items = vec![item(tr("New tab"), Cmd::OpenInNewTab(it.loc.clone()))];
                     if let (true, Some(p)) = (it.pinned, it.loc.local_path()) {
                         items.push(item(tr("Choose icon…"), Cmd::ChooseIcon(p.to_path_buf())));
@@ -1983,6 +2018,9 @@ impl App {
 
     fn open_actions_menu(&mut self) {
         self.scan_templates();
+        if self.usage_shown() {
+            return self.usage_menu();
+        }
         if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
             return self.viewer_text_menu();
         }
@@ -2057,6 +2095,7 @@ impl App {
         }
         if one_dir_local {
             let path = p.entry_path(&targets[0]).unwrap();
+            add(tr("Disk usage"), Cmd::UsageOpen(Some(path.clone())), true);
             if pinned {
                 add(tr("Unpin from sidebar"), Cmd::Unpin(path), true);
             } else {
@@ -2134,7 +2173,7 @@ impl App {
         items
     }
 
-    fn open_app_menu(&mut self) {
+    pub(crate) fn open_app_menu(&mut self) {
         self.scan_templates();
         let local = self.pane().loc.local_path().is_some();
         let writable = self.pane().loc.dest().is_some();
@@ -2738,6 +2777,14 @@ impl App {
             | Cmd::ViewerSaveThen(_)
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
+            Cmd::UsageOpen(_)
+            | Cmd::UsageReveal
+            | Cmd::UsageZoomIn
+            | Cmd::UsageZoomOut
+            | Cmd::UsageMode(_)
+            | Cmd::UsageRescan
+            | Cmd::UsageStart
+            | Cmd::UsageClose => self.usage_cmd(cmd),
             Cmd::AudioToggle | Cmd::AudioNext | Cmd::AudioPrev | Cmd::AudioPlay(_) | Cmd::AudioRepeat | Cmd::AudioVolume(_) | Cmd::AudioSeek(_) => {
                 self.audio_cmd(cmd);
             }
@@ -2799,7 +2846,7 @@ impl App {
             }
             Cmd::OpenInNewTab(loc) => {
                 let other = loc.clone();
-                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None });
+                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None, usage: None });
                 self.tab = self.tabs.len() - 1;
                 self.focus = Focus::Panes;
             }

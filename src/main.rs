@@ -9,6 +9,7 @@ mod launch;
 mod locks;
 mod ops;
 mod thumbs;
+mod usage;
 mod vfs;
 mod volumes;
 mod xcursor;

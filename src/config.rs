@@ -60,6 +60,8 @@ pub struct Config {
     pub open_videos: bool,
     /// Show a multi-volume archive as one item until it's pointed at.
     pub collapse_volumes: bool,
+    /// Disk usage page: rings, tiles or list.
+    pub usage_mode: u8,
 }
 
 /// Text viewer look.
@@ -152,6 +154,7 @@ impl Default for Config {
             open_music: true,
             open_videos: true,
             collapse_volumes: true,
+            usage_mode: 0,
         }
     }
 }

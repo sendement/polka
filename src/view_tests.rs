@@ -1599,3 +1599,145 @@ fn web_screens() {
     let mut h = harness(dir);
     web_pictures(&mut h);
 }
+
+/// Disk usage: opened from the sidebar, measured, walked with the pad in
+/// every mode, shown in the panel, measured again.
+fn disk_usage(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay};
+    use crate::usage::{Mode, State};
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("usage");
+    let _ = std::fs::remove_dir_all(&dir);
+    let file = |p: &str, kib: usize| {
+        let p = dir.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![7u8; kib * 1024]).unwrap();
+    };
+    file("Games/Townfall/data.pak", 6000);
+    file("Games/Townfall/game.exe", 900);
+    file("Games/Other/level1.bin", 1500);
+    file("Games/Other/level2.bin", 1200);
+    file("Music/album/01.flac", 1800);
+    file("Music/album/02.flac", 1600);
+    file("Music/single.mp3", 500);
+    file("Photos/2025/a.jpg", 700);
+    file("Photos/2025/b.jpg", 650);
+    file("Photos/2026/c.jpg", 900);
+    for i in 0..80 {
+        file(&format!("Code/src/m{i:02}.rs"), 4 + i % 9);
+    }
+    file("video.mkv", 2500);
+    file("notes.txt", 8);
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().cfg.usage_mode = 0;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    // From the sidebar's Tools section.
+    h.state_mut().focus_sidebar();
+    let i = h.state().side_items.iter().position(|s| s.usage).expect("no disk usage entry");
+    h.state_mut().side_cursor = i;
+    press(h, &[Action::Accept]);
+    assert!(h.state().usage_shown());
+    shot(h, "90-usage-start");
+    let this = match &h.state().cur_tab().usage.as_ref().unwrap().state {
+        State::Start { targets, .. } => targets.iter().position(|t| t.path == dir).expect("this folder not offered"),
+        _ => panic!("not the start screen"),
+    };
+    for _ in 0..this {
+        press(h, &[Action::Down]);
+    }
+    press(h, &[Action::Accept]);
+    let ready = |h: &mut Harness<'static, App>| {
+        for _ in 0..100 {
+            settle(h);
+            if h.state().cur_tab().usage.as_ref().unwrap().ready().is_some() {
+                return;
+            }
+        }
+        panic!("measuring never finished");
+    };
+    ready(h);
+    let sel = |h: &Harness<'static, App>| {
+        let r = h.state().cur_tab().usage.as_ref().unwrap().ready().unwrap();
+        (r.tree.names(&r.center).join("/"), r.tree.names(&r.sel).join("/"))
+    };
+    {
+        let r = h.state().cur_tab().usage.as_ref().unwrap().ready().unwrap();
+        assert!(r.tree.size >= 18_000 * 1024, "{}", r.tree.size);
+        assert_eq!(r.tree.children[0].name.as_ref(), "Games");
+        let code = r.tree.children.iter().find(|c| c.name.as_ref() == "Code").unwrap();
+        assert_eq!(code.files, 80);
+    }
+    assert_eq!(sel(h), (String::new(), "Games".into()));
+    shot(h, "91-usage-rings");
+    // Around the ring, out a ring, into a folder and back.
+    press(h, &[Action::Right]);
+    assert_eq!(sel(h).1, "Music");
+    press(h, &[Action::Left, Action::Down]);
+    assert_eq!(sel(h).1, "Games/Townfall");
+    press(h, &[Action::Down]);
+    assert_eq!(sel(h).1, "Games/Townfall/data.pak");
+    shot(h, "92-usage-rings-deep");
+    press(h, &[Action::Up, Action::Up, Action::Accept]);
+    assert_eq!(sel(h), ("Games".into(), "Games/Townfall".into()));
+    shot(h, "93-usage-rings-zoomed");
+    press(h, &[Action::Back]);
+    assert_eq!(sel(h), (String::new(), "Games".into()));
+    // □: tiles, then the list.
+    press(h, &[Action::Select]);
+    assert_eq!(h.state().cur_tab().usage.as_ref().unwrap().mode, Mode::Tiles);
+    press(h, &[Action::Down]);
+    shot(h, "94-usage-tiles");
+    press(h, &[Action::Select]);
+    assert_eq!(h.state().cfg.usage_mode, Mode::List.index());
+    assert_eq!(sel(h).1, "Games", "the list shows one level");
+    press(h, &[Action::Down, Action::Down]);
+    assert_eq!(sel(h).1, "video.mkv");
+    press(h, &[Action::Down, Action::Down]);
+    assert_eq!(sel(h).1, "Code");
+    press(h, &[Action::Right]);
+    assert_eq!(sel(h).0, "Code");
+    shot(h, "95-usage-list-code");
+    press(h, &[Action::Left]);
+    shot(h, "96-usage-list");
+    // △: show the picked folder in the panel; the page waits in the tab.
+    press(h, &[Action::Actions]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Menu(_))));
+    shot(h, "97-usage-menu");
+    press(h, &[Action::Accept]);
+    assert!(!h.state().usage_shown());
+    assert_eq!(h.state().pane().loc, Location::Local(dir.join("Code")));
+    h.state_mut().focus_sidebar();
+    h.state_mut().side_cursor = i;
+    press(h, &[Action::Accept]);
+    assert!(h.state().usage_shown());
+    assert_eq!(sel(h).1, "Code", "the result was kept");
+    // Measured again: still in the same place; a new file shows up.
+    press(h, &[Action::Right]);
+    file("Code/big.dat", 9000);
+    h.state_mut().run(Cmd::UsageRescan);
+    ready(h);
+    assert_eq!(sel(h).0, "Code");
+    assert_eq!(sel(h).1, "Code/src", "the pick is found again by name");
+    {
+        let r = h.state().cur_tab().usage.as_ref().unwrap().ready().unwrap();
+        assert_eq!(r.tree.children[0].name.as_ref(), "Code");
+        assert_eq!(r.center_node().children[0].name.as_ref(), "big.dat");
+    }
+    h.state_mut().run(Cmd::UsageMode(0));
+    shot(h, "98-usage-rings-rescanned");
+    // Back to the top, the start screen, closed.
+    press(h, &[Action::Back, Action::Back]);
+    assert!(matches!(h.state().cur_tab().usage.as_ref().unwrap().state, State::Start { .. }));
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().usage.is_none());
+}
+
+#[test]
+#[ignore]
+fn usage_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    disk_usage(&mut h);
+}
