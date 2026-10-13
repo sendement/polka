@@ -334,7 +334,10 @@ impl App {
     /// Tabs strip at the top of the file area: L1, tabs, "+", R1 centred
     /// in a fixed-height row (laid out by hand so everything shares one
     /// vertical centre).
-    fn draw_tabs(&mut self, ui: &mut Ui) {
+    /// Returns the click instead of acting on it: the caller is still
+    /// drawing the current tab, so closing it now would pull it away
+    /// mid-frame (that crashed Polka when the last-but-one tab closed).
+    fn draw_tabs(&mut self, ui: &mut Ui) -> Option<TabAct> {
         let dual = self.cfg.dual;
         let mut switch = None;
         let mut close = None;
@@ -416,15 +419,14 @@ impl App {
         shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
         ui.add_space(6.0);
 
-        if let Some(i) = switch {
-            self.tab = i;
-        }
         if let Some(i) = close {
-            self.tab = i;
-            self.run(Cmd::CloseTab);
-        }
-        if new_tab {
-            self.run(Cmd::NewTab);
+            Some(TabAct::Close(i))
+        } else if let Some(i) = switch {
+            Some(TabAct::Switch(i))
+        } else if new_tab {
+            Some(TabAct::New)
+        } else {
+            None
         }
     }
 
@@ -493,10 +495,12 @@ impl App {
             Some(Overlay::IconPicker(_)) => vec![
                 (Action::PrevTab, tr("Color")),
                 (Action::Accept, tr("OK")),
+                (Action::Actions, tr("Own picture…")),
                 (Action::Select, tr("Reset")),
                 (Action::Back, tr("Cancel")),
             ],
             Some(_) => vec![(Action::Back, tr("Close"))],
+            None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
             }
@@ -590,8 +594,10 @@ impl App {
         let active = self.tabs[tab].active;
         let mut events: Vec<(usize, PaneEvent)> = Vec::new();
         let mut divider = None;
+        let mut tab_act = None;
         egui::CentralPanel::default().show(ui, |ui| {
-            self.draw_tabs(ui);
+            self.draw_icon_pick_banner(ui);
+            tab_act = self.draw_tabs(ui);
             let App { tabs, icons, cfg, .. } = self;
             let [a, b] = &mut tabs[tab].panes;
             if dual {
@@ -652,6 +658,44 @@ impl App {
                     self.handle(Input::Press(Action::Actions));
                 }
             }
+        }
+        match tab_act {
+            Some(TabAct::Switch(i)) => self.tab = i,
+            Some(TabAct::Close(i)) => self.run(Cmd::CloseTabAt(i)),
+            Some(TabAct::New) => self.run(Cmd::NewTab),
+            None => {}
+        }
+    }
+
+    /// Shown while choosing a picture for a pinned folder.
+    fn draw_icon_pick_banner(&mut self, ui: &mut Ui) {
+        let Some(pick) = &self.icon_pick else { return };
+        let name = pick.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut cancel = false;
+        let v = ui.visuals().clone();
+        egui::Frame::new()
+            .fill(v.selection.bg_fill.gamma_multiply(0.3))
+            .stroke(Stroke::new(1.0, v.selection.bg_fill))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{} «{name}»", tr("Choose a picture for"))).size(15.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button(tr("Cancel")).clicked() {
+                            cancel = true;
+                        }
+                        glyph(ui, Action::Actions, self.pad);
+                        ui.add_space(10.0);
+                        ui.label(tr("Choose"));
+                        glyph(ui, Action::Accept, self.pad);
+                    });
+                });
+            });
+        ui.add_space(6.0);
+        if cancel {
+            self.finish_icon_pick(None);
         }
     }
 
@@ -1011,8 +1055,9 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
     ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
     ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
     let font = FontId::proportional(17.0);
-    let text = k.string();
-    let before: String = k.text[..k.caret].iter().collect();
+    let shown = |cs: &[char]| -> String { if k.secret { "•".repeat(cs.len()) } else { cs.iter().collect() } };
+    let text = shown(&k.text);
+    let before = shown(&k.text[..k.caret]);
     let pre_w = ui.painter().layout_no_wrap(before, font.clone(), Color32::WHITE).size().x;
     // Scroll the text so the caret stays visible.
     let shift = (pre_w - (width - 30.0)).max(0.0);
@@ -1322,6 +1367,12 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
 }
 
 // ---------------------------------------------------------------- top bar
+
+enum TabAct {
+    Switch(usize),
+    Close(usize),
+    New,
+}
 
 enum TopAction {
     Sidebar,
@@ -1773,10 +1824,12 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
     ui.horizontal(|ui| {
         let name = names.get(p.cursor).cloned().unwrap_or_default();
         ui.label(egui::RichText::new(name).monospace().weak());
-        ui.label(egui::RichText::new(tr("Your own picture: open it in Polka, △ → \"Use as pinned folder icon\"")).small().weak());
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             if ui.button(tr("Reset")).clicked() {
                 run = Some(Cmd::SetPinIcon(p.path.clone(), None));
+            }
+            if ui.button(tr("Own picture…")).clicked() {
+                run = Some(Cmd::PickIconFile(p.path.clone()));
             }
         });
     });

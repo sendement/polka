@@ -43,6 +43,10 @@ pub struct Job {
     pub finished_at: Mutex<Option<Instant>>,
     /// Directories whose listings change when the job ends.
     pub touches: Vec<Location>,
+    /// The operation, to run again once a password is known.
+    pub op: Option<Op>,
+    /// Set when the job stopped for an archive password.
+    pub need_password: Mutex<Option<(PathBuf, bool)>>,
 }
 
 impl Job {
@@ -56,6 +60,8 @@ impl Job {
             result: Mutex::new(None),
             finished_at: Mutex::new(None),
             touches: Vec::new(),
+            op: None,
+            need_password: Mutex::new(None),
         }
     }
 
@@ -83,6 +89,7 @@ pub enum Conflict {
     Skip,
 }
 
+#[derive(Clone)]
 pub enum Op {
     Copy { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
@@ -118,10 +125,17 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         result: Mutex::new(None),
         finished_at: Mutex::new(None),
         touches,
+        op: Some(op.clone()),
+        need_password: Mutex::new(None),
     });
     let j = job.clone();
     std::thread::spawn(move || {
-        let r = run(op, &j).map_err(|e| e.to_string());
+        let r = run(op, &j).map_err(|e| {
+            if let Some(np) = vfs::need_password(&e) {
+                *j.need_password.lock().unwrap() = Some((np.archive.clone(), np.wrong));
+            }
+            e.to_string()
+        });
         *j.result.lock().unwrap() = Some(r);
         *j.finished_at.lock().unwrap() = Some(Instant::now());
         wake();

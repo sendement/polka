@@ -82,7 +82,7 @@ pub fn writable_name(name: &str) -> bool {
     crate::vfs::is_archive_name(&l) && !READ_ONLY_SUFFIXES.iter().any(|s| l.ends_with(s))
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct Plan {
     /// Inner paths to drop, with their subtrees.
     pub remove: Vec<String>,

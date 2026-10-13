@@ -316,6 +316,159 @@ pub fn invalidate(archive: &Path) {
     cache().lock().unwrap().remove(archive);
 }
 
+// ---------------------------------------------------------------- passwords
+//
+// libarchive decrypts zip (ZipCrypto, AES) itself but not 7z or rar; those
+// go through the 7z tool. Passwords live in memory only, per archive path.
+
+/// The archive needs a password (`wrong`: the one we had didn't work).
+#[derive(Debug)]
+pub struct NeedPassword {
+    pub archive: PathBuf,
+    pub wrong: bool,
+}
+
+impl std::fmt::Display for NeedPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = if self.wrong { crate::i18n::tr("Wrong password") } else { crate::i18n::tr("Password required") };
+        write!(f, "{what}: {}", self.archive.display())
+    }
+}
+
+impl std::error::Error for NeedPassword {}
+
+pub fn need_password(e: &std::io::Error) -> Option<&NeedPassword> {
+    e.get_ref()?.downcast_ref::<NeedPassword>()
+}
+
+fn passwords() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static P: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+pub fn set_password(archive: &Path, pw: &str) {
+    passwords().lock().unwrap().insert(archive.to_path_buf(), pw.to_string());
+}
+
+fn password(archive: &Path) -> Option<String> {
+    passwords().lock().unwrap().get(archive).cloned()
+}
+
+enum Encrypted {
+    /// libarchive wants a passphrase it didn't get (or got a wrong one).
+    Passphrase,
+    /// libarchive can't decrypt this format at all (7z, rar): use 7z.
+    Unsupported,
+}
+
+fn classify(msg: &str) -> Option<Encrypted> {
+    let m = msg.to_lowercase();
+    if m.contains("passphrase") {
+        Some(Encrypted::Passphrase)
+    } else if m.contains("encrypt") {
+        Some(Encrypted::Unsupported)
+    } else {
+        None
+    }
+}
+
+fn need(archive: &Path, wrong: bool) -> std::io::Error {
+    std::io::Error::other(NeedPassword { archive: archive.to_path_buf(), wrong })
+}
+
+/// Run the 7z tool; a "Wrong password" in its output becomes NeedPassword.
+fn run_7z(archive: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<String> {
+    let out = std::process::Command::new("7z")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| std::io::Error::other(format!("7z: {e} ({})", crate::i18n::tr("install 7zip for encrypted 7z/rar"))))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    if text.contains("Wrong password") {
+        return Err(need(archive, true));
+    }
+    if !out.status.success() {
+        let err = text.lines().filter(|l| l.contains("ERROR")).collect::<Vec<_>>().join("; ");
+        return Err(std::io::Error::other(format!("7z: {}", if err.is_empty() { "failed" } else { &err })));
+    }
+    Ok(text)
+}
+
+/// Headers via `7z l -slt` (for archives whose names are encrypted).
+fn headers_7z(archive: &Path, pw: &str) -> std::io::Result<Vec<(String, u32, u64, i64)>> {
+    use chrono::{Local, NaiveDateTime, TimeZone};
+    let p = format!("-p{pw}");
+    let text = run_7z(archive, &["l".as_ref(), "-slt".as_ref(), p.as_ref(), archive.as_os_str()])?;
+    let body = text.split_once("\n----------\n").map(|(_, b)| b).unwrap_or("");
+    let mut out = Vec::new();
+    for block in body.split("\n\n") {
+        let field = |k: &str| block.lines().find_map(|l| l.strip_prefix(k)).map(str::trim);
+        let Some(path) = field("Path = ") else { continue };
+        let attrs = field("Attributes = ").unwrap_or("");
+        let is_dir = attrs.starts_with('D') || field("Folder = ") == Some("+");
+        // "-rw-r--r--" style permissions, if present.
+        let perms = attrs.split_whitespace().find(|w| w.len() == 10).map_or(if is_dir { 0o755 } else { 0o644 }, |w| {
+            w[1..].bytes().enumerate().fold(0u32, |m, (i, b)| if b != b'-' { m | 1 << (8 - i) } else { m })
+        });
+        let mode = perms | if is_dir { 0o040000 } else { 0o100000 };
+        let size = field("Size = ").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mtime = field("Modified = ")
+            .and_then(|m| NaiveDateTime::parse_from_str(&m[..m.len().min(19)], "%Y-%m-%d %H:%M:%S").ok())
+            .and_then(|d| Local.from_local_datetime(&d).single())
+            .map_or(0, |d| d.timestamp());
+        out.push((path.to_string(), mode, size, mtime));
+    }
+    Ok(out)
+}
+
+/// Extract with the 7z tool into `dest`, with the same "each item lands
+/// under its own name" layout as `extract`.
+fn extract_7z(archive: &Path, items: &[String], dest: &Path, pw: &str) -> std::io::Result<()> {
+    let stage = dest.join(format!(".polka-7z-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)?;
+    let r = (|| {
+        let p = format!("-p{pw}");
+        let o = format!("-o{}", stage.display());
+        let roots: Vec<String> = items.iter().map(|i| normalize_inner(i)).collect();
+        let whole = roots.iter().any(|r| r.is_empty());
+        let mut args: Vec<&std::ffi::OsStr> = vec!["x".as_ref(), "-y".as_ref(), p.as_ref(), o.as_ref(), archive.as_os_str(), "--".as_ref()];
+        if !whole {
+            args.extend(roots.iter().map(|r| std::ffi::OsStr::new(r.as_str())));
+        }
+        run_7z(archive, &args)?;
+        // libarchive may have left empty dirs / files before giving up on
+        // the encrypted data: 7z's output replaces them.
+        if whole {
+            for e in std::fs::read_dir(&stage)?.flatten() {
+                merge_into(&e.path(), &dest.join(e.file_name()))?;
+            }
+        } else {
+            for r in &roots {
+                let name = r.rsplit('/').next().unwrap_or(r);
+                merge_into(&stage.join(r), &dest.join(name))?;
+            }
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&stage);
+    r
+}
+
+/// Move `src` to `dst`, merging folders and replacing anything else.
+fn merge_into(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if let Ok(dm) = dst.symlink_metadata() {
+        if dm.is_dir() && src.is_dir() {
+            for e in std::fs::read_dir(src)?.flatten() {
+                merge_into(&e.path(), &dst.join(e.file_name()))?;
+            }
+            return Ok(());
+        }
+        if dm.is_dir() { std::fs::remove_dir_all(dst)? } else { std::fs::remove_file(dst)? }
+    }
+    std::fs::rename(src, dst)
+}
+
 pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
     let mtime = std::fs::metadata(archive).and_then(|m| m.modified()).ok();
     if let Some((t, idx)) = cache().lock().unwrap().get(archive) {
@@ -323,7 +476,21 @@ pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
             return Ok(idx.clone());
         }
     }
+    let headers = match headers_libarchive(archive) {
+        Ok(h) => h,
+        // Encrypted names (7z -mhe): only 7z with the password can list it.
+        Err(e) if matches!(classify(&e.to_string()), Some(_)) => match password(archive) {
+            Some(pw) => headers_7z(archive, &pw)?,
+            None => return Err(need(archive, false)),
+        },
+        Err(e) => return Err(e),
+    };
+    let idx = Arc::new(build_index(headers));
+    cache().lock().unwrap().insert(archive.to_path_buf(), (mtime, idx.clone()));
+    Ok(idx)
+}
 
+fn headers_libarchive(archive: &Path) -> std::io::Result<Vec<(String, u32, u64, i64)>> {
     let headers: Arc<Mutex<Vec<(String, u32, u64, i64)>>> = Default::default();
     let sink = headers.clone();
     let file = File::open(archive)?;
@@ -347,11 +514,15 @@ pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
         }
     }
     drop(iter);
+    let v = std::mem::take(&mut *headers.lock().unwrap());
+    Ok(v)
+}
 
+fn build_index(headers: Vec<(String, u32, u64, i64)>) -> ArchiveIndex {
     let mut files: HashMap<String, Entry> = HashMap::new();
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     dirs.insert(String::new());
-    for (raw, mode, size, mtime) in headers.lock().unwrap().drain(..) {
+    for (raw, mode, size, mtime) in headers {
         let path = normalize_inner(&raw);
         if path.is_empty() {
             continue;
@@ -408,9 +579,7 @@ pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
         out.entry(parent).or_default().push(e);
     }
 
-    let idx = Arc::new(ArchiveIndex { dirs: out });
-    cache().lock().unwrap().insert(archive.to_path_buf(), (mtime, idx.clone()));
-    Ok(idx)
+    ArchiveIndex { dirs: out }
 }
 
 fn libc_s_ifmt() -> u32 {
@@ -421,11 +590,25 @@ fn libc_s_ifmt() -> u32 {
 /// Each item lands directly in `dest` under its own name, with its subtree.
 /// `progress` gets the number of bytes written so far; returning `false`
 /// cancels.
-pub fn extract(
+pub fn extract(archive: &Path, items: &[String], dest: &Path, progress: impl FnMut(u64) -> bool) -> std::io::Result<()> {
+    let pw = password(archive);
+    match extract_libarchive(archive, items, dest, progress, pw.as_deref()) {
+        Ok(()) => Ok(()),
+        Err(e) => match (classify(&e.to_string()), pw) {
+            (Some(Encrypted::Passphrase), pw) => Err(need(archive, pw.is_some())),
+            (Some(Encrypted::Unsupported), Some(pw)) => extract_7z(archive, items, dest, &pw),
+            (Some(Encrypted::Unsupported), None) => Err(need(archive, false)),
+            (None, _) => Err(e),
+        },
+    }
+}
+
+fn extract_libarchive(
     archive: &Path,
     items: &[String],
     dest: &Path,
     mut progress: impl FnMut(u64) -> bool,
+    pw: Option<&str>,
 ) -> std::io::Result<()> {
     // Map item prefix -> length of its parent part (stripped on output).
     let roots: Vec<(String, usize)> = items
@@ -449,10 +632,11 @@ pub fn extract(
             .map(|(_, strip)| *strip)
     };
     let m2 = matches.clone();
-    let mut iter = ArchiveIteratorBuilder::new(File::open(archive)?)
-        .filter(move |name, _| m2(name).is_some())
-        .build()
-        .map_err(io_err)?;
+    let mut builder = ArchiveIteratorBuilder::new(File::open(archive)?).filter(move |name, _| m2(name).is_some());
+    if let Some(pw) = pw {
+        builder = builder.with_password(compress_tools::ArchivePassword::new(pw).map_err(io_err)?);
+    }
+    let mut iter = builder.build().map_err(io_err)?;
 
     let mut written = 0u64;
     let mut out: Option<File> = None;
@@ -517,7 +701,11 @@ pub fn extract_to_temp(archive: &Path, inner: &str) -> std::io::Result<PathBuf> 
         return Ok(target);
     }
     std::fs::create_dir_all(&dir)?;
-    extract(archive, &[inner.to_string()], &dir, |_| true)?;
+    if let Err(e) = extract(archive, &[inner.to_string()], &dir, |_| true) {
+        // A failed attempt (e.g. no password yet) must not look extracted.
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(e);
+    }
     Ok(target)
 }
 
@@ -614,5 +802,81 @@ mod tests {
         assert_eq!(normalize_inner("./a//b/"), "a/b");
         assert_eq!(ops::split_ext("foo.tar.gz"), ("foo", ".tar.gz"));
         assert_eq!(ops::split_ext(".bashrc"), (".bashrc", ""));
+    }
+}
+
+#[cfg(test)]
+mod password_tests {
+    use super::*;
+
+    fn make(dir: &Path, name: &str, args: &[&str]) -> PathBuf {
+        let out = dir.join(name);
+        let ok = std::process::Command::new("7z")
+            .arg("a")
+            .args(args)
+            .arg(&out)
+            .arg("src")
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "7z a {name}");
+        out
+    }
+
+    fn read(archive: &Path, inner: &str) -> std::io::Result<String> {
+        let d = temp_root().join(format!("pwtest-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d)?;
+        extract(archive, &[inner.to_string()], &d, |_| true)?;
+        let name = inner.rsplit('/').next().unwrap();
+        Ok(std::fs::read_to_string(d.join(name))?)
+    }
+
+    fn needs(r: std::io::Result<impl std::fmt::Debug>) -> Option<bool> {
+        r.err().and_then(|e| need_password(&e).map(|n| n.wrong))
+    }
+
+    #[test]
+    fn encrypted_archives() {
+        if std::process::Command::new("7z").arg("i").output().is_err() {
+            eprintln!("7z not installed, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("polka-pw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "secret").unwrap();
+        std::fs::write(dir.join("src/sub/b.txt"), "deep").unwrap();
+        let cases = [
+            make(&dir, "zc.zip", &["-tzip", "-pqwe", "-mem=ZipCrypto"]),
+            make(&dir, "aes.zip", &["-tzip", "-pqwe", "-mem=AES256"]),
+            make(&dir, "plain-names.7z", &["-pqwe"]),
+            make(&dir, "hidden-names.7z", &["-pqwe", "-mhe=on"]),
+        ];
+        for a in &cases {
+            let hidden = a.to_string_lossy().contains("hidden");
+            if hidden {
+                // Even the listing needs the password.
+                assert_eq!(needs(archive_index(a).map(|_| ())), Some(false), "{a:?}");
+            } else {
+                assert!(archive_index(a).unwrap().dirs.contains_key("src/sub"), "{a:?}");
+            }
+            assert_eq!(needs(read(a, "src/a.txt")), Some(false), "{a:?} without password");
+            set_password(a, "nope");
+            assert_eq!(needs(read(a, "src/a.txt")), Some(true), "{a:?} wrong password");
+            set_password(a, "qwe");
+            if hidden {
+                let idx = archive_index(a).unwrap();
+                assert!(idx.dirs["src"].iter().any(|e| e.name == "a.txt" && e.size == 6), "{a:?}");
+            }
+            assert_eq!(read(a, "src/a.txt").unwrap(), "secret", "{a:?}");
+            // A whole folder, too.
+            let d = dir.join(format!("out-{}", a.file_name().unwrap().to_string_lossy()));
+            std::fs::create_dir_all(&d).unwrap();
+            extract(a, &["src/sub".into()], &d, |_| true).unwrap();
+            assert_eq!(std::fs::read_to_string(d.join("sub/b.txt")).unwrap(), "deep", "{a:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

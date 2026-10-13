@@ -9,6 +9,8 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Archives work like folders (libarchive): browse zip, 7z, rar, tar.*, iso…; copy, move, rename,
   delete and create folders inside zip, 7z and tar.* (rar/iso are read-only)
 - Built-in archiver: zip, tar.zst, tar.gz, tar.xz; smart extract
+- Password-protected archives: zip (ZipCrypto/AES) via libarchive, 7z and rar via the `7z` tool;
+  Polka asks for the password (hidden input) and retries. Passwords are kept in memory only
 - Name clashes ask: keep both, replace (folders merge), skip
 - Quick filter (live, as you type) and recursive search
 - Settings (≡ → Settings…): highlight colour from presets or your own saved mixes, icon sizes for
@@ -17,7 +19,7 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
 - Pinned folders can use any theme icon (Papirus colour variants included) or your own picture
-  (select an image, △ → "Use as pinned folder icon"); label sizes follow icon sizes
+  (icon picker → △ "Own picture…", then pick an image in the panes); label sizes follow icon sizes
 
 ## Controls
 

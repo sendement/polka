@@ -356,15 +356,110 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     shot(h, "23-pinned-icon");
 
     // Own picture: the photo from earlier becomes the pinned folder's icon.
-    let photo = dir.parent().unwrap().join("photo.png");
-    h.state_mut().run(Cmd::IconFromFile(photo));
+    // From the icon picker: △ → browse the panes, ✕ on a picture picks it.
+    let back = h.state().pane().loc.clone();
+    h.state_mut().run(Cmd::ChooseIcon(dir.clone()));
+    press(h, &[Action::Actions]);
+    assert!(h.state().icon_pick.is_some() && h.state().overlay.is_none());
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir.parent().unwrap().to_path_buf()), None, &cfg);
+    settle(h);
+    shot(h, "24a-pick-picture");
+    let i = h.state().pane().entries.iter().position(|e| e.name == "photo.png").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
     press(h, &[Action::Accept]);
+    assert!(h.state().icon_pick.is_none());
+    assert_eq!(h.state().pane().loc, back, "pane goes back after picking");
     let stored = h.state().cfg.pinned_icons.get(&dir.to_string_lossy().into_owned()).cloned().unwrap();
     assert!(stored.starts_with('/') && std::path::Path::new(&stored).exists(), "{stored}");
     settle(h);
     shot(h, "24-pinned-photo-icon");
 
     range_selection(h);
+    closing_tabs(h);
+    passwords(h);
+}
+
+fn closing_tabs(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    while h.state().tabs.len() < 3 {
+        h.state_mut().run(Cmd::NewTab);
+    }
+    h.state_mut().tab = 1;
+    h.state_mut().run(Cmd::CloseTabAt(1)); // current: its right neighbour takes over
+    assert_eq!((h.state().tabs.len(), h.state().tab), (2, 1));
+    h.state_mut().run(Cmd::CloseTabAt(0)); // left of current: current shifts
+    assert_eq!((h.state().tabs.len(), h.state().tab), (1, 0));
+    h.state_mut().run(Cmd::CloseTabAt(0)); // never the last one
+    assert_eq!(h.state().tabs.len(), 1);
+    settle(h);
+}
+
+fn type_and_submit(h: &mut Harness<'static, App>, text: &str) {
+    osk_type(h, text);
+    h.state_mut().osk_submit();
+    settle(h);
+}
+
+fn passwords(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Osk, OskPurpose, Overlay};
+    if std::process::Command::new("7z").arg("i").output().is_err() {
+        return;
+    }
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let work = dir.join("pw");
+    std::fs::create_dir_all(work.join("secret")).unwrap();
+    std::fs::write(work.join("secret/a.txt"), "hidden text").unwrap();
+    for (name, args) in [("locked.zip", vec!["-tzip", "-pqwe", "-mem=AES256"]), ("names.7z", vec!["-pqwe", "-mhe=on"])] {
+        let ok = std::process::Command::new("7z").arg("a").args(&args).arg(dir.join(name)).arg("secret").current_dir(&work).stdout(std::process::Stdio::null()).status().unwrap().success();
+        assert!(ok);
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir.clone()), None, &cfg);
+    h.state_mut().pane_mut().reload(&cfg); // the archives were made after the last listing
+    let i = h.state().pane().entries.iter().position(|e| e.name == "locked.zip").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    let is_pw_prompt = |h: &Harness<'static, App>| matches!(&h.state().overlay, Some(Overlay::Osk(Osk { purpose: OskPurpose::Password { .. }, secret: true, .. })));
+
+    // Extract: asks, a wrong password asks again, the right one extracts.
+    h.state_mut().run(Cmd::ExtractHere);
+    wait_jobs(h);
+    assert!(is_pw_prompt(h), "no password prompt");
+    osk_type(h, "qwx");
+    shot(h, "26-password");
+    h.state_mut().osk_submit();
+    wait_jobs(h);
+    assert!(is_pw_prompt(h), "wrong password not asked again");
+    let title = match &h.state().overlay {
+        Some(Overlay::Osk(k)) => k.title.clone(),
+        _ => unreachable!(),
+    };
+    assert!(title.contains(crate::i18n::tr("Wrong password")), "{title}");
+    type_and_submit(h, "qwe");
+    wait_jobs(h);
+    assert!(h.state().overlay.is_none());
+    assert_eq!(std::fs::read_to_string(dir.join("secret/a.txt")).unwrap(), "hidden text");
+
+    // 7z with encrypted names: browsing asks first, then lists.
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Archive { archive: dir.join("names.7z"), inner: String::new() }, None, &cfg);
+    for _ in 0..50 {
+        settle(h);
+        if is_pw_prompt(h) {
+            break;
+        }
+    }
+    assert!(is_pw_prompt(h), "listing did not ask for a password");
+    type_and_submit(h, "qwe");
+    for _ in 0..50 {
+        settle(h);
+        if h.state().pane().loading.is_none() {
+            break;
+        }
+    }
+    let names: Vec<_> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert_eq!(names, ["secret"]);
+    shot(h, "27-7z-unlocked");
 }
 
 fn range_selection(h: &mut Harness<'static, App>) {

@@ -35,6 +35,8 @@ pub struct Pane {
     nest: Vec<(PathBuf, Location, String)>,
     pub loading: Option<Receiver<std::io::Result<Vec<Entry>>>>,
     pub pending_focus: Option<String>,
+    /// Listing failed for a password: (archive, wrong password).
+    pub need_password: Option<(PathBuf, bool)>,
     pub scroll_to_cursor: bool,
     /// Viewport height from the last frame, for keeping the cursor visible.
     pub view_h: f32,
@@ -59,6 +61,7 @@ impl Pane {
             nest: Vec::new(),
             loading: None,
             pending_focus: None,
+            need_password: None,
             scroll_to_cursor: true,
             view_h: 400.0,
             scroll_y: 0.0,
@@ -145,6 +148,7 @@ impl Pane {
             }
             Err(e) => {
                 self.all.clear();
+                self.need_password = vfs::need_password(&e).map(|n| (n.archive.clone(), n.wrong));
                 self.error = Some(e.to_string());
             }
         }
@@ -324,6 +328,9 @@ pub enum Cmd {
     Properties,
     NewTab,
     CloseTab,
+    CloseTabAt(usize),
+    /// Browse for a picture to use as a pinned folder's icon.
+    PickIconFile(PathBuf),
     NewFolder,
     ToggleDual,
     ToggleHidden,
@@ -332,8 +339,6 @@ pub enum Cmd {
     SetIconTheme(Option<String>),
     Settings,
     ChooseIcon(PathBuf),
-    /// Use an image file as a pinned folder's icon: pick the folder.
-    IconFromFile(PathBuf),
     SetPinIconFile { folder: PathBuf, image: PathBuf },
     /// None resets to the default icon.
     SetPinIcon(PathBuf, Option<String>),
@@ -429,7 +434,15 @@ pub enum OskPurpose {
     /// Live quick filter; `prev` is restored on cancel.
     Filter { prev: Option<String> },
     Search { root: PathBuf },
+    Password { archive: PathBuf, retry: Retry },
     Compress { sources: Vec<PathBuf>, dir: PathBuf, format: ArchiveFormat },
+}
+
+/// What to do again once an archive password is entered.
+pub enum Retry {
+    Op(Op),
+    Activate,
+    Reload(PathBuf),
 }
 
 pub struct Osk {
@@ -441,6 +454,8 @@ pub struct Osk {
     pub layout: usize,
     pub shift: bool,
     pub purpose: OskPurpose,
+    /// Draw the text as dots (passwords).
+    pub secret: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -478,7 +493,7 @@ impl Osk {
             OskPurpose::Compress { .. } => text.len(),
             _ => text.len(),
         };
-        Self { title: title.into(), text, caret, row: 1, col: 0, layout: 0, shift: false, purpose }
+        Self { title: title.into(), text, caret, row: 1, col: 0, layout: 0, shift: false, purpose, secret: false }
     }
 
     pub fn rows(&self) -> usize {
@@ -684,6 +699,14 @@ pub enum Focus {
     Panes,
 }
 
+/// Picture picking for a pinned folder's icon (browsing the panes).
+pub struct IconPick {
+    pub folder: PathBuf,
+    pub tab: usize,
+    pub pane: usize,
+    pub back: Location,
+}
+
 pub struct RangeSel {
     pub anchor: usize,
     /// Select (true) or deselect the range.
@@ -701,6 +724,7 @@ pub struct Clip {
 
 pub enum Msg {
     Toast(String, bool),
+    NeedPassword(PathBuf, bool, Retry),
 }
 
 // ---------------------------------------------------------------- app
@@ -720,6 +744,7 @@ pub struct App {
     pub pad_seen: bool,
     /// Range selection while Select (or Shift on the keyboard) is held.
     pub range: Option<RangeSel>,
+    pub icon_pick: Option<IconPick>,
     pub clip: Option<Clip>,
     pub jobs: Vec<Arc<Job>>,
     pub toast: Option<(String, bool, Instant)>,
@@ -775,6 +800,7 @@ impl App {
             pad: PadKind::default(),
             pad_seen: false,
             range: None,
+            icon_pick: None,
             clip: None,
             jobs: Vec::new(),
             toast: None,
@@ -823,6 +849,7 @@ impl App {
         while let Ok(m) = self.msg_rx.try_recv() {
             match m {
                 Msg::Toast(s, e) => self.toast(s, e),
+                Msg::NeedPassword(a, wrong, retry) => self.ask_password(a, wrong, retry),
             }
         }
         // The filter keyboard filters live.
@@ -835,13 +862,16 @@ impl App {
         // Finished jobs: refresh what they touched, report errors.
         let mut touched: Vec<Location> = Vec::new();
         let mut report = Vec::new();
+        let mut ask = Vec::new();
         self.jobs.retain(|j| {
             let fin = *j.finished_at.lock().unwrap();
             match fin {
                 None => true,
                 Some(_) => {
                     touched.extend(j.touches.iter().cloned());
-                    if let Some(Err(e)) = j.result.lock().unwrap().as_ref() {
+                    if let (Some((a, wrong)), Some(op)) = (j.need_password.lock().unwrap().take(), j.op.clone()) {
+                        ask.push((a, wrong, op));
+                    } else if let Some(Err(e)) = j.result.lock().unwrap().as_ref() {
                         report.push(format!("{}: {e}", j.label));
                     }
                     false
@@ -850,6 +880,14 @@ impl App {
         });
         for r in report {
             self.toast(r, true);
+        }
+        for (a, wrong, op) in ask {
+            self.ask_password(a, wrong, Retry::Op(op));
+        }
+        // A listing that needs a password (7z with encrypted names).
+        let need: Vec<(PathBuf, bool)> = self.tabs[self.tab].panes.iter_mut().filter_map(|p| p.need_password.take()).collect();
+        for (a, wrong) in need {
+            self.ask_password(a.clone(), wrong, Retry::Reload(a));
         }
         if !touched.is_empty() {
             for t in &mut self.tabs {
@@ -950,6 +988,23 @@ impl App {
         let cfg = self.cfg.clone();
         let grid = cfg.view == ViewMode::Grid;
         let cols = if grid { self.pane().cols.max(1) as isize } else { 1 };
+        // Choosing a picture: ✕ on an image picks it, △ cancels.
+        if self.icon_pick.is_some() {
+            match a {
+                Action::Actions => return self.finish_icon_pick(None),
+                Action::Accept => {
+                    let p = self.pane();
+                    if let Some(e) = p.current().filter(|e| !e.is_dir) {
+                        match p.entry_path(e).filter(|_| is_icon_image(&e.name)) {
+                            Some(img) => return self.finish_icon_pick(Some(img)),
+                            None => return self.toast(tr("Choose a picture (png, svg, jpg…)"), true),
+                        }
+                    }
+                }
+                Action::Select => return,
+                _ => {}
+            }
+        }
         match a {
             Action::Up => self.move_and_paint(-cols),
             Action::Down => self.move_and_paint(cols),
@@ -1186,6 +1241,10 @@ impl App {
                         self.overlay = None;
                         self.run(Cmd::SetPinIcon(path, None));
                     }
+                    Action::Actions => {
+                        let path = p.path.clone();
+                        self.run(Cmd::PickIconFile(path));
+                    }
                     Action::Back | Action::Menu => self.overlay = None,
                     _ => {}
                 }
@@ -1224,7 +1283,9 @@ impl App {
 
     pub fn osk_submit(&mut self) {
         let Some(Overlay::Osk(k)) = self.overlay.take() else { return };
-        let text = k.string().trim().to_string();
+        // Passwords keep their spaces; everything else is trimmed.
+        let raw = k.string();
+        let text = raw.trim().to_string();
         if let OskPurpose::Filter { .. } = k.purpose {
             self.pane_mut().set_filter(Some(text));
             return;
@@ -1286,6 +1347,23 @@ impl App {
                 let plan = crate::archive_rw::Plan { mkdir: vec![path], ..Default::default() };
                 self.pending_focus(text);
                 self.start(Op::ArchiveEdit { archive, plan, label: tr("New folder") });
+            }
+            OskPurpose::Password { archive, retry } => {
+                vfs::set_password(&archive, &raw);
+                vfs::invalidate(&archive);
+                match retry {
+                    Retry::Op(op) => self.start(op),
+                    Retry::Activate => self.activate(),
+                    Retry::Reload(a) => {
+                        for t in &mut self.tabs {
+                            for p in &mut t.panes {
+                                if p.loc.archive() == Some(a.as_path()) {
+                                    p.reload(&cfg);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             OskPurpose::Search { root } => {
                 let loc = Location::Search { root, query: text, hidden: cfg.show_hidden };
@@ -1359,17 +1437,24 @@ impl App {
                             pm.nest.push((tmp.clone(), origin, e.name.clone()));
                             pm.navigate(Location::Archive { archive: tmp, inner: String::new() }, None, &cfg);
                         }
-                        Err(err) => self.toast(format!("{}: {err}", tr("Failed")), true),
+                        Err(err) => match vfs::need_password(&err) {
+                            Some(n) => self.ask_password(n.archive.clone(), n.wrong, Retry::Activate),
+                            None => self.toast(format!("{}: {err}", tr("Failed")), true),
+                        },
                     }
                 } else {
                     let (archive, tx) = (archive.clone(), self.msg_tx.clone());
                     let wake = self.wake();
                     std::thread::spawn(move || {
-                        let r = vfs::extract_to_temp(&archive, &inner_path)
-                            .map_err(|e| e.to_string())
-                            .and_then(|p| crate::launch::open(&p));
-                        if let Err(err) = r {
-                            let _ = tx.send(Msg::Toast(format!("{}: {err}", tr("Failed")), true));
+                        let msg = match vfs::extract_to_temp(&archive, &inner_path) {
+                            Ok(p) => crate::launch::open(&p).err().map(|e| Msg::Toast(format!("{}: {e}", tr("Failed")), true)),
+                            Err(e) => Some(match vfs::need_password(&e) {
+                                Some(n) => Msg::NeedPassword(n.archive.clone(), n.wrong, Retry::Activate),
+                                None => Msg::Toast(format!("{}: {e}", tr("Failed")), true),
+                            }),
+                        };
+                        if let Some(m) = msg {
+                            let _ = tx.send(m);
                             wake();
                         }
                     });
@@ -1418,11 +1503,6 @@ impl App {
             if dual {
                 add(tr("Extract to other pane"), Cmd::ExtractOther, local && other_local);
             }
-        }
-        let one_image = single && !targets[0].is_dir && local && is_icon_image(&targets[0].name);
-        if one_image && !self.cfg.pinned.is_empty() {
-            let path = p.entry_path(&targets[0]).unwrap();
-            add(tr("Use as pinned folder icon…"), Cmd::IconFromFile(path), true);
         }
         if one_dir_local {
             let path = p.entry_path(&targets[0]).unwrap();
@@ -1657,12 +1737,37 @@ impl App {
         cfg.save();
     }
 
+    /// End picture picking: set the icon (if any) and return the pane to
+    /// where it was.
+    pub fn finish_icon_pick(&mut self, image: Option<PathBuf>) {
+        let Some(pick) = self.icon_pick.take() else { return };
+        let cfg = self.cfg.clone();
+        if let Some(t) = self.tabs.get_mut(pick.tab) {
+            t.panes[pick.pane].navigate(pick.back, None, &cfg);
+        }
+        if let Some(image) = image {
+            self.run(Cmd::SetPinIconFile { folder: pick.folder, image });
+        }
+    }
+
     /// Mouse: move the cursor at `depth` to `index` and accept it.
     pub fn menu_click(&mut self, depth: usize, index: usize) {
         if let Some(Overlay::Menu(root)) = self.overlay.as_mut() {
             root.at_depth_mut(depth).cursor = index;
         }
         self.menu_accept(depth);
+    }
+
+    /// Prompt for an archive password, then run `retry`.
+    pub fn ask_password(&mut self, archive: PathBuf, wrong: bool, retry: Retry) {
+        if self.overlay.is_some() {
+            return self.toast(tr("Password required"), true);
+        }
+        let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let title = if wrong { format!("{} — {name}", tr("Wrong password")) } else { format!("{} {name}", tr("Password for")) };
+        let mut k = Osk::new(&title, "", OskPurpose::Password { archive, retry });
+        k.secret = true;
+        self.overlay = Some(Overlay::Osk(k));
     }
 
     /// Copy/move, asking first if names clash at the destination.
@@ -1877,10 +1982,17 @@ impl App {
                 let loc = self.pane().loc.clone();
                 self.run(Cmd::OpenInNewTab(loc));
             }
-            Cmd::CloseTab => {
-                if self.tabs.len() > 1 {
-                    self.tabs.remove(self.tab);
+            Cmd::CloseTab => self.run(Cmd::CloseTabAt(self.tab)),
+            Cmd::CloseTabAt(i) => {
+                if self.tabs.len() > 1 && i < self.tabs.len() {
+                    self.tabs.remove(i);
+                    // Closing a tab left of the current one shifts it; closing
+                    // the current one lands on its neighbour.
+                    if i < self.tab {
+                        self.tab -= 1;
+                    }
                     self.tab = self.tab.min(self.tabs.len() - 1);
+                    self.range = None;
                 }
             }
             Cmd::NewFolder => {
@@ -1919,17 +2031,15 @@ impl App {
                     scroll_y: 0.0,
                 }));
             }
-            Cmd::IconFromFile(image) => {
-                let items = self
-                    .cfg
-                    .pinned
-                    .iter()
-                    .map(|f| {
-                        let label = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| f.display().to_string());
-                        item(&label, Cmd::SetPinIconFile { folder: f.clone(), image: image.clone() })
-                    })
-                    .collect();
-                self.overlay = Some(Overlay::Menu(Menu::new(tr("Pinned folder"), items)));
+            Cmd::PickIconFile(folder) => {
+                // Browse in the current pane; it comes back here afterwards.
+                let pane = if self.cfg.dual { self.tabs[self.tab].active } else { 0 };
+                let back = self.pane().loc.clone();
+                let start = dirs::picture_dir().filter(|d| d.is_dir()).or_else(dirs::home_dir).unwrap_or_else(|| "/".into());
+                self.icon_pick = Some(IconPick { folder, tab: self.tab, pane, back });
+                self.overlay = None;
+                self.focus = Focus::Panes;
+                self.pane_mut().navigate(Location::Local(start), None, &cfg);
             }
             Cmd::SetPinIconFile { folder, image } => match store_icon(&image) {
                 Ok(stored) => self.run(Cmd::SetPinIcon(folder, Some(stored.to_string_lossy().into_owned()))),
