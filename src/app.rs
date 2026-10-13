@@ -427,6 +427,13 @@ pub enum Cmd {
     ViewerDiscardThen(crate::viewer::glue::Then),
     ViewerWrap,
     ViewerNumbers,
+    AudioToggle,
+    AudioNext,
+    AudioPrev,
+    AudioPlay(usize),
+    AudioRepeat,
+    AudioVolume(i8),
+    AudioSeek(f32),
     ExtractHere,
     ExtractOther,
     Pin(PathBuf),
@@ -857,17 +864,17 @@ pub mod row {
     pub const CLOSE: usize = 8;
 }
 
-/// "Open in Polka" kinds, in the settings' order. Audio and video wait for
-/// their players.
+/// "Open in Polka" kinds, in the settings' order. Video waits for its
+/// player.
 pub const OPEN_KINDS: usize = 4;
-pub const OPEN_READY: [bool; OPEN_KINDS] = [true, true, false, false];
+pub const OPEN_READY: [bool; OPEN_KINDS] = [true, true, true, false];
 
 impl Config {
     pub fn open_flag(&mut self, i: usize) -> &mut bool {
         match i {
             0 => &mut self.open_text,
             1 => &mut self.open_images,
-            2 => &mut self.open_audio,
+            2 => &mut self.open_music,
             _ => &mut self.open_video,
         }
     }
@@ -1114,6 +1121,7 @@ impl App {
     // ------------------------------------------------------------ per frame
 
     pub fn tick(&mut self) {
+        self.tick_audio();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -1267,7 +1275,9 @@ impl App {
             }
             Input::Release(Action::Select) => {
                 self.range = None;
-                if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
+                if self.overlay.is_none() && self.audio_shown() {
+                    self.audio_select_released();
+                } else if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
                     self.viewer_select_released();
                 }
                 return;
@@ -1839,11 +1849,19 @@ impl App {
         let Some(e) = p.current().filter(|e| !e.is_dir).cloned() else { return };
         let Some(path) = p.entry_path(&e) else { return self.activate() };
         // Pictures of the folder, in the pane's order, for ←/→.
-        let siblings: Vec<PathBuf> = if crate::viewer::image::is_picture(&path, &e.name) {
+        // Music: the folder's tracks become the playlist.
+        let same: Option<fn(&Path, &str) -> bool> = if crate::viewer::image::is_picture(&path, &e.name) {
+            Some(crate::viewer::image::is_picture)
+        } else if crate::viewer::audio::is_audio(&e.name) {
+            Some(|_, n| crate::viewer::audio::is_audio(n))
+        } else {
+            None
+        };
+        let siblings: Vec<PathBuf> = if let Some(same) = same {
             p.entries
                 .iter()
                 .filter(|x| !x.is_dir)
-                .filter_map(|x| p.entry_path(x).filter(|xp| crate::viewer::image::is_picture(xp, &x.name)))
+                .filter_map(|x| p.entry_path(x).filter(|xp| same(xp, &x.name)))
                 .collect()
         } else {
             Vec::new()
@@ -1853,7 +1871,7 @@ impl App {
     }
 
     pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
-        let mut v = Viewer::open(path, name, origin, siblings, &self.ctx);
+        let mut v = Viewer::open(path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
         v.folder = Some(self.tabs[tab].panes[origin].loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
         self.range = None;
@@ -1871,7 +1889,7 @@ impl App {
     }
 
     fn viewer_input(&mut self, a: Action) {
-        if self.viewer_text_input(a) {
+        if self.viewer_text_input(a) || self.viewer_audio_input(a) {
             return;
         }
         let ctx = self.ctx.clone();
@@ -1950,6 +1968,9 @@ impl App {
         self.scan_templates();
         if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
             return self.viewer_text_menu();
+        }
+        if self.audio_shown() {
+            return self.viewer_audio_menu();
         }
         if let Some(v) = &self.cur_tab().viewer {
             let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
@@ -2404,7 +2425,7 @@ impl App {
             st.chip = i;
         }
         if !OPEN_READY[i] {
-            return self.toast(tr("Comes with the built-in player"), false);
+            return self.toast(tr("Comes with the built-in video player"), false);
         }
         let f = self.cfg.open_flag(i);
         *f = !*f;
@@ -2693,6 +2714,9 @@ impl App {
             | Cmd::ViewerSaveThen(_)
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
+            Cmd::AudioToggle | Cmd::AudioNext | Cmd::AudioPrev | Cmd::AudioPlay(_) | Cmd::AudioRepeat | Cmd::AudioVolume(_) | Cmd::AudioSeek(_) => {
+                self.audio_cmd(cmd);
+            }
             Cmd::ViewerSettings => {
                 self.overlay = Some(Overlay::ViewerSettings(ViewerSettings { row: vrow::THEME }));
             }

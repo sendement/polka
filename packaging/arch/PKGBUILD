@@ -1,6 +1,6 @@
 # Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
 pkgname=polka
-pkgver=0.9.0
+pkgver=0.10.0
 pkgrel=1
 pkgdesc="Gamepad-first file manager: dual pane, archives as folders, themed and .exe icons"
 arch=('x86_64')
@@ -17,12 +17,14 @@ depends=(
   'libxkbcommon'
   'wayland'
   'libglvnd'
+  'alsa-lib'         # sound output (PipeWire/Pulse through their ALSA plugins)
   'fontconfig'       # system UI font lookup
   'hicolor-icon-theme'
   'xdg-utils'        # opening files with their default apps
 )
 optdepends=(
   'ffmpegthumbnailer: video thumbnails'
+  'ffmpeg: playing Opus, WMA, APE and other formats Symphonia lacks'
   '7zip: password-protected 7z and rar archives'
   'papirus-icon-theme: a complete icon theme, if yours lacks mime icons'
 )

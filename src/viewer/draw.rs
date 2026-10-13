@@ -18,6 +18,9 @@ pub enum HeaderAct {
     ToggleMd,
     /// A link in rendered Markdown.
     Link(String),
+    /// Player buttons.
+    Run(crate::app::Cmd),
+    Volume(f32),
 }
 
 pub fn viewer_font(size: f32) -> FontId {
@@ -101,6 +104,11 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
             }
         }
         Content::Image(im) => draw_image(ui, im),
+        Content::Audio(a) => {
+            if let Some(x) = draw_audio(ui, a, prefs) {
+                act = Some(x);
+            }
+        }
         Content::Error(e) => {
             ui.centered_and_justified(|ui| ui.label(egui::RichText::new(e.as_str()).color(vis.error_fg_color)));
         }
@@ -251,8 +259,43 @@ fn details(v: &Viewer) -> String {
             }
             parts.join(" · ")
         }
+        Content::Audio(a) => {
+            let m = &a.meta;
+            let mut parts = Vec::new();
+            if a.tracks.len() > 1 {
+                parts.push(format!("{}/{}", a.index + 1, a.tracks.len()));
+            }
+            if let Some(ext) = v.name.rsplit_once('.').map(|(_, e)| e.to_uppercase()) {
+                parts.push(ext);
+            }
+            if let Some(r) = m.rate {
+                parts.push(format!("{} {}", trim_num(r as f32 / 1000.0), tr("kHz")));
+            }
+            if let Some(b) = m.bits {
+                parts.push(format!("{b} {}", tr("bit")));
+            }
+            match m.channels {
+                Some(1) => parts.push(tr("mono").into()),
+                Some(2) => parts.push(tr("stereo").into()),
+                Some(c) => parts.push(format!("{c} {}", tr("ch."))),
+                None => {}
+            }
+            if let Some(b) = m.bitrate {
+                parts.push(format!("{b} {}", tr("kbit/s")));
+            }
+            if let Ok(md) = std::fs::metadata(a.path()) {
+                parts.push(crate::app::human_size(md.len()));
+            }
+            parts.join(" · ")
+        }
         Content::Error(_) => String::new(),
     }
+}
+
+/// 44.1, 48.
+fn trim_num(x: f32) -> String {
+    let s = format!("{x:.1}");
+    s.strip_suffix(".0").map(str::to_string).unwrap_or(s)
 }
 
 /// A row as a layout job: highlight colours, tabs as spaces.
@@ -675,4 +718,265 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
         ev = Some((vrow::CLOSE, 0));
     }
     ev
+}
+
+// ------------------------------------------------------------ music
+
+/// Player: cover, tags, progress, buttons, volume; the playlist beside
+/// (or below, when narrow).
+fn draw_audio(ui: &mut Ui, a: &mut super::audio::AudioState, prefs: &ViewerPrefs) -> Option<HeaderAct> {
+    use super::audio::{Repeat, clock};
+    use crate::app::Cmd;
+    let mut act = None;
+    let vis = ui.visuals().clone();
+    let accent = vis.selection.bg_fill;
+    let area = ui.available_rect_before_wrap();
+    ui.advance_cursor_after_rect(area);
+    let wide = area.width() > 820.0;
+    let (info, list) = if wide {
+        let lw = (area.width() * 0.34).clamp(260.0, 440.0);
+        let w = area.width() - lw - 12.0;
+        (Rect::from_min_size(area.min, vec2(w, area.height())), Rect::from_min_max(pos2(area.min.x + w + 12.0, area.min.y), area.max))
+    } else {
+        let h = (area.height() * 0.62).max(300.0).min(area.height());
+        (Rect::from_min_size(area.min, vec2(area.width(), h)), Rect::from_min_max(pos2(area.min.x, area.min.y + h + 8.0), area.max))
+    };
+    let painter = ui.painter().clone();
+    painter.rect_filled(info, 8.0, vis.faint_bg_color);
+    let pad = 24.0;
+    // Cover and tags, then the controls; the block centred vertically.
+    let controls_h = 130.0;
+    let room = Rect::from_min_max(info.min + vec2(pad, pad), pos2(info.max.x - pad, info.max.y - controls_h - pad));
+    let side = room.height().min(room.width() * 0.45).clamp(64.0, 420.0);
+    let y0 = room.min.y + ((info.height() - 2.0 * pad - side - controls_h - 16.0) / 2.0).max(0.0);
+    let top = Rect::from_min_max(pos2(room.min.x, y0), pos2(room.max.x, y0 + side));
+    let cover = Rect::from_min_size(top.min, Vec2::splat(side));
+    match &a.cover {
+        Some(t) => {
+            let s = t.size_vec2();
+            let k = (side / s.x).min(side / s.y);
+            let r = Rect::from_center_size(cover.center(), s * k);
+            egui::Image::new(egui::load::SizedTexture::from_handle(t)).corner_radius(8.0).paint_at(ui, r);
+        }
+        None => {
+            painter.rect_filled(cover, 8.0, accent.gamma_multiply(0.22));
+            note_glyph(&painter, cover.center(), side * 0.42, accent.gamma_multiply(0.9));
+        }
+    }
+    // Tags.
+    let m = &a.meta;
+    let tx = cover.max.x + 24.0;
+    let tw = (top.max.x - tx).max(80.0);
+    let stem = a.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut y = top.min.y + 4.0;
+    let line = |text: String, size: f32, color: Color32, y: &mut f32| {
+        let g = painter.layout(text, FontId::proportional(size), color, tw);
+        painter.galley(pos2(tx, *y), g.clone(), color);
+        *y += g.size().y + 6.0;
+    };
+    line(m.title.clone().unwrap_or(stem), 26.0, vis.strong_text_color(), &mut y);
+    if let Some(ar) = &m.artist {
+        line(ar.clone(), 19.0, vis.text_color(), &mut y);
+    }
+    let mut album = m.album.clone().unwrap_or_default();
+    if let Some(yr) = m.year {
+        album = if album.is_empty() { yr.to_string() } else { format!("{album} ({yr})") };
+    }
+    if !album.is_empty() {
+        line(album, 16.0, vis.weak_text_color(), &mut y);
+    }
+    let mut extra = Vec::new();
+    if let Some(n) = m.track {
+        extra.push(format!("{} {n}", tr("Track")));
+    }
+    if let Some(g) = &m.genre {
+        extra.push(g.clone());
+    }
+    if !extra.is_empty() {
+        line(extra.join(" · "), 14.0, vis.weak_text_color(), &mut y);
+    }
+    match &a.play {
+        Err(e) if !e.is_empty() => line(e.clone(), 15.0, vis.error_fg_color, &mut y),
+        Ok(p) if p.no_device.is_some() => line(format!("{}: {}", tr("No sound output"), p.no_device.as_deref().unwrap_or("")), 14.0, vis.error_fg_color, &mut y),
+        _ => {}
+    }
+
+    // Progress: click or drag to seek.
+    let pos = a.pos();
+    let len = a.length();
+    let frac = len.map_or(0.0, |l| (pos.as_secs_f32() / l.as_secs_f32().max(0.001)).clamp(0.0, 1.0));
+    let by = top.max.y + 16.0 + 22.0;
+    let font = FontId::proportional(14.0);
+    let left = painter.layout_no_wrap(clock(pos), font.clone(), vis.text_color());
+    let right = painter.layout_no_wrap(len.map_or("--:--".into(), clock), font.clone(), vis.text_color());
+    let lw = left.size().x.max(right.size().x) + 12.0;
+    painter.galley(pos2(info.min.x + pad, by - left.size().y / 2.0), left, vis.text_color());
+    painter.galley(pos2(info.max.x - pad - right.size().x, by - right.size().y / 2.0), right, vis.text_color());
+    let bar = Rect::from_min_max(pos2(info.min.x + pad + lw, by - 3.0), pos2(info.max.x - pad - lw, by + 3.0));
+    let hit = ui.interact(bar.expand2(vec2(6.0, 10.0)), ui.id().with("audio-seek"), Sense::click_and_drag());
+    let shown = match hit.interact_pointer_pos() {
+        Some(p) if hit.dragged() || hit.clicked() => {
+            let f = ((p.x - bar.min.x) / bar.width()).clamp(0.0, 1.0);
+            if hit.drag_stopped() || hit.clicked() {
+                act = Some(HeaderAct::Run(Cmd::AudioSeek(f)));
+            }
+            f
+        }
+        _ => frac,
+    };
+    painter.rect_filled(bar, 3.0, vis.widgets.inactive.bg_fill);
+    painter.rect_filled(Rect::from_min_max(bar.min, pos2(bar.min.x + bar.width() * shown, bar.max.y)), 3.0, accent);
+    let knob = if hit.hovered() || hit.dragged() { 8.0 } else { 6.0 };
+    painter.circle_filled(pos2(bar.min.x + bar.width() * shown, bar.center().y), knob, vis.strong_text_color());
+
+    // Repeat chip on the left, volume on the right, the buttons centred
+    // between them.
+    let cy = by + 62.0;
+    let rep = Repeat::from(prefs.repeat);
+    let label = match rep {
+        Repeat::Off => tr("Repeat: off"),
+        Repeat::All => tr("Repeat: all"),
+        Repeat::One => tr("Repeat: one"),
+    };
+    let g = painter.layout_no_wrap(label.to_string(), FontId::proportional(14.0), if rep == Repeat::Off { vis.weak_text_color() } else { vis.strong_text_color() });
+    let rr = Rect::from_min_size(pos2(info.min.x + pad, cy - 15.0), vec2(g.size().x + 20.0, 30.0));
+    let vw = ((info.width() - 2.0 * pad - rr.width() - 240.0 - 40.0) * 0.6).clamp(50.0, 120.0);
+    let vbar = Rect::from_min_max(pos2(info.max.x - pad - vw, cy - 3.0), pos2(info.max.x - pad, cy + 3.0));
+    let cx = (rr.max.x + vbar.min.x - 34.0) / 2.0;
+    let playing = a.playing();
+    let fg = vis.strong_text_color();
+    let button = |c: egui::Pos2, r: f32, id: &str, filled: bool| {
+        let rect = Rect::from_center_size(c, Vec2::splat(r * 2.0));
+        let resp = ui.interact(rect, ui.id().with(("audio-btn", id)), Sense::click());
+        if filled {
+            painter.circle_filled(c, r, if resp.hovered() { accent } else { accent.gamma_multiply(0.85) });
+        } else if resp.hovered() {
+            painter.circle_filled(c, r, vis.widgets.hovered.weak_bg_fill);
+        }
+        resp.clicked()
+    };
+    if button(pos2(cx, cy), 30.0, "play", true) {
+        act = Some(HeaderAct::Run(Cmd::AudioToggle));
+    }
+    let on_accent = vis.selection.stroke.color;
+    if playing {
+        for dx in [-7.0, 7.0] {
+            painter.rect_filled(Rect::from_center_size(pos2(cx + dx, cy), vec2(7.0, 22.0)), 1.5, on_accent);
+        }
+    } else {
+        tri(&painter, pos2(cx + 3.0, cy), 13.0, true, on_accent);
+    }
+    for (dir, id, cmd) in [(-1.0f32, "prev", Cmd::AudioPrev), (1.0, "next", Cmd::AudioNext)] {
+        let c = pos2(cx + dir * 78.0, cy);
+        if button(c, 24.0, id, false) {
+            act = Some(HeaderAct::Run(cmd));
+        }
+        tri(&painter, c + vec2(-dir * 2.0, 0.0), 10.0, dir > 0.0, fg);
+        painter.rect_filled(Rect::from_center_size(c + vec2(dir * 9.0, 0.0), vec2(3.5, 18.0)), 1.0, fg);
+    }
+    let resp = ui.interact(rr, ui.id().with("audio-repeat"), Sense::click()).on_hover_text("□");
+    painter.rect_filled(rr, 15.0, if rep != Repeat::Off { accent.gamma_multiply(0.35) } else if resp.hovered() { vis.widgets.hovered.weak_bg_fill } else { vis.widgets.inactive.weak_bg_fill });
+    painter.galley(rr.center() - g.size() / 2.0, g, fg);
+    if resp.clicked() {
+        act = Some(HeaderAct::Run(Cmd::AudioRepeat));
+    }
+    speaker(&painter, pos2(vbar.min.x - 26.0, cy), prefs.volume, fg);
+    let vhit = ui.interact(vbar.expand2(vec2(6.0, 12.0)), ui.id().with("audio-volume"), Sense::click_and_drag());
+    if let Some(p) = vhit.interact_pointer_pos().filter(|_| vhit.dragged() || vhit.clicked()) {
+        act = Some(HeaderAct::Volume(((p.x - vbar.min.x) / vbar.width()).clamp(0.0, 1.0)));
+    }
+    if vhit.hovered() {
+        let d = ui.input(|i| i.smooth_scroll_delta.y);
+        if d.abs() > 0.5 {
+            act = Some(HeaderAct::Volume((prefs.volume + d / 600.0).clamp(0.0, 1.0)));
+        }
+    }
+    painter.rect_filled(vbar, 3.0, vis.widgets.inactive.bg_fill);
+    painter.rect_filled(Rect::from_min_max(vbar.min, pos2(vbar.min.x + vw * prefs.volume, vbar.max.y)), 3.0, accent);
+    if a.volume_shown.is_some_and(|t| t.elapsed().as_secs_f32() < 1.5) || vhit.hovered() || vhit.dragged() {
+        painter.text(pos2(vbar.center().x, cy + 18.0), Align2::CENTER_CENTER, format!("{:.0}%", prefs.volume * 100.0), FontId::proportional(13.0), fg);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // Playlist.
+    if list.height() > 40.0 {
+        painter.rect_filled(list, 8.0, vis.faint_bg_color);
+        let head = Rect::from_min_size(list.min, vec2(list.width(), 34.0));
+        painter.text(head.left_center() + vec2(14.0, 0.0), Align2::LEFT_CENTER, format!("{} · {}", tr("Playlist"), a.tracks.len()), FontId::proportional(15.0), vis.strong_text_color());
+        let body = Rect::from_min_max(pos2(list.min.x + 4.0, head.max.y), list.max - vec2(4.0, 4.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("playlist"));
+        let row_h = 30.0;
+        let reveal = std::mem::take(&mut a.reveal);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut child, |ui| {
+            for (i, p) in a.tracks.iter().enumerate() {
+                let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                if i == a.cursor {
+                    ui.painter().rect_filled(r, 5.0, accent.gamma_multiply(0.45));
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(r, 5.0, vis.widgets.hovered.weak_bg_fill);
+                }
+                if reveal && i == a.cursor {
+                    ui.scroll_to_rect(r, None);
+                }
+                let current = i == a.index;
+                let c = if current { vis.strong_text_color() } else { vis.text_color() };
+                if current {
+                    if playing {
+                        for (k, h) in [0.5f32, 1.0, 0.7].iter().enumerate() {
+                            let t = ui.input(|i| i.time) as f32;
+                            let hh = 12.0 * (h * (0.6 + 0.4 * (t * 6.0 + k as f32 * 1.7).sin().abs()));
+                            ui.painter().rect_filled(Rect::from_min_size(pos2(r.min.x + 12.0 + k as f32 * 5.0, r.center().y + 7.0 - hh), vec2(3.0, hh)), 0.5, accent);
+                        }
+                    } else {
+                        tri(ui.painter(), pos2(r.min.x + 18.0, r.center().y), 6.0, true, accent);
+                    }
+                } else {
+                    ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::RIGHT_CENTER, (i + 1).to_string(), FontId::proportional(13.0), vis.weak_text_color());
+                }
+                let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let g = ui.painter().layout(name, FontId::proportional(15.0), c, r.width() - 50.0);
+                let clip = ui.painter().with_clip_rect(r.shrink2(vec2(0.0, 2.0)));
+                clip.galley(pos2(r.min.x + 40.0, r.center().y - g.rows.first().map_or(8.0, |row| row.height()) / 2.0), g, c);
+                if resp.clicked() {
+                    act = Some(HeaderAct::Run(Cmd::AudioPlay(i)));
+                }
+            }
+        });
+    }
+    act
+}
+
+/// A filled triangle pointing right (or left) around `c`.
+fn tri(p: &egui::Painter, c: egui::Pos2, r: f32, right: bool, color: Color32) {
+    let d = if right { 1.0 } else { -1.0 };
+    let pts = vec![c + vec2(d * r, 0.0), c + vec2(-d * r * 0.8, -r), c + vec2(-d * r * 0.8, r)];
+    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// ♪ drawn with shapes (the UI font may lack it).
+fn note_glyph(p: &egui::Painter, c: egui::Pos2, size: f32, color: Color32) {
+    let head = c + vec2(-size * 0.18, size * 0.32);
+    p.circle_filled(head, size * 0.17, color);
+    let top = pos2(head.x + size * 0.15, c.y - size * 0.45);
+    p.line_segment([pos2(top.x, head.y), top], Stroke::new(size * 0.07, color));
+    p.add(egui::Shape::convex_polygon(vec![top, top + vec2(size * 0.3, size * 0.15), top + vec2(size * 0.3, size * 0.35), top + vec2(0.0, size * 0.2)], color, Stroke::NONE));
+}
+
+/// A speaker with as many waves as the volume deserves.
+fn speaker(p: &egui::Painter, c: egui::Pos2, volume: f32, color: Color32) {
+    p.rect_filled(Rect::from_center_size(c + vec2(-6.0, 0.0), vec2(5.0, 8.0)), 1.0, color);
+    p.add(egui::Shape::convex_polygon(vec![c + vec2(-4.0, -4.0), c + vec2(2.0, -9.0), c + vec2(2.0, 9.0), c + vec2(-4.0, 4.0)], color, Stroke::NONE));
+    let waves = if volume <= 0.0 { 0 } else if volume < 0.4 { 1 } else if volume < 0.75 { 2 } else { 3 };
+    for k in 0..waves {
+        let r = 6.0 + k as f32 * 4.0;
+        let pts: Vec<egui::Pos2> = (0..=8).map(|i| {
+            let t = -0.8 + 1.6 * i as f32 / 8.0;
+            c + vec2(2.0 + r * t.cos(), r * t.sin())
+        }).collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.6, color)));
+    }
+    if volume <= 0.0 {
+        p.line_segment([c + vec2(6.0, -5.0), c + vec2(14.0, 5.0)], Stroke::new(1.8, color));
+        p.line_segment([c + vec2(6.0, 5.0), c + vec2(14.0, -5.0)], Stroke::new(1.8, color));
+    }
 }

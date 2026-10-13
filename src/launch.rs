@@ -2,9 +2,8 @@
 //! everything else goes through xdg-open.
 
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use freedesktop_desktop_entry::{DesktopEntry, get_languages_from_env};
 
@@ -57,7 +56,24 @@ fn is_native_executable(path: &Path) -> bool {
     head[..n].starts_with(b"\x7fELF") || head[..n].starts_with(b"#!")
 }
 
+/// Tests never start other programs: they'd show up on the desktop.
+#[cfg(test)]
+fn spawn(cmd: Command) -> Result<(), String> {
+    let line = format!("{:?}", cmd);
+    LAUNCHED.with(|l| l.borrow_mut().push(line));
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What tests asked to launch.
+    pub static LAUNCHED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(not(test))]
 fn spawn(mut cmd: Command) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     // Reap it so it never lingers as a zombie.

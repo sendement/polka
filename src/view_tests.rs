@@ -385,6 +385,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     folding_and_locks(h);
     templates(h);
     cursors(h);
+    music(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -1038,8 +1039,12 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     press(h, &[Action::Right, Action::Accept]); // pictures: off
     assert!(!h.state().cfg.open_images);
     press(h, &[Action::Accept]); // and on again
-    press(h, &[Action::Right, Action::Accept]); // music: not yet
-    assert!(!h.state().cfg.open_audio);
+    press(h, &[Action::Right, Action::Accept]); // music: off
+    assert!(!h.state().cfg.open_music);
+    press(h, &[Action::Accept]); // and on again
+    assert!(h.state().cfg.open_music);
+    press(h, &[Action::Right, Action::Accept]); // video: not yet
+    assert!(!h.state().cfg.open_video);
     press(h, &[Action::Down]);
     if h.state().cfg.collapse_volumes {
         press(h, &[Action::Accept]);
@@ -1216,4 +1221,118 @@ fn cursors(h: &mut Harness<'static, App>) {
     shot(h, "57-cursor-next");
     press(h, &[Action::Back]);
     h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+}
+
+fn music(h: &mut Harness<'static, App>) {
+    use crate::app::Overlay;
+    use crate::vfs::Location;
+    use crate::viewer::Content;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("music");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ff = |args: &[&str]| std::process::Command::new("ffmpeg").args(["-v", "quiet", "-y"]).args(args).current_dir(&dir).status().is_ok_and(|s| s.success());
+    if !ff(&["-f", "lavfi", "-i", "testsrc=size=320x320:duration=1", "-frames:v", "1", "art.png"]) {
+        return; // no ffmpeg
+    }
+    assert!(ff(&[
+        "-f", "lavfi", "-i", "sine=frequency=330:duration=20", "-i", "art.png", "-map", "0:a", "-map", "1:v", "-c:a", "libmp3lame", "-b:a", "128k", "-c:v", "png",
+        "-id3v2_version", "3", "-metadata", "title=Утро", "-metadata", "artist=Polka Band", "-metadata", "album=Тестовый альбом", "-metadata", "date=2024",
+        "-metadata", "track=1", "-metadata:s:v", "comment=Cover (front)", "01 Утро.mp3",
+    ]));
+    assert!(ff(&["-f", "lavfi", "-i", "sine=frequency=440:duration=20", "-metadata", "title=Вечер", "-metadata", "artist=Polka Band", "02 Вечер.flac"]));
+    assert!(ff(&["-f", "lavfi", "-i", "sine=frequency=550:duration=20", "-c:a", "libopus", "03 Ночь.opus"]));
+    std::fs::remove_file(dir.join("art.png")).unwrap();
+
+    let audio = |h: &Harness<'static, App>| match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Audio(a)) => Some((a.index, a.cursor, a.tracks.len(), a.meta.title.clone(), a.cover.is_some(), a.playing(), a.pos().as_secs_f32())),
+        _ => None,
+    };
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let i = h.state().pane().entries.iter().position(|e| e.name.starts_with("01")).unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    for _ in 0..10 {
+        settle(h);
+        if audio(h).is_some_and(|a| a.4) {
+            break;
+        }
+    }
+    let launched = crate::launch::LAUNCHED.with(|l| l.borrow().clone());
+    assert!(launched.iter().all(|c| !c.contains("music")), "handed to another app: {launched:?}");
+    let a = audio(h).expect("music opens in the player");
+    assert_eq!((a.0, a.2, a.3.as_deref(), a.4, a.5), (0, 3, Some("Утро"), true, true), "tags, cover, playing");
+    shot(h, "58-music");
+    // → seeks 5 s each; ✕ pauses and plays.
+    press(h, &[Action::Right, Action::Right]);
+    assert!(audio(h).unwrap().6 >= 10.0, "seeked: {}", audio(h).unwrap().6);
+    press(h, &[Action::Accept]);
+    assert!(!audio(h).unwrap().5);
+    press(h, &[Action::Accept]);
+    assert!(audio(h).unwrap().5);
+    // ↓ ✕ plays another track of the playlist; the header follows.
+    press(h, &[Action::Down, Action::Accept]);
+    for _ in 0..5 {
+        settle(h);
+    }
+    let a = audio(h).unwrap();
+    assert_eq!((a.0, a.3.as_deref(), a.4), (1, Some("Вечер"), false));
+    assert!(h.state().cur_tab().viewer.as_ref().unwrap().name.starts_with("02"));
+    shot(h, "59-music-no-cover");
+    // R2: next (Opus goes through ffmpeg).
+    press(h, &[Action::RightTrigger]);
+    for _ in 0..5 {
+        settle(h);
+    }
+    let a = audio(h).unwrap();
+    assert_eq!(a.0, 2);
+    assert!(a.5 && a.6 > 0.0, "opus plays: {a:?}");
+    shot(h, "60-music-opus");
+    // □ tap: repeat; □ + ↑: volume (and no repeat change).
+    let rep = h.state().cfg.viewer.repeat;
+    press(h, &[Action::Select]);
+    assert_eq!(h.state().cfg.viewer.repeat, (rep + 1) % 3);
+    let vol = h.state().cfg.viewer.volume;
+    h.state_mut().handle(Input::Press(Action::Select));
+    h.state_mut().handle(Input::Press(Action::Up));
+    h.state_mut().handle(Input::Release(Action::Select));
+    settle(h);
+    assert!((h.state().cfg.viewer.volume - (vol + 0.05).min(1.0)).abs() < 1e-3);
+    assert_eq!(h.state().cfg.viewer.repeat, (rep + 1) % 3);
+    shot(h, "61-music-volume");
+    // Space (keyboard) pauses.
+    key(h, egui::Key::Space, egui::Modifiers::NONE);
+    settle(h);
+    assert!(!audio(h).unwrap().5, "space pauses");
+    press(h, &[Action::Actions]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))));
+    shot(h, "62-music-menu");
+    h.state_mut().overlay = None;
+    // ○ closes on the last track played; covers show as thumbnails.
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_none());
+    assert!(h.state().pane().current().unwrap().name.starts_with("03"));
+    h.state_mut().run(crate::app::Cmd::SetView(crate::config::ViewMode::Grid));
+    for _ in 0..10 {
+        settle(h);
+    }
+    shot(h, "63-music-thumbs");
+    h.state_mut().run(crate::app::Cmd::SetView(crate::config::ViewMode::List));
+}
+
+/// Just the player (quick to rerun), also in a narrow window.
+#[test]
+#[ignore]
+fn music_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    music(&mut h);
+    h.set_size(egui::vec2(760.0, 700.0));
+    h.state_mut().handle(Input::Press(Action::Accept));
+    h.state_mut().handle(Input::Release(Action::Accept));
+    for _ in 0..5 {
+        settle(&mut h);
+    }
+    shot(&mut h, "64-music-narrow");
 }

@@ -57,6 +57,7 @@ pub fn supported(path: &Path) -> bool {
     let e = ext_of(path);
     in_cursor_dir(path)
         || IMAGE_EXT.contains(&e.as_str()) || (VIDEO_EXT.contains(&e.as_str()) && video_tool())
+        || crate::viewer::audio::EXTS.contains(&e.as_str())
 }
 
 impl Thumbs {
@@ -159,6 +160,9 @@ pub fn thumbnail(path: &Path, mtime: i64) -> Option<(PathBuf, u32, u32)> {
         from_cursor(path)?
     } else if IMAGE_EXT.contains(&ext_of(path).as_str()) {
         from_image(path)?
+    } else if crate::viewer::audio::EXTS.contains(&ext_of(path).as_str()) {
+        // Music: its cover art.
+        crate::viewer::audio::thumbnail(path)?
     } else {
         from_video(path)?
     };

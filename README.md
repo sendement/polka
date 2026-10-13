@@ -21,6 +21,27 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Pinned folders can use any theme icon (Papirus colour variants included) or your own picture
   (icon picker → △ "Own picture…", then pick an image in the panes); label sizes follow icon sizes
 
+## Built-in viewer and player
+
+Files open in the same window, in place of the panes (each kind can be sent to its desktop app
+instead: Settings → "Open in Polka"):
+
+- Text: tree-sitter highlighting for 30 languages, themes and fonts, editing from the pad or
+  keyboard, search by words or regular expressions; Markdown rendered as on GitHub or as source
+- Pictures: zoom, pan, EXIF rotation, browsing the folder; animated X cursors with their hotspot
+- Music: mp3, flac, ogg, m4a/aac, alac, wav, aiff and more (Symphonia); Opus, WMA, APE and other
+  formats through `ffmpeg` if installed. Tags and cover art (embedded or `cover.jpg` next to the
+  tracks), the folder as a playlist, repeat, volume. Music keeps playing in a background tab.
+
+| Player | Gamepad | Keyboard |
+|---|---|---|
+| Play / pause | ✕ / A | Space, K |
+| Seek 5 s (30 s) | ← → (□ held) | ← → (Shift) |
+| Previous / next track | L2 / R2 | PgUp / PgDn, P / N |
+| Playlist | ↑ ↓, then ✕ / A | ↑ ↓, Enter |
+| Repeat: off / all / one | □ / X tap | R |
+| Volume | □ / X held + ↑ ↓ | + / − |
+
 ## Controls
 
 | Gamepad (PlayStation / Xbox) | Action | Keyboard |
@@ -58,7 +79,7 @@ cargo build --release
 
 Arch package: `packaging/arch/make-tarball.sh`, then `makepkg` in `packaging/arch`
 (installs the binary, desktop entry and icon).
-Video thumbnails need `ffmpegthumbnailer`.
+Video thumbnails need `ffmpegthumbnailer`; music in formats Symphonia can't decode needs `ffmpeg`.
 
 Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,
 `icon_theme` override, `zoom` for TV use; Ctrl+= / Ctrl+- also zoom).
@@ -77,4 +98,4 @@ POLKA_TEST_DIR=/some/dir POLKA_SHOT_DIR=/tmp/shots cargo test -- --ignored scree
 
 ## License
 
-MIT
+MIT. Audio decoding uses [Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0).

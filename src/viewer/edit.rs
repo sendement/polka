@@ -522,7 +522,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
         std::fs::write(&p, text).unwrap();
-        let v = Viewer::open(p.clone(), name.into(), 0, Vec::new(), &egui::Context::default());
+        let v = Viewer::open(p.clone(), name.into(), 0, Vec::new(), 1.0, &egui::Context::default());
         let Content::Text(mut t) = v.content else { panic!() };
         t.rows = crate::viewer::text::rows(&t.doc, None);
         t.rows_for = Some(None);

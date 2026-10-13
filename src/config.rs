@@ -56,7 +56,7 @@ pub struct Config {
     /// Open these in Polka's own viewer (else the desktop's app).
     pub open_text: bool,
     pub open_images: bool,
-    pub open_audio: bool,
+    pub open_music: bool,
     pub open_video: bool,
     /// Show a multi-volume archive as one item until it's pointed at.
     pub collapse_volumes: bool,
@@ -74,13 +74,16 @@ pub struct ViewerPrefs {
     pub line_numbers: bool,
     /// Markdown drawn as on GitHub (else its source).
     pub md_rendered: bool,
+    /// Music player: volume 0..1 and repeat (0 off, 1 all, 2 one).
+    pub volume: f32,
+    pub repeat: u8,
 }
 
 pub const VIEWER_FONT: (f32, f32, f32) = (9.0, 40.0, 1.0);
 
 impl Default for ViewerPrefs {
     fn default() -> Self {
-        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true }
+        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true, volume: 0.8, repeat: 0 }
     }
 }
 
@@ -144,7 +147,7 @@ impl Default for Config {
             viewer: ViewerPrefs::default(),
             open_text: true,
             open_images: true,
-            open_audio: false,
+            open_music: true,
             open_video: false,
             collapse_volumes: true,
         }

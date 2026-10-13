@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -61,6 +61,8 @@ tree-sitter-qmljs = "0.3"
 tree-sitter-glsl = "0.2"
 regex = "1"
 pulldown-cmark = { version = "0.13", default-features = false }
+rodio = { version = "0.23", default-features = false, features = ["playback", "symphonia-all", "symphonia-simd"] }
+lofty = "0.25"
 
 [profile.release]
 lto = "thin"

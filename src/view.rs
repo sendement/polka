@@ -94,6 +94,9 @@ impl App {
         if self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
             events = self.editor_keyboard(events);
         }
+        if self.overlay.is_none() && self.focus == Focus::Panes && self.audio_shown() {
+            events = self.audio_keyboard(events);
+        }
         for ev in events {
             match ev {
                 egui::Event::Text(t) if osk => {
@@ -550,6 +553,14 @@ impl App {
                 (Action::Menu, tr("Settings")),
                 (Action::Back, tr("Close")),
             ],
+            None if self.audio_shown() && self.focus == Focus::Panes => vec![
+                (Action::Accept, tr("Play / pause")),
+                (Action::Left, tr("Seek")),
+                (Action::LeftTrigger, tr("Track")),
+                (Action::Select, tr("Repeat; hold: volume")),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Close")),
+            ],
             None if self.cur_tab().viewer.is_some() && self.focus == Focus::Panes => vec![
                 (Action::Left, tr("Previous / next")),
                 (Action::LeftTrigger, tr("Zoom")),
@@ -699,6 +710,8 @@ impl App {
                 HeaderAct::Save => self.run(Cmd::ViewerSave),
                 HeaderAct::ToggleMd => self.run(Cmd::ViewerToggleMd),
                 HeaderAct::Link(l) => self.viewer_link(l),
+                HeaderAct::Run(c) => self.run(c),
+                HeaderAct::Volume(v) => self.audio_set_volume(v),
             }
         }
         let divider = if self.tabs[tab].viewer.is_some() { self.divider_x } else { divider };
@@ -1931,7 +1944,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
     let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
-    let flags = [cfg.open_text, cfg.open_images, cfg.open_audio, cfg.open_video];
+    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_video];
     let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
     for (i, label) in kinds.iter().enumerate() {
         let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
@@ -1945,7 +1958,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         let color = if ready { v.text_color() } else { v.weak_text_color() };
         let text = if on { format!("✔ {label}") } else { label.to_string() };
         ui.painter().text(chip.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), color);
-        let resp = if ready { resp } else { resp.on_hover_text(tr("Comes with the built-in player")) };
+        let resp = if ready { resp } else { resp.on_hover_text(tr("Comes with the built-in video player")) };
         if resp.clicked() {
             ev = Some(SettingsEvent::Chip(i));
         }
