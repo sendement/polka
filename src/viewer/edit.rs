@@ -48,6 +48,10 @@ pub struct Find {
     pub error: Option<String>,
     /// Typing goes into the query (keyboard).
     pub typing: bool,
+    /// Replace mode: the text to put in place of matches (regex: `$1`,
+    /// `${name}` expand), and typing going into it.
+    pub replace: Option<String>,
+    pub typing_replace: bool,
     /// What `matches` was computed for: (query, flags, doc generation).
     computed: Option<(String, [bool; 3], u64)>,
 }
@@ -103,11 +107,7 @@ impl Find {
             self.current = None;
             return;
         }
-        let mut pat = if self.regex { self.query.clone() } else { regex::escape(&self.query) };
-        if self.word {
-            pat = format!(r"\b(?:{pat})\b");
-        }
-        match regex::RegexBuilder::new(&pat).case_insensitive(!self.case).multi_line(true).size_limit(1 << 24).build() {
+        match self.regex() {
             Ok(re) => {
                 for m in re.find_iter(text).filter(|m| !m.is_empty()).take(MAX_MATCHES) {
                     self.matches.push(m.range());
@@ -120,6 +120,28 @@ impl Find {
         } else if self.current.is_none_or(|c| c >= self.matches.len()) {
             self.current = Some(0);
         }
+    }
+
+    /// The search as a regex (plain text escaped, whole words wrapped).
+    pub fn regex(&self) -> Result<regex::Regex, regex::Error> {
+        let mut pat = if self.regex { self.query.clone() } else { regex::escape(&self.query) };
+        if self.word {
+            pat = format!(r"\b(?:{pat})\b");
+        }
+        regex::RegexBuilder::new(&pat).case_insensitive(!self.case).multi_line(true).size_limit(1 << 24).build()
+    }
+
+    /// What match `m` of `text` turns into.
+    fn replacement(&self, re: &regex::Regex, text: &str, m: &Range<usize>) -> String {
+        let with = self.replace.as_deref().unwrap_or("");
+        if !self.regex {
+            return with.to_string();
+        }
+        let mut out = String::new();
+        if let Some(c) = re.captures_at(text, m.start).filter(|c| c.get(0).is_some_and(|g| g.range() == *m)) {
+            c.expand(with, &mut out);
+        }
+        out
     }
 
     /// First match at or after `from` (wrapping).
@@ -488,6 +510,63 @@ impl TextState {
         self.goto_match(i);
     }
 
+    /// Replace the current match (selected, or the next one from the
+    /// caret) and go on to the next. False when nothing was replaced.
+    pub fn replace_one(&mut self) -> bool {
+        if !self.editable() {
+            return false;
+        }
+        self.find_refresh();
+        let Some(f) = self.ed.find.as_ref() else { return false };
+        let sel = self.ed.selection();
+        let m = match f.current.and_then(|c| f.matches.get(c)).filter(|m| sel.as_ref() == Some(*m)) {
+            Some(m) => m.clone(),
+            None => {
+                // Not on a match yet: show the next one first.
+                self.find_step(1);
+                return false;
+            }
+        };
+        let Ok(re) = f.regex() else { return false };
+        let with = f.replacement(&re, &self.doc.text, &m);
+        self.apply(m.clone(), &with, true);
+        self.find_refresh();
+        // On to the next match after what was put in.
+        let next = self.ed.find.as_ref().and_then(|f| f.nearest(m.start + with.len()));
+        if let Some(i) = next {
+            self.goto_match(i);
+        }
+        true
+    }
+
+    /// Replace every match, as one undo step. Returns how many.
+    pub fn replace_all(&mut self) -> usize {
+        if !self.editable() {
+            return 0;
+        }
+        self.find_refresh();
+        let Some(f) = self.ed.find.as_ref() else { return 0 };
+        let Ok(re) = f.regex() else { return 0 };
+        let n = f.matches.len();
+        if n == 0 {
+            return 0;
+        }
+        let with = f.replace.clone().unwrap_or_default();
+        let old = &self.doc.text;
+        let new = if f.regex { re.replace_all(old, with.as_str()).into_owned() } else { re.replace_all(old, regex::NoExpand(&with)).into_owned() };
+        // Only the changed middle goes in (one change, small undo).
+        let pre = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        let pre = (0..=pre).rev().find(|&i| old.is_char_boundary(i) && new.is_char_boundary(i)).unwrap_or(0);
+        let max_suf = (old.len() - pre).min(new.len() - pre);
+        let suf = old.bytes().rev().zip(new.bytes().rev()).take(max_suf).take_while(|(a, b)| a == b).count();
+        let suf = (0..=suf).rev().find(|&i| old.is_char_boundary(old.len() - i) && new.is_char_boundary(new.len() - i)).unwrap_or(0);
+        let middle = new[pre..new.len() - suf].to_string();
+        let range = pre..old.len() - suf;
+        self.apply(range, &middle, true);
+        self.find_refresh();
+        n
+    }
+
     pub fn find_refresh(&mut self) {
         let generation = self.doc.generation;
         if let Some(f) = self.ed.find.as_mut() {
@@ -616,6 +695,40 @@ mod tests {
         t.insert("bar ");
         t.find_refresh();
         assert_eq!(t.ed.find.as_ref().unwrap().matches.len(), 2);
+        std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn replace_one_and_all() {
+        let (p, mut t) = open("кот Кот котлета\nкот\n", "r.txt");
+        t.ed.find = Some(Find { query: "кот".into(), word: true, replace: Some("пёс".into()), ..Default::default() });
+        t.ed.caret = 0;
+        // First press only selects the match it would replace.
+        assert!(!t.replace_one());
+        assert_eq!(t.selected_text().as_deref(), Some("кот"));
+        assert!(t.replace_one());
+        assert_eq!(t.doc.text, "пёс Кот котлета\nкот\n");
+        assert_eq!(t.selected_text().as_deref(), Some("Кот"), "moves on to the next match");
+        assert_eq!(t.replace_all(), 2);
+        assert_eq!(t.doc.text, "пёс пёс котлета\nпёс\n");
+        // One undo step for "all".
+        t.undo();
+        assert_eq!(t.doc.text, "пёс Кот котлета\nкот\n");
+        // Regex groups; plain mode keeps $ as is.
+        let f = t.ed.find.as_mut().unwrap();
+        f.regex = true;
+        f.word = false;
+        f.query = r"(\w+) (\w+)".into();
+        f.replace = Some("$2-$1".into());
+        assert_eq!(t.replace_all(), 1);
+        assert_eq!(t.doc.text, "Кот-пёс котлета\nкот\n");
+        let f = t.ed.find.as_mut().unwrap();
+        f.regex = false;
+        f.query = "котлета".into();
+        f.replace = Some("$1 ₽".into());
+        assert_eq!(t.replace_all(), 1);
+        assert_eq!(t.doc.text, "Кот-пёс $1 ₽\nкот\n");
+        assert!(t.ed.dirty);
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
 }

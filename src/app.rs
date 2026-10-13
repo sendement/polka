@@ -421,6 +421,9 @@ pub enum Cmd {
     ViewerSelectAll,
     ViewerFindAsk,
     ViewerFindOpt(u8),
+    ViewerReplaceAsk,
+    ViewerReplace,
+    ViewerReplaceAll,
     ViewerToggleMd,
     ViewerSave,
     ViewerSaveThen(crate::viewer::glue::Then),
@@ -561,6 +564,7 @@ pub enum OskPurpose {
     /// Text typed into the viewer's document / its search.
     ViewerInsert,
     ViewerFind,
+    ViewerReplace,
     /// A text field of the archive dialog, which comes back afterwards.
     CompressField { dlg: Box<CompressDlg>, field: CField },
 }
@@ -1631,7 +1635,7 @@ impl App {
         if let OskPurpose::CompressField { dlg, field } = k.purpose {
             return self.compress_field(*dlg, field, raw);
         }
-        if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind) {
+        if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace) {
             return self.viewer_osk(k.purpose, raw);
         }
         if text.is_empty() {
@@ -1778,7 +1782,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace => unreachable!(),
         }
     }
 
@@ -2717,6 +2721,9 @@ impl App {
             | Cmd::ViewerSelectAll
             | Cmd::ViewerFindAsk
             | Cmd::ViewerFindOpt(_)
+            | Cmd::ViewerReplaceAsk
+            | Cmd::ViewerReplace
+            | Cmd::ViewerReplaceAll
             | Cmd::ViewerToggleMd
             | Cmd::ViewerSave
             | Cmd::ViewerSaveThen(_)

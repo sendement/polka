@@ -382,6 +382,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     volumes(h);
     viewer(h);
     editing(h);
+    replacing(h);
     folding_and_locks(h);
     templates(h);
     cursors(h);
@@ -1430,4 +1431,74 @@ fn video_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     video(&mut h);
+}
+
+fn replacing(h: &mut Harness<'static, App>) {
+    use crate::app::Overlay;
+    use crate::vfs::Location;
+    use egui::{Key, Modifiers};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("repl");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("list.txt"), "кот кошка кот\nдата 2024-10-14\nдата 2025-01-02\n").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "list.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    let text = |h: &mut Harness<'static, App>| h.state_mut().text_mut().unwrap().doc.text.clone();
+    // Keyboard: Ctrl+F the word (the first match gets selected), Ctrl+H,
+    // the replacement, Enter replaces that match; Ctrl+Enter the rest.
+    key(h, Key::F, Modifiers::COMMAND);
+    type_text(h, "кот");
+    key(h, Key::H, Modifiers::COMMAND);
+    type_text(h, "пёс");
+    settle(h);
+    shot(h, "71-replace-bar");
+    key(h, Key::Enter, Modifiers::NONE);
+    assert_eq!(text(h), "пёс кошка кот\nдата 2024-10-14\nдата 2025-01-02\n");
+    key(h, Key::Enter, Modifiers::COMMAND);
+    assert_eq!(text(h), "пёс кошка пёс\nдата 2024-10-14\nдата 2025-01-02\n");
+    h.state_mut().text_mut().unwrap().undo();
+    assert!(text(h).ends_with("кот\nдата 2024-10-14\nдата 2025-01-02\n"));
+    // Gamepad: a regex with groups through the △ menu and the on-screen keyboard.
+    {
+        let t = h.state_mut().text_mut().unwrap();
+        let f = t.ed.find.as_mut().unwrap();
+        f.regex = true;
+        f.query = r"(\d{4})-(\d\d)-(\d\d)".into();
+        f.typing = false;
+        f.typing_replace = false;
+        // The keyboard starts from the last replacement; begin afresh.
+        f.replace = Some(String::new());
+        t.find_refresh();
+    }
+    press(h, &[Action::Actions]);
+    menu_pick(h, crate::i18n::tr("Replace with…"));
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
+    if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        k.insert("$3.$2.$1");
+    }
+    h.state_mut().osk_submit();
+    settle(h);
+    press(h, &[Action::Actions]);
+    shot(h, "72-replace-menu");
+    menu_pick(h, crate::i18n::tr("Replace all"));
+    assert!(text(h).contains("дата 14.10.2024\nдата 02.01.2025"), "{}", text(h));
+    settle(h);
+    shot(h, "73-replaced");
+    // Close without saving.
+    h.state_mut().text_mut().unwrap().ed.dirty = false;
+    press(h, &[Action::Back, Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_none());
+}
+
+/// Just replacing (quick to rerun).
+#[test]
+#[ignore]
+fn replace_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    replacing(&mut h);
 }

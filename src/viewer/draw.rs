@@ -99,7 +99,9 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
     match &mut v.content {
         Content::Text(t) => {
             if t.ed.find.is_some() {
-                draw_find(ui, t, theme);
+                if let Some(x) = draw_find(ui, t, theme) {
+                    act = Some(x);
+                }
             }
             if md_rendered(t, prefs) {
                 if let Some(l) = draw_md(ui, t, prefs, theme, v.path.parent().unwrap_or(std::path::Path::new("/"))) {
@@ -128,15 +130,21 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
 }
 
 /// Search bar: query, options, count, arrows.
-fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) {
+fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) -> Option<HeaderAct> {
+    use crate::app::Cmd;
+    let mut act = None;
     let vis = ui.visuals().clone();
-    let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    let replacing = t.ed.find.as_ref().is_some_and(|f| f.replace.is_some());
+    let (whole, _) = ui.allocate_exact_size(vec2(ui.available_width(), if replacing { 72.0 } else { 36.0 }), Sense::hover());
+    let bar = Rect::from_min_size(whole.min, vec2(whole.width(), 36.0));
     ui.add_space(4.0);
-    let Some(f) = t.ed.find.as_mut() else { return };
+    let editable = t.editable();
+    let Some(f) = t.ed.find.as_mut() else { return None };
     let field = Rect::from_min_size(bar.min + vec2(4.0, 3.0), vec2((bar.width() * 0.45).clamp(200.0, 520.0), 30.0));
     let fr = ui.interact(field, ui.id().with("find-field"), Sense::click());
     if fr.clicked() {
         f.typing = true;
+        f.typing_replace = false;
     }
     let border = if f.error.is_some() { vis.error_fg_color } else if f.typing { vis.selection.bg_fill } else { vis.widgets.noninteractive.bg_stroke.color };
     ui.painter().rect(field, 6.0, vis.extreme_bg_color, Stroke::new(1.5, border), StrokeKind::Inside);
@@ -152,6 +160,9 @@ fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) {
     }
     let mut x = field.max.x + 8.0;
     let mut toggles: Vec<(&str, &str, bool, u8)> = vec![("Aa", tr("Match case"), f.case, 0), ("W", tr("Whole words"), f.word, 1), (".*", tr("Regular expression"), f.regex, 2)];
+    if editable {
+        toggles.push(("⇄", tr("Replace (Ctrl+H)"), f.replace.is_some(), 3));
+    }
     let mut clicked = None;
     for (label, tip, on, id) in toggles.drain(..) {
         let r = Rect::from_min_size(pos2(x, bar.min.y + 4.0), vec2(34.0, 28.0));
@@ -165,7 +176,12 @@ fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) {
         match id {
             0 => f.case = !f.case,
             1 => f.word = !f.word,
-            _ => f.regex = !f.regex,
+            2 => f.regex = !f.regex,
+            _ => {
+                f.replace = if f.replace.is_some() { None } else { Some(String::new()) };
+                f.typing_replace = f.replace.is_some();
+                f.typing &= !f.typing_replace;
+            }
         }
     }
     t.find_refresh();
@@ -192,7 +208,41 @@ fn draw_find(ui: &mut Ui, t: &mut TextState, theme: &Theme) {
         Some(d) => t.find_step(d),
         None => {}
     }
+    // Replace row: the replacement, then "Replace" / "Replace all".
+    if let Some(f) = t.ed.find.as_mut().filter(|f| f.replace.is_some()) {
+        let field = Rect::from_min_size(pos2(whole.min.x + 4.0, bar.max.y + 3.0), field.size());
+        if ui.interact(field, ui.id().with("replace-field"), Sense::click()).clicked() {
+            f.typing_replace = true;
+            f.typing = false;
+        }
+        let border = if f.typing_replace { vis.selection.bg_fill } else { vis.widgets.noninteractive.bg_stroke.color };
+        ui.painter().rect(field, 6.0, vis.extreme_bg_color, Stroke::new(1.5, border), StrokeKind::Inside);
+        let painter = ui.painter().with_clip_rect(field.shrink(2.0));
+        let text = f.replace.clone().unwrap_or_default();
+        let (shown, color) = if text.is_empty() && !f.typing_replace { (tr("Replace with…").to_string(), vis.weak_text_color()) } else { (text.clone(), vis.text_color()) };
+        let g = painter.layout_no_wrap(shown, font.clone(), color);
+        let tx = field.min.x + 10.0 - (g.size().x - field.width() + 30.0).max(0.0);
+        painter.galley(pos2(tx, field.center().y - g.size().y / 2.0), g.clone(), color);
+        if f.typing_replace {
+            let cx = tx + if text.is_empty() { 0.0 } else { g.size().x } + 1.0;
+            painter.vline(cx, (field.center().y - 9.0)..=(field.center().y + 9.0), Stroke::new(1.5, vis.text_color()));
+        }
+        let mut x = field.max.x + 8.0;
+        for (label, tip, cmd) in [(tr("Replace"), "Enter", Cmd::ViewerReplace), (tr("Replace all"), "Ctrl+Enter", Cmd::ViewerReplaceAll)] {
+            let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+            let r = Rect::from_min_size(pos2(x, field.min.y + 1.0), vec2(w, 28.0));
+            ui.painter().rect_filled(r, 6.0, vis.widgets.inactive.weak_bg_fill);
+            if header_button(ui, r, label, tip, false) {
+                act = Some(HeaderAct::Run(cmd));
+            }
+            x += w + 6.0;
+        }
+        if f.regex {
+            ui.painter().text(pos2(x + 6.0, field.center().y), Align2::LEFT_CENTER, tr("$1, ${name}: groups"), FontId::proportional(13.0), vis.weak_text_color());
+        }
+    }
     let _ = theme;
+    act
 }
 
 /// Rendered Markdown; returns a clicked link.

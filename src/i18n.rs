@@ -6,6 +6,12 @@ use std::sync::OnceLock;
 static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
 const RU: &[(&str, &str)] = &[
+    ("Replace (Ctrl+H)", "Замена (Ctrl+H)"),
+    ("Replace with…", "Заменить на…"),
+    ("Replace with", "Заменить на"),
+    ("Replace all", "Заменить все"),
+    ("Replaced: %n", "Заменено: %n"),
+    ("$1, ${name}: groups", "$1, ${name} — группы"),
     ("Audio track", "Звуковая дорожка"),
     ("Full screen", "Во весь экран"),
     ("Leave full screen", "Выйти из полноэкранного режима"),

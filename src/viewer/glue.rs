@@ -171,6 +171,13 @@ impl App {
             }
         }
         items.push(item(tr("Find…"), Cmd::ViewerFindAsk));
+        if t.editable() && t.ed.find.as_ref().is_some_and(|f| !f.query.is_empty()) {
+            items.push(item(tr("Replace with…"), Cmd::ViewerReplaceAsk));
+            if t.ed.find.as_ref().is_some_and(|f| f.replace.is_some()) {
+                items.push(item(tr("Replace"), Cmd::ViewerReplace));
+                items.push(item(tr("Replace all"), Cmd::ViewerReplaceAll));
+            }
+        }
         if let Some(f) = &t.ed.find {
             items.push(toggle(tr("Match case"), Cmd::ViewerFindOpt(0), f.case));
             items.push(toggle(tr("Whole words"), Cmd::ViewerFindOpt(1), f.word));
@@ -282,6 +289,32 @@ impl App {
                     t.find_refresh();
                 }
             }
+            Cmd::ViewerReplaceAsk => {
+                let Some(t) = self.text_mut() else { return };
+                if !t.editable() {
+                    return self.read_only_toast();
+                }
+                let seed = t.ed.find.as_ref().and_then(|f| f.replace.clone()).unwrap_or_default();
+                self.overlay = Some(Overlay::Osk(Osk::new(tr("Replace with"), &seed, OskPurpose::ViewerReplace)));
+            }
+            Cmd::ViewerReplace => {
+                let Some(t) = self.text_mut() else { return };
+                if !t.editable() {
+                    return self.read_only_toast();
+                }
+                t.replace_one();
+                if t.ed.find.as_ref().is_some_and(|f| f.matches.is_empty()) {
+                    self.toast(tr("No matches"), false);
+                }
+            }
+            Cmd::ViewerReplaceAll => {
+                let Some(t) = self.text_mut() else { return };
+                if !t.editable() {
+                    return self.read_only_toast();
+                }
+                let n = t.replace_all();
+                self.toast(crate::i18n::trn("Replaced: %n", n), false);
+            }
             Cmd::ViewerToggleMd => {
                 self.cfg.viewer.md_rendered = !self.cfg.viewer.md_rendered;
                 self.cfg.save();
@@ -311,6 +344,12 @@ impl App {
         match purpose {
             OskPurpose::ViewerInsert => {
                 t.insert(&raw);
+            }
+            OskPurpose::ViewerReplace => {
+                if let Some(f) = t.ed.find.as_mut() {
+                    f.replace = Some(raw);
+                    f.typing_replace = false;
+                }
             }
             OskPurpose::ViewerFind => {
                 let mut f = t.ed.find.take().unwrap_or_default();
@@ -433,6 +472,46 @@ impl App {
     fn editor_event(&mut self, ev: &Event, md: bool) -> bool {
         let ctx = self.ctx.clone();
         let Some(t) = self.text_mut() else { return false };
+        // Typing into the replacement field.
+        if t.ed.find.as_ref().is_some_and(|f| f.typing_replace && f.replace.is_some()) {
+            let f = t.ed.find.as_mut().unwrap();
+            let r = f.replace.as_mut().unwrap();
+            match ev {
+                Event::Text(s) | Event::Paste(s) => {
+                    r.push_str(&s.replace('\n', " "));
+                    return true;
+                }
+                Event::Key { key, pressed: true, modifiers: m, .. } => {
+                    match key {
+                        Key::Escape => t.ed.find = None,
+                        Key::Enter if m.command => {
+                            self.run(Cmd::ViewerReplaceAll);
+                        }
+                        Key::Enter => {
+                            self.run(Cmd::ViewerReplace);
+                        }
+                        Key::Backspace => {
+                            if m.ctrl {
+                                let keep = r.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                                r.truncate(keep);
+                            } else {
+                                r.pop();
+                            }
+                        }
+                        Key::Tab if m.shift => {
+                            f.typing_replace = false;
+                            f.typing = true;
+                        }
+                        Key::ArrowDown | Key::Tab => f.typing_replace = false,
+                        Key::H if m.command => f.replace = None,
+                        _ if m.command => return false,
+                        _ => {}
+                    }
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         let typing = t.ed.find.as_ref().is_some_and(|f| f.typing);
         // Typing into the search field.
         if typing {
@@ -462,6 +541,16 @@ impl App {
                         Key::C if m.alt => f.case = !f.case,
                         Key::W if m.alt => f.word = !f.word,
                         Key::R if m.alt => f.regex = !f.regex,
+                        Key::Tab if f.replace.is_some() => {
+                            f.typing = false;
+                            f.typing_replace = true;
+                        }
+                        Key::H if m.command => {
+                            // On: typing moves to the replacement.
+                            f.replace = if f.replace.is_some() { None } else { Some(String::new()) };
+                            f.typing_replace = f.replace.is_some();
+                            f.typing = !f.typing_replace;
+                        }
                         Key::ArrowDown | Key::Tab => f.typing = false,
                         _ if m.command => return false,
                         _ => {}
@@ -528,6 +617,10 @@ impl App {
                     self.open_find();
                     true
                 }
+                Key::H if m.command => {
+                    self.open_replace();
+                    true
+                }
                 Key::E if m.command => {
                     self.run(Cmd::ViewerEdit);
                     true
@@ -588,6 +681,7 @@ impl App {
             }
             Key::S if m.command => self.viewer_save(None),
             Key::F if m.command => self.open_find(),
+            Key::H if m.command => self.open_replace(),
             Key::E if m.command => self.run(Cmd::ViewerEdit),
             Key::F3 | Key::G if key == Key::F3 || m.command => t.find_step(if m.shift { -1 } else { 1 }),
             Key::Escape => {
@@ -616,6 +710,22 @@ impl App {
         }
         f.typing = true;
         t.find_refresh();
+    }
+
+    /// Ctrl+H: the search bar with the replace row.
+    fn open_replace(&mut self) {
+        let Some(t) = self.text_mut() else { return };
+        if !t.editable() {
+            return self.read_only_toast();
+        }
+        self.open_find();
+        let Some(f) = self.text_mut().and_then(|t| t.ed.find.as_mut()) else { return };
+        f.replace.get_or_insert_with(String::new);
+        // Straight to the replacement when there's something to find.
+        if !f.query.is_empty() {
+            f.typing = false;
+            f.typing_replace = true;
+        }
     }
 
     pub fn request_close_viewer(&mut self) {
