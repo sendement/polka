@@ -378,6 +378,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     range_selection(h);
     closing_tabs(h);
     passwords(h);
+    compress_dialog(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -497,4 +498,62 @@ fn range_selection(h: &mut Harness<'static, App>) {
     h.state_mut().handle(Input::Release(Action::Select));
     assert!(names(h).is_empty());
     shot(h, "25-after-range");
+}
+
+fn compress_dialog(h: &mut Harness<'static, App>) {
+    use crate::app::{crow, Cmd, Overlay};
+    use crate::ops::{ArchiveFormat, Level, Method};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir.join("pw")), None, &cfg);
+    h.state_mut().pane_mut().reload(&cfg);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "secret").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::CompressAsk);
+    settle(h);
+    shot(h, "28-compress-default");
+    let dlg = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Compress(d)) => (d.row, d.opts.clone()),
+        _ => panic!("archive dialog closed"),
+    };
+    assert_eq!(dlg(h).0, crow::CREATE);
+    // Up skips "encrypt names" (no password yet) and lands on the password.
+    press(h, &[Action::Up]);
+    assert_eq!(dlg(h).0, crow::PASSWORD);
+    press(h, &[Action::Up, Action::Right, Action::Up, Action::Right, Action::Up, Action::Right]);
+    let (row, o) = dlg(h);
+    assert_eq!((row, o.split, o.level, o.method), (crow::METHOD, Some(10 * 1024 * 1024), Level::Max, Method::Bzip2));
+    let seven = crate::ops::have_7z();
+    press(h, &[Action::Up, Action::Right]);
+    assert_eq!(dlg(h).1.format, if seven { ArchiveFormat::SevenZ } else { ArchiveFormat::TarZst });
+    if !seven {
+        return;
+    }
+    // Password: entered twice; a mismatch keeps none.
+    press(h, &[Action::Down, Action::Down, Action::Down, Action::Down, Action::Accept]);
+    type_and_submit(h, "one");
+    type_and_submit(h, "two");
+    assert_eq!(dlg(h).1.password, None);
+    press(h, &[Action::Accept]);
+    type_and_submit(h, "s3cret pw");
+    shot(h, "29-compress-confirm");
+    type_and_submit(h, "s3cret pw");
+    assert_eq!(dlg(h).1.password.as_deref(), Some("s3cret pw"));
+    press(h, &[Action::Down, Action::Accept]); // encrypt names
+    assert!(dlg(h).1.encrypt_names);
+    shot(h, "30-compress-7z");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    let out = dir.join("pw/secret.7z");
+    assert!(out.exists(), "no archive");
+    crate::vfs::set_password(&out, "s3cret pw");
+    let idx = crate::vfs::archive_index(&out).unwrap();
+    assert!(idx.dirs["secret"].iter().any(|e| e.name == "a.txt"));
+    // The settings are remembered, the password is not.
+    h.state_mut().run(Cmd::CompressAsk);
+    let (_, o) = dlg(h);
+    assert_eq!((o.format, o.method, o.level, o.password), (ArchiveFormat::SevenZ, Method::Bzip2, Level::Max, None));
+    press(h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
 }

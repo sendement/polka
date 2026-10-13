@@ -12,7 +12,7 @@ use crate::config::{Config, SortKey, ViewMode};
 use crate::i18n::{tr, trn};
 use crate::icons::Icons;
 use crate::input::{Action, Input, PadKind};
-use crate::ops::{self, ArchiveFormat, Conflict, Job, Op};
+use crate::ops::{self, ArchiveFormat, CompressOpts, Conflict, Job, Op};
 use crate::vfs::{self, Dest, Entry, Location};
 
 // ---------------------------------------------------------------- panes
@@ -319,7 +319,6 @@ pub enum Cmd {
     Filter,
     Search,
     CompressAsk,
-    Compress(ArchiveFormat),
     ExtractHere,
     ExtractOther,
     Pin(PathBuf),
@@ -435,7 +434,8 @@ pub enum OskPurpose {
     Filter { prev: Option<String> },
     Search { root: PathBuf },
     Password { archive: PathBuf, retry: Retry },
-    Compress { sources: Vec<PathBuf>, dir: PathBuf, format: ArchiveFormat },
+    /// A text field of the archive dialog, which comes back afterwards.
+    CompressField { dlg: Box<CompressDlg>, field: CField },
 }
 
 /// What to do again once an archive password is entered.
@@ -490,7 +490,6 @@ impl Osk {
                 let s: String = text.iter().collect();
                 ops::split_ext(&s).0.chars().count()
             }
-            OskPurpose::Compress { .. } => text.len(),
             _ => text.len(),
         };
         Self { title: title.into(), text, caret, row: 1, col: 0, layout: 0, shift: false, purpose, secret: false }
@@ -570,6 +569,116 @@ pub enum Overlay {
     Themes(ThemePicker),
     Settings(Settings),
     IconPicker(IconPicker),
+    Compress(Box<CompressDlg>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CField {
+    Name,
+    Split,
+    Password,
+    /// Second entry of a new password.
+    Confirm,
+}
+
+/// Archive settings before compressing.
+pub struct CompressDlg {
+    pub sources: Vec<PathBuf>,
+    pub dir: PathBuf,
+    /// Without the extension.
+    pub name: String,
+    pub opts: CompressOpts,
+    pub row: usize,
+    /// First entry of the password while it's being confirmed.
+    pub pending_pw: Option<String>,
+}
+
+pub mod crow {
+    pub const NAME: usize = 0;
+    pub const FORMAT: usize = 1;
+    pub const METHOD: usize = 2;
+    pub const LEVEL: usize = 3;
+    pub const SPLIT: usize = 4;
+    pub const PASSWORD: usize = 5;
+    pub const NAMES: usize = 6;
+    pub const CREATE: usize = 7;
+    pub const CANCEL: usize = 8;
+}
+
+/// Volume size presets (MiB); 4095 fits FAT32.
+pub const SPLIT_PRESETS: [u64; 6] = [10, 100, 700, 1024, 2048, 4095];
+const MIB: u64 = 1024 * 1024;
+
+pub fn split_label(split: Option<u64>) -> String {
+    match split {
+        None => tr("Don't split").to_string(),
+        Some(b) if b == 4095 * MIB => format!("4 {} (FAT32)", tr("GB")),
+        Some(b) if b % (1024 * MIB) == 0 => format!("{} {}", b / (1024 * MIB), tr("GB")),
+        Some(b) => format!("{} {}", b / MIB, tr("MB")),
+    }
+}
+
+impl CompressDlg {
+    /// Rows that apply to the chosen format.
+    pub fn enabled(&self, row: usize) -> bool {
+        let f = self.opts.format;
+        match row {
+            crow::METHOD => !f.methods().is_empty(),
+            crow::PASSWORD => f.encrypts(),
+            crow::NAMES => f == ArchiveFormat::SevenZ && self.opts.password.is_some(),
+            _ => true,
+        }
+    }
+
+    pub fn formats() -> Vec<ArchiveFormat> {
+        ArchiveFormat::ALL.into_iter().filter(|f| *f != ArchiveFormat::SevenZ || ops::have_7z()).collect()
+    }
+
+    fn move_row(&mut self, d: isize) {
+        let mut r = self.row as isize;
+        loop {
+            r += d;
+            if !(0..=crow::CANCEL as isize).contains(&r) {
+                return;
+            }
+            if self.enabled(r as usize) {
+                self.row = r as usize;
+                return;
+            }
+        }
+    }
+
+    /// ←/→ on a row.
+    pub fn step(&mut self, row: usize, d: isize) {
+        fn cycle<T: PartialEq + Copy>(all: &[T], cur: T, d: isize) -> T {
+            let i = all.iter().position(|x| *x == cur).unwrap_or(0) as isize;
+            all[(i + d).rem_euclid(all.len() as isize) as usize]
+        }
+        let o = &mut self.opts;
+        match row {
+            crow::FORMAT => {
+                o.format = cycle(&Self::formats(), o.format, d);
+                o.fit();
+            }
+            crow::METHOD if !o.format.methods().is_empty() => o.method = cycle(o.format.methods(), o.method, d),
+            crow::LEVEL => o.level = cycle(o.format.levels(), o.level, d),
+            crow::SPLIT => {
+                let mut all: Vec<Option<u64>> = vec![None];
+                all.extend(SPLIT_PRESETS.iter().map(|m| Some(m * MIB)));
+                o.split = match o.split.filter(|s| !all.contains(&Some(*s))) {
+                    // A custom size steps to the neighbouring preset.
+                    Some(s) => {
+                        let above = all.iter().position(|x| x.is_some_and(|x| x > s)).unwrap_or(all.len());
+                        if d > 0 { all.get(above).copied().unwrap_or(None) } else { all[above - 1] }
+                    }
+                    None => cycle(&all, o.split, d),
+                };
+            }
+            crow::NAMES => o.encrypt_names = !o.encrypt_names,
+            crow::CREATE | crow::CANCEL => self.row = if self.row == crow::CREATE { crow::CANCEL } else { crow::CREATE },
+            _ => {}
+        }
+    }
 }
 
 /// Theme icon chooser for a pinned folder. Groups are colour variants
@@ -1209,6 +1318,21 @@ impl App {
                 _ => {}
             },
             Overlay::Settings(_) => self.settings_input(a),
+            Overlay::Compress(d) => match a {
+                Action::Up => d.move_row(-1),
+                Action::Down => d.move_row(1),
+                Action::Left | Action::Right => {
+                    let row = d.row;
+                    d.step(row, if a == Action::Left { -1 } else { 1 });
+                }
+                Action::Accept => {
+                    let row = d.row;
+                    self.compress_activate(row);
+                }
+                Action::Menu => self.compress_create(),
+                Action::Back => self.overlay = None,
+                _ => {}
+            },
             Overlay::IconPicker(p) => {
                 let n = p.names().len();
                 let cols = p.cols as isize;
@@ -1275,8 +1399,13 @@ impl App {
 
     pub fn osk_cancel(&mut self) {
         if let Some(Overlay::Osk(k)) = self.overlay.take() {
-            if let OskPurpose::Filter { prev } = k.purpose {
-                self.pane_mut().set_filter(prev);
+            match k.purpose {
+                OskPurpose::Filter { prev } => self.pane_mut().set_filter(prev),
+                OskPurpose::CompressField { mut dlg, .. } => {
+                    dlg.pending_pw = None;
+                    self.overlay = Some(Overlay::Compress(dlg));
+                }
+                _ => {}
             }
         }
     }
@@ -1289,6 +1418,9 @@ impl App {
         if let OskPurpose::Filter { .. } = k.purpose {
             self.pane_mut().set_filter(Some(text));
             return;
+        }
+        if let OskPurpose::CompressField { dlg, field } = k.purpose {
+            return self.compress_field(*dlg, field, raw);
         }
         if text.is_empty() {
             return;
@@ -1395,14 +1527,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::Compress { sources, dir, format } => {
-                if bad_name {
-                    return self.toast(format!("{}: {text}", tr("Failed")), true);
-                }
-                let name = if text.to_lowercase().ends_with(format.ext()) { text } else { format!("{text}{}", format.ext()) };
-                let out = ops::unique_path(&dir, &name);
-                self.start(Op::Compress { sources, out, format });
-            }
+            OskPurpose::CompressField { .. } => unreachable!(),
         }
     }
 
@@ -1662,6 +1787,98 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// ✕ on a row of the archive dialog.
+    pub fn compress_activate(&mut self, row: usize) {
+        let Some(Overlay::Compress(d)) = self.overlay.as_mut() else { return };
+        if !d.enabled(row) {
+            return;
+        }
+        d.row = row;
+        let field = match row {
+            crow::NAME => CField::Name,
+            crow::SPLIT => CField::Split,
+            crow::PASSWORD => CField::Password,
+            crow::CREATE => return self.compress_create(),
+            crow::CANCEL => {
+                self.overlay = None;
+                return;
+            }
+            _ => return d.step(row, 1),
+        };
+        let Some(Overlay::Compress(d)) = self.overlay.take() else { return };
+        self.compress_osk(d, field);
+    }
+
+    fn compress_osk(&mut self, dlg: Box<CompressDlg>, field: CField) {
+        let (title, text) = match field {
+            CField::Name => (tr("Archive name").to_string(), dlg.name.clone()),
+            CField::Split => (format!("{} ({})", tr("Volume size"), tr("MB")), dlg.opts.split.map(|b| (b / MIB).to_string()).unwrap_or_default()),
+            CField::Password => (format!("{} {}", tr("Archive password"), tr("(empty = none)")), String::new()),
+            CField::Confirm => (tr("Repeat the password").to_string(), String::new()),
+        };
+        let mut k = Osk::new(&title, &text, OskPurpose::CompressField { dlg, field });
+        k.secret = matches!(field, CField::Password | CField::Confirm);
+        self.overlay = Some(Overlay::Osk(k));
+    }
+
+    /// A text field of the archive dialog was entered.
+    fn compress_field(&mut self, mut dlg: CompressDlg, field: CField, raw: String) {
+        let text = raw.trim();
+        match field {
+            CField::Name => {
+                if !text.is_empty() && !text.contains('/') && text != "." && text != ".." {
+                    let ext = dlg.opts.format.ext();
+                    let lower = text.to_lowercase();
+                    dlg.name = if lower.ends_with(ext) { text[..text.len() - ext.len()].to_string() } else { text.to_string() };
+                } else if !text.is_empty() {
+                    self.toast(format!("{}: {text}", tr("Failed")), true);
+                }
+            }
+            CField::Split => match text.parse::<u64>() {
+                Ok(0) => dlg.opts.split = None,
+                Ok(mb) => dlg.opts.split = Some(mb * MIB),
+                Err(_) if text.is_empty() => dlg.opts.split = None,
+                Err(_) => self.toast(format!("{}: {text}", tr("Failed")), true),
+            },
+            CField::Password if raw.is_empty() => {
+                dlg.opts.password = None;
+                dlg.opts.encrypt_names = false;
+            }
+            CField::Password => {
+                dlg.pending_pw = Some(raw);
+                return self.compress_osk(Box::new(dlg), CField::Confirm);
+            }
+            CField::Confirm => {
+                if dlg.pending_pw.take().as_deref() == Some(raw.as_str()) {
+                    dlg.opts.password = Some(raw);
+                } else {
+                    self.toast(tr("Passwords don't match").to_string(), true);
+                }
+            }
+        }
+        self.overlay = Some(Overlay::Compress(Box::new(dlg)));
+    }
+
+    pub fn compress_create(&mut self) {
+        let Some(Overlay::Compress(d)) = self.overlay.take() else { return };
+        let CompressDlg { sources, dir, name, opts, .. } = *d;
+        self.cfg.compress = Some(crate::config::CompressPrefs {
+            format: opts.format,
+            method: opts.method,
+            level: opts.level,
+            split: opts.split,
+            encrypt_names: opts.encrypt_names,
+        });
+        self.cfg.save();
+        let full = format!("{name}{}", opts.format.ext());
+        // Split archives become name.001…, so those must be free too.
+        let name = ops::unique_name(&full, |n| {
+            let p = dir.join(n);
+            p.symlink_metadata().is_ok() || ops::volume_path(&p, 1).symlink_metadata().is_ok()
+        });
+        self.start(Op::Compress { sources, out: dir.join(name), opts });
     }
 
     /// ←/→ on a settings row.
@@ -1933,10 +2150,6 @@ impl App {
                 self.start(Op::Delete { paths });
             }
             Cmd::CompressAsk => {
-                let items = ArchiveFormat::ALL.iter().map(|f| item(f.ext(), Cmd::Compress(*f))).collect();
-                self.overlay = Some(Overlay::Menu(Menu::new(tr("Archive format"), items)));
-            }
-            Cmd::Compress(format) => {
                 let sources = self.local_targets();
                 let Some(dir) = self.pane().loc.local_path().map(Path::to_path_buf) else { return };
                 let base = if sources.len() == 1 {
@@ -1944,8 +2157,20 @@ impl App {
                 } else {
                     dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into())
                 };
-                let base = if sources.len() == 1 && !sources[0].is_dir() { ops::split_ext(&base).0.to_string() } else { base };
-                self.overlay = Some(Overlay::Osk(Osk::new(tr("Archive name"), &base, OskPurpose::Compress { sources, dir, format })));
+                let name = if sources.len() == 1 && !sources[0].is_dir() { ops::split_ext(&base).0.to_string() } else { base };
+                let mut opts = CompressOpts::new(ArchiveFormat::Zip);
+                if let Some(p) = &self.cfg.compress {
+                    if CompressDlg::formats().contains(&p.format) {
+                        opts.format = p.format;
+                    }
+                    opts.method = p.method;
+                    opts.level = p.level;
+                    opts.split = p.split;
+                    opts.encrypt_names = p.encrypt_names;
+                    opts.fit();
+                }
+                let dlg = CompressDlg { sources, dir, name, opts, row: crow::CREATE, pending_pw: None };
+                self.overlay = Some(Overlay::Compress(Box::new(dlg)));
             }
             Cmd::ExtractHere | Cmd::ExtractOther => {
                 let Some(archive) = self.local_targets().into_iter().next() else { return };

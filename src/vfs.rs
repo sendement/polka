@@ -754,7 +754,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             tree(&dir);
             let out = dir.join(format!("pack{}", f.ext()));
-            wait(&ops::spawn(Op::Compress { sources: vec![dir.join("src")], out: out.clone(), format: f }, || {}));
+            wait(&ops::spawn(Op::Compress { sources: vec![dir.join("src")], out: out.clone(), opts: ops::CompressOpts::new(f) }, || {}));
 
             // Browse it like a folder.
             let root = list(&Location::Archive { archive: out.clone(), inner: String::new() }).unwrap();
@@ -877,6 +877,85 @@ mod password_tests {
             extract(a, &["src/sub".into()], &d, |_| true).unwrap();
             assert_eq!(std::fs::read_to_string(d.join("sub/b.txt")).unwrap(), "deep", "{a:?}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn compress(sources: Vec<PathBuf>, out: &Path, opts: crate::ops::CompressOpts) {
+        let job = crate::ops::spawn(crate::ops::Op::Compress { sources, out: out.to_path_buf(), opts }, || {});
+        while job.finished_at.lock().unwrap().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        if let Some(Err(e)) = job.result.lock().unwrap().as_ref() {
+            panic!("compress {out:?}: {e}");
+        }
+    }
+
+    /// Archives made with the dialog's options read back.
+    #[test]
+    fn created_with_options() {
+        use crate::ops::{ArchiveFormat as F, CompressOpts, Level, Method};
+        let dir = std::env::temp_dir().join(format!("polka-mk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join("src/a.txt"), "secret").unwrap();
+        // Incompressible, so splitting makes several volumes.
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<u8> = (0..300_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect();
+        std::fs::write(dir.join("src/sub/noise.bin"), &noise).unwrap();
+        let src = vec![dir.join("src")];
+        let have7z = crate::ops::have_7z();
+        let mut cases: Vec<(&str, CompressOpts)> = Vec::new();
+        for (name, m, l) in [("deflate.zip", Method::Deflate, Level::Max), ("bz.zip", Method::Bzip2, Level::Fast), ("zstd.zip", Method::Zstd, Level::Normal), ("store.zip", Method::Deflate, Level::Store)] {
+            cases.push((name, CompressOpts { method: m, level: l, ..CompressOpts::new(F::Zip) }));
+        }
+        cases.push(("aes.zip", CompressOpts { password: Some("q w".into()), ..CompressOpts::new(F::Zip) }));
+        cases.push(("fast.tar.zst", CompressOpts { level: Level::Fast, ..CompressOpts::new(F::TarZst) }));
+        if have7z {
+            cases.push(("ppmd.7z", CompressOpts { method: Method::Ppmd, ..CompressOpts::new(F::SevenZ) }));
+            cases.push(("store.7z", CompressOpts { level: Level::Store, ..CompressOpts::new(F::SevenZ) }));
+            cases.push(("pw.7z", CompressOpts { password: Some("q w".into()), ..CompressOpts::new(F::SevenZ) }));
+            cases.push(("hidden.7z", CompressOpts { password: Some("q w".into()), encrypt_names: true, ..CompressOpts::new(F::SevenZ) }));
+        }
+        for (name, opts) in cases {
+            let a = dir.join(name);
+            compress(src.clone(), &a, opts.clone());
+            if opts.password.is_some() {
+                assert_eq!(needs(read(&a, "src/a.txt")), Some(false), "{name} must be encrypted");
+                set_password(&a, "q w");
+            }
+            assert_eq!(read(&a, "src/a.txt").unwrap(), "secret", "{name}");
+            let d = dir.join(format!("x-{name}"));
+            std::fs::create_dir_all(&d).unwrap();
+            extract(&a, &["src/sub/noise.bin".into()], &d, |_| true).unwrap();
+            assert_eq!(std::fs::read(d.join("noise.bin")).unwrap(), noise, "{name}");
+        }
+
+        // Volumes: 100 KiB parts that join back into the archive.
+        let a = dir.join("split.tar.zst");
+        compress(src.clone(), &a, CompressOpts { split: Some(100 * 1024), ..CompressOpts::new(F::TarZst) });
+        assert!(!a.exists());
+        let parts: Vec<PathBuf> = (1..10).map(|n| crate::ops::volume_path(&a, n)).take_while(|p| p.exists()).collect();
+        assert!(parts.len() >= 3, "{parts:?}");
+        assert!(parts[..parts.len() - 1].iter().all(|p| std::fs::metadata(p).unwrap().len() == 100 * 1024));
+        let joined: Vec<u8> = parts.iter().flat_map(|p| std::fs::read(p).unwrap()).collect();
+        std::fs::write(&a, joined).unwrap();
+        assert_eq!(read(&a, "src/a.txt").unwrap(), "secret");
+        if have7z {
+            // 7-Zip opens the first volume directly.
+            let out = std::process::Command::new("7z").args(["l", "-ba"]).arg(&parts[0]).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        // Small archives aren't split at all.
+        let a = dir.join("small.zip");
+        compress(vec![dir.join("src/a.txt")], &a, CompressOpts { split: Some(100 * 1024), ..CompressOpts::new(F::Zip) });
+        assert!(a.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -50,6 +50,17 @@ pub struct Config {
     pub side_icon: f32,
     pub list_icon: f32,
     pub grid_icon: f32,
+    /// Last archive settings (never the password).
+    pub compress: Option<CompressPrefs>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompressPrefs {
+    pub format: crate::ops::ArchiveFormat,
+    pub method: crate::ops::Method,
+    pub level: crate::ops::Level,
+    pub split: Option<u64>,
+    pub encrypt_names: bool,
 }
 
 pub const SIDE_ICON: (f32, f32, f32) = (16.0, 48.0, 2.0);
@@ -99,6 +110,7 @@ impl Default for Config {
             side_icon: 20.0,
             list_icon: 22.0,
             grid_icon: 56.0,
+            compress: None,
         }
     }
 }

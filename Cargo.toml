@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -16,7 +16,7 @@ freedesktop-icons = "0.4"
 freedesktop-desktop-entry = "0.8"
 pelite = "0.10"
 trash = "5"
-zip = { version = "9", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate", "bzip2", "zstd", "aes-crypto"] }
 tar = "0.4"
 flate2 = "1"
 zstd = { version = "0.14", features = ["zstdmt", "pkg-config"] }

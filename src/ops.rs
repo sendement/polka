@@ -13,23 +13,129 @@ use crate::archive_rw::{self, Plan};
 use crate::i18n::tr;
 use crate::vfs::{self, Dest, Location};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArchiveFormat {
     Zip,
+    SevenZ,
     TarZst,
     TarGz,
     TarXz,
 }
 
 impl ArchiveFormat {
-    pub const ALL: [ArchiveFormat; 4] =
-        [ArchiveFormat::Zip, ArchiveFormat::TarZst, ArchiveFormat::TarGz, ArchiveFormat::TarXz];
+    pub const ALL: [ArchiveFormat; 5] =
+        [ArchiveFormat::Zip, ArchiveFormat::SevenZ, ArchiveFormat::TarZst, ArchiveFormat::TarGz, ArchiveFormat::TarXz];
     pub fn ext(self) -> &'static str {
         match self {
             ArchiveFormat::Zip => ".zip",
+            ArchiveFormat::SevenZ => ".7z",
             ArchiveFormat::TarZst => ".tar.zst",
             ArchiveFormat::TarGz => ".tar.gz",
             ArchiveFormat::TarXz => ".tar.xz",
+        }
+    }
+    /// Compression algorithms to choose from; tarballs are named after theirs.
+    pub fn methods(self) -> &'static [Method] {
+        match self {
+            ArchiveFormat::Zip => &[Method::Deflate, Method::Bzip2, Method::Zstd],
+            ArchiveFormat::SevenZ => &[Method::Lzma2, Method::Lzma, Method::Ppmd, Method::Bzip2, Method::Deflate],
+            _ => &[],
+        }
+    }
+    pub fn levels(self) -> &'static [Level] {
+        match self {
+            ArchiveFormat::Zip | ArchiveFormat::SevenZ => &[Level::Store, Level::Fast, Level::Normal, Level::Max],
+            _ => &[Level::Fast, Level::Normal, Level::Max],
+        }
+    }
+    pub fn encrypts(self) -> bool {
+        matches!(self, ArchiveFormat::Zip | ArchiveFormat::SevenZ)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Method {
+    Deflate,
+    Bzip2,
+    Zstd,
+    Lzma2,
+    Lzma,
+    Ppmd,
+}
+
+impl Method {
+    pub fn label(self) -> &'static str {
+        match self {
+            Method::Deflate => "Deflate",
+            Method::Bzip2 => "BZip2",
+            Method::Zstd => "Zstandard",
+            Method::Lzma2 => "LZMA2",
+            Method::Lzma => "LZMA",
+            Method::Ppmd => "PPMd",
+        }
+    }
+    fn seven_z(self) -> &'static str {
+        match self {
+            Method::Deflate => "Deflate",
+            Method::Bzip2 => "BZip2",
+            Method::Zstd | Method::Lzma2 => "LZMA2",
+            Method::Lzma => "LZMA",
+            Method::Ppmd => "PPMd",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Level {
+    Store,
+    Fast,
+    Normal,
+    Max,
+}
+
+impl Level {
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Store => tr("No compression"),
+            Level::Fast => tr("Fast"),
+            Level::Normal => tr("Normal"),
+            Level::Max => tr("Maximum"),
+        }
+    }
+}
+
+/// How to build a new archive.
+#[derive(Clone, Debug)]
+pub struct CompressOpts {
+    pub format: ArchiveFormat,
+    pub method: Method,
+    pub level: Level,
+    /// Volume size in bytes: the result is cut into `name.001`, `name.002`…
+    pub split: Option<u64>,
+    pub password: Option<String>,
+    /// 7z only: hide file names too.
+    pub encrypt_names: bool,
+}
+
+impl CompressOpts {
+    pub fn new(format: ArchiveFormat) -> Self {
+        CompressOpts { format, method: format.methods().first().copied().unwrap_or(Method::Deflate), level: Level::Normal, split: None, password: None, encrypt_names: false }
+    }
+
+    /// Bring method/level/password in line with the format.
+    pub fn fit(&mut self) {
+        let f = self.format;
+        if !f.methods().is_empty() && !f.methods().contains(&self.method) {
+            self.method = f.methods()[0];
+        }
+        if !f.levels().contains(&self.level) {
+            self.level = Level::Fast;
+        }
+        if !f.encrypts() {
+            self.password = None;
+        }
+        if f != ArchiveFormat::SevenZ {
+            self.encrypt_names = false;
         }
     }
 }
@@ -95,7 +201,7 @@ pub enum Op {
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Trash { paths: Vec<PathBuf> },
     Delete { paths: Vec<PathBuf> },
-    Compress { sources: Vec<PathBuf>, out: PathBuf, format: ArchiveFormat },
+    Compress { sources: Vec<PathBuf>, out: PathBuf, opts: CompressOpts },
     Extract { archive: PathBuf, dest: PathBuf },
     /// Delete / rename / mkdir inside an archive.
     ArchiveEdit { archive: PathBuf, plan: Plan, label: &'static str },
@@ -170,7 +276,7 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             }
             Ok(())
         }
-        Op::Compress { sources, out, format } => compress(&sources, &out, format, job),
+        Op::Compress { sources, out, opts } => compress(&sources, &out, &opts, job),
         Op::Extract { archive, dest } => extract_all(&archive, &dest, job),
         Op::ArchiveEdit { archive, plan, .. } => {
             job.total.store(archive_rw::estimate(&archive, &plan), Ordering::Relaxed);
@@ -544,7 +650,7 @@ fn walk(root: &Path, base: &Path, out: &mut Vec<(PathBuf, String)>) {
     }
 }
 
-fn compress(sources: &[PathBuf], out: &Path, format: ArchiveFormat, job: &Job) -> io::Result<()> {
+fn compress(sources: &[PathBuf], out: &Path, opts: &CompressOpts, job: &Job) -> io::Result<()> {
     job.total.store(sources.iter().map(|s| tree_size(s)).sum(), Ordering::Relaxed);
     let mut items = Vec::new();
     for s in sources {
@@ -555,35 +661,168 @@ fn compress(sources: &[PathBuf], out: &Path, format: ArchiveFormat, job: &Job) -
         ".{}.part",
         out.file_name().unwrap_or_default().to_string_lossy()
     ));
+    let lvl = |fast: i32, normal: i32, max: i32| match opts.level {
+        Level::Store => 0,
+        Level::Fast => fast,
+        Level::Normal => normal,
+        Level::Max => max,
+    };
     let r = (|| -> io::Result<()> {
+        if opts.format == ArchiveFormat::SevenZ {
+            return compress_7z(sources, &tmp, opts, job);
+        }
         let file = File::create(&tmp)?;
-        match format {
-            ArchiveFormat::Zip => write_zip(file, &items, job),
+        match opts.format {
+            ArchiveFormat::Zip => write_zip(file, &items, opts, job),
             ArchiveFormat::TarGz => {
-                let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+                let enc = flate2::write::GzEncoder::new(file, flate2::Compression::new(lvl(1, 6, 9) as u32));
                 write_tar(enc, &items, job)?.finish()?;
                 Ok(())
             }
             ArchiveFormat::TarXz => {
-                let enc = xz2::write::XzEncoder::new(file, 6);
+                let enc = xz2::write::XzEncoder::new(file, lvl(1, 6, 9) as u32);
                 write_tar(enc, &items, job)?.finish()?;
                 Ok(())
             }
             ArchiveFormat::TarZst => {
-                let mut enc = zstd::Encoder::new(file, 6)?;
+                let mut enc = zstd::Encoder::new(file, lvl(1, 6, 19))?;
                 let _ = enc.multithread(std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
                 write_tar(enc, &items, job)?.finish()?;
                 Ok(())
             }
+            ArchiveFormat::SevenZ => unreachable!(),
         }
     })();
-    match r {
-        Ok(()) => std::fs::rename(&tmp, out),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
+    let r = r.and_then(|()| match opts.split {
+        Some(size) if std::fs::metadata(&tmp)?.len() > size => split_volumes(&tmp, out, size),
+        _ => std::fs::rename(&tmp, out),
+    });
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
+
+/// Whether the `7z` tool is on PATH (needed to create 7z archives).
+pub fn have_7z() -> bool {
+    static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAVE.get_or_init(|| {
+        std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("7z").is_file()))
+    })
+}
+
+/// Volume `n` (1-based) of a split archive: `name.7z.001`.
+pub fn volume_path(out: &Path, n: usize) -> PathBuf {
+    let mut s = out.as_os_str().to_owned();
+    s.push(format!(".{n:03}"));
+    PathBuf::from(s)
+}
+
+/// Cut `tmp` into `out.001`, `out.002`… (the layout 7-Zip and others read).
+fn split_volumes(tmp: &Path, out: &Path, size: u64) -> io::Result<()> {
+    let mut src = File::open(tmp)?;
+    let mut made = Vec::new();
+    let r = (|| {
+        for n in 1.. {
+            let path = volume_path(out, n);
+            let mut part = File::create(&path)?;
+            made.push(path);
+            let copied = io::copy(&mut (&mut src).take(size), &mut part)?;
+            if copied < size {
+                if copied == 0 && n > 1 {
+                    let _ = std::fs::remove_file(made.pop().unwrap());
+                }
+                break;
+            }
+        }
+        std::fs::remove_file(tmp)
+    })();
+    if r.is_err() {
+        for p in made {
+            let _ = std::fs::remove_file(p);
         }
     }
+    r
+}
+
+/// 7z archives are made by the `7z` tool (libarchive can't encrypt them).
+fn compress_7z(sources: &[PathBuf], tmp: &Path, opts: &CompressOpts, job: &Job) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mx = match opts.level {
+        Level::Store => 0,
+        Level::Fast => 1,
+        Level::Normal => 5,
+        Level::Max => 9,
+    };
+    let mut cmd = Command::new("7z");
+    cmd.args(["a", "-t7z", "-y", "-snl", "-bsp1", "-bso0", "-bse1"]).arg(format!("-mx={mx}"));
+    if opts.level != Level::Store {
+        cmd.arg(format!("-m0={}", opts.method.seven_z()));
+    }
+    if let Some(pw) = &opts.password {
+        cmd.arg(format!("-p{pw}"));
+        if opts.encrypt_names {
+            cmd.arg("-mhe=on");
+        }
+    }
+    cmd.arg(tmp).arg("--").args(sources);
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| io::Error::other(format!("7z: {e} ({})", tr("install 7zip to create 7z archives"))))?;
+    // Progress comes as "  42% 3 + name" redrawn with backspaces.
+    let total = job.total.load(Ordering::Relaxed);
+    let mut stdout = child.stdout.take().unwrap();
+    let err_reader = {
+        let mut stderr = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s);
+            s
+        })
+    };
+    std::thread::scope(|sc| {
+        sc.spawn(|| {
+            let mut buf = [0u8; 4096];
+            let mut digits = String::new();
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for &b in &buf[..n] {
+                    match b {
+                        b'0'..=b'9' => digits.push(b as char),
+                        b'%' => {
+                            if let Ok(pct) = digits.parse::<u64>() {
+                                job.done.store(total * pct.min(100) / 100, Ordering::Relaxed);
+                            }
+                            digits.clear();
+                        }
+                        _ => digits.clear(),
+                    }
+                }
+            }
+        });
+        let status = loop {
+            if job.cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let err = err_reader.join().unwrap_or_default();
+        if !status.success() {
+            let msg = err.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ");
+            return Err(io::Error::other(format!("7z: {}", if msg.is_empty() { "failed".into() } else { msg })));
+        }
+        Ok(())
+    })
 }
 
 fn write_tar<W: Write>(w: W, items: &[(PathBuf, String)], job: &Job) -> io::Result<W> {
@@ -603,24 +842,34 @@ fn write_tar<W: Write>(w: W, items: &[(PathBuf, String)], job: &Job) -> io::Resu
     b.into_inner()
 }
 
-fn write_zip(file: File, items: &[(PathBuf, String)], job: &Job) -> io::Result<()> {
+fn write_zip(file: File, items: &[(PathBuf, String)], opts: &CompressOpts, job: &Job) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use zip::write::SimpleFileOptions;
+    use zip::CompressionMethod as M;
     let mut z = zip::ZipWriter::new(file);
     let zerr = |e: zip::result::ZipError| io::Error::other(e.to_string());
+    let (method, level) = match (opts.level, opts.method) {
+        (Level::Store, _) => (M::Stored, None),
+        (l, Method::Bzip2) => (M::Bzip2, Some(match l { Level::Fast => 1, Level::Max => 9, _ => 6 })),
+        (l, Method::Zstd) => (M::Zstd, Some(match l { Level::Fast => 1, Level::Max => 19, _ => 6 })),
+        (l, _) => (M::Deflated, Some(match l { Level::Fast => 1, Level::Max => 9, _ => 6 })),
+    };
     for (abs, rel) in items {
         let m = abs.symlink_metadata()?;
-        let opts = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
+        let mut o = SimpleFileOptions::default()
             .unix_permissions(m.permissions().mode() & 0o777)
             .large_file(m.len() >= 0xFFFF_FFFF);
         if m.is_dir() {
-            z.add_directory(rel.as_str(), opts).map_err(zerr)?;
+            z.add_directory(rel.as_str(), o).map_err(zerr)?;
         } else if m.file_type().is_symlink() {
             let target = std::fs::read_link(abs)?;
-            z.add_symlink(rel.as_str(), target.to_string_lossy().as_ref(), opts).map_err(zerr)?;
+            z.add_symlink(rel.as_str(), target.to_string_lossy().as_ref(), o).map_err(zerr)?;
         } else {
-            z.start_file(rel.as_str(), opts).map_err(zerr)?;
+            o = o.compression_method(method).compression_level(level);
+            if let Some(pw) = &opts.password {
+                o = o.with_aes_encryption(zip::AesMode::Aes256, pw);
+            }
+            z.start_file(rel.as_str(), o).map_err(zerr)?;
             io::copy(&mut Counting { inner: File::open(abs)?, job }, &mut z)?;
         }
     }
@@ -714,7 +963,7 @@ mod tests {
             } else {
                 let fmt = ArchiveFormat::ALL.into_iter().find(|f| f.ext() == ext).unwrap();
                 let srcs = vec![dir.join("seed/a.txt"), dir.join("seed/sub")];
-                run_op(Op::Compress { sources: srcs, out: a.clone(), format: fmt });
+                run_op(Op::Compress { sources: srcs, out: a.clone(), opts: CompressOpts::new(fmt) });
             }
             let magic = |p: &Path| std::fs::read(p).unwrap()[..4].to_vec();
             let before = magic(&a);

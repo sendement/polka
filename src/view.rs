@@ -492,6 +492,12 @@ impl App {
                 (Action::Actions, tr("Delete color")),
                 (Action::Back, tr("Close")),
             ],
+            Some(Overlay::Compress(_)) => vec![
+                (Action::Left, tr("Adjust")),
+                (Action::Accept, tr("OK")),
+                (Action::Menu, tr("Create")),
+                (Action::Back, tr("Cancel")),
+            ],
             Some(Overlay::IconPicker(_)) => vec![
                 (Action::PrevTab, tr("Color")),
                 (Action::Accept, tr("OK")),
@@ -722,6 +728,7 @@ impl App {
         let mut osk_key: Option<OskKey> = None;
         let mut dismiss = false;
         let mut settings_ev: Option<SettingsEvent> = None;
+        let mut compress_ev: Option<(usize, isize)> = None;
         let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
         egui::Area::new("overlay".into())
             .order(Order::Foreground)
@@ -735,6 +742,7 @@ impl App {
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Settings(st)) => settings_ev = draw_settings(ui, st, cfg, icons),
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
+                    Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
                     None => {}
                 });
             });
@@ -753,6 +761,14 @@ impl App {
         }
         if let Some(ev) = settings_ev {
             self.settings_event(ev);
+        }
+        if let Some((row, d)) = compress_ev {
+            if d == 0 {
+                self.compress_activate(row);
+            } else if let Some(Overlay::Compress(dlg)) = self.overlay.as_mut() {
+                dlg.row = row;
+                dlg.step(row, d);
+            }
         }
     }
 }
@@ -1825,13 +1841,107 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
         let name = names.get(p.cursor).cloned().unwrap_or_default();
         ui.label(egui::RichText::new(name).monospace().weak());
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            // Right to left: each button, then its gamepad glyph before it.
             if ui.button(tr("Reset")).clicked() {
                 run = Some(Cmd::SetPinIcon(p.path.clone(), None));
             }
+            glyph(ui, Action::Select, pad);
+            ui.add_space(8.0);
             if ui.button(tr("Own picture…")).clicked() {
                 run = Some(Cmd::PickIconFile(p.path.clone()));
             }
+            glyph(ui, Action::Actions, pad);
         });
     });
     run
+}
+
+// ---------------------------------------------------------------- archive dialog
+
+/// Returns (row, 0) for a click on a row, (row, ±1) for its arrows.
+fn draw_compress(ui: &mut Ui, d: &crate::app::CompressDlg, pad: PadKind) -> Option<(usize, isize)> {
+    use crate::app::crow;
+    use crate::ops::ArchiveFormat as F;
+    let mut ev = None;
+    let v = ui.visuals().clone();
+    let font = FontId::proportional(15.0);
+    ui.label(egui::RichText::new(tr("New archive")).strong().size(18.0));
+    ui.add_space(8.0);
+    ui.spacing_mut().item_spacing.y = 4.0;
+    let o = &d.opts;
+    let method = match o.format {
+        F::TarZst => "Zstandard".to_string(),
+        F::TarGz => "Deflate (gzip)".to_string(),
+        F::TarXz => "LZMA2 (xz)".to_string(),
+        _ => o.method.label().to_string(),
+    };
+    let password = match &o.password {
+        _ if !o.format.encrypts() => tr("zip and 7z only").to_string(),
+        None => tr("None").to_string(),
+        Some(p) => {
+            let dots = "•".repeat(p.chars().count().min(12));
+            if o.format == F::Zip { format!("{dots}  AES-256") } else { dots }
+        }
+    };
+    let rows: [(usize, &str, String, bool); 7] = [
+        (crow::NAME, tr("Name"), format!("{}{}", d.name, o.format.ext()), false),
+        (crow::FORMAT, tr("Format"), o.format.ext().trim_start_matches('.').to_string(), true),
+        (crow::METHOD, tr("Method"), method, true),
+        (crow::LEVEL, tr("Compression"), o.level.label().to_string(), true),
+        (crow::SPLIT, tr("Split into volumes"), crate::app::split_label(o.split), true),
+        (crow::PASSWORD, tr("Password"), password, false),
+        (crow::NAMES, tr("Encrypt file names"), String::new(), false),
+    ];
+    for (r_i, label, value, arrows) in rows {
+        let on = d.enabled(r_i);
+        let (rect, r) = settings_row(ui, 44.0, d.row == r_i, ("compress", r_i));
+        if on && r.clicked() {
+            ev = Some((r_i, 0));
+        }
+        let (text, strong) = if on { (v.text_color(), v.strong_text_color()) } else { (v.weak_text_color(), v.weak_text_color()) };
+        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, font.clone(), text);
+        if r_i == crow::NAMES {
+            let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+            ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, strong), StrokeKind::Inside);
+            if o.encrypt_names && on {
+                ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), strong);
+            }
+            continue;
+        }
+        if arrows && on {
+            let right = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(30.0));
+            let left = Rect::from_center_size(pos2(rect.max.x - 216.0, rect.center().y), Vec2::splat(30.0));
+            for (b, t, step) in [(left, "◀", -1), (right, "▶", 1)] {
+                let br = ui.interact(b, ui.id().with(("cstep", r_i, step)), Sense::click());
+                ui.painter().rect(b, 6.0, if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill }, Stroke::NONE, StrokeKind::Inside);
+                ui.painter().text(b.center(), Align2::CENTER_CENTER, t, FontId::proportional(13.0), v.text_color());
+                if br.clicked() {
+                    ev = Some((r_i, step));
+                }
+            }
+            ui.painter().text(pos2((left.max.x + right.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, value, font.clone(), strong);
+        } else {
+            ui.painter().text(pos2(rect.max.x - 14.0, rect.center().y), Align2::RIGHT_CENTER, value, font.clone(), if on { strong } else { text });
+        }
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        for (i, label, g) in [(crow::CREATE, tr("Create"), Action::Menu), (crow::CANCEL, tr("Cancel"), Action::Back)] {
+            let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
+            let focused = d.row == i;
+            let fill = if focused { v.selection.bg_fill.gamma_multiply(0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+            ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
+            let gal = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), v.text_color());
+            let w = gal.size().x + 26.0;
+            let x0 = rect.center().x - w / 2.0;
+            let gr = Rect::from_min_size(pos2(x0, rect.center().y - 10.0), Vec2::splat(20.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(gr));
+            glyph(&mut child, g, pad);
+            ui.painter().galley(pos2(x0 + 26.0, rect.center().y - gal.size().y / 2.0), gal, v.text_color());
+            if r.clicked() {
+                ev = Some((i, 0));
+            }
+        }
+    });
+    ev
 }
