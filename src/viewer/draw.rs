@@ -36,7 +36,7 @@ fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool
     let vis = ui.visuals().clone();
     let resp = ui.interact(r, ui.id().with(("viewer-btn", label, r.min.x as i32, r.min.y as i32)), Sense::click()).on_hover_text(tip);
     if on {
-        ui.painter().rect_filled(r, 6.0, vis.selection.bg_fill.gamma_multiply(0.45));
+        ui.painter().rect_filled(r, 6.0, crate::view::tint(&vis, 0.45));
     } else if resp.hovered() {
         ui.painter().rect_filled(r, 6.0, vis.widgets.hovered.weak_bg_fill);
     }
@@ -471,7 +471,7 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
         sa = sa.scroll_offset(s);
     }
     let sel = t.ed.selection();
-    let sel_c = ui.visuals().selection.bg_fill.gamma_multiply(0.55);
+    let sel_c = crate::view::tint(ui.visuals(), 0.55);
     let match_c = Color32::from_rgba_unmultiplied(0xe5, 0xb5, 0x3a, 70);
     let current_c = Color32::from_rgba_unmultiplied(0xff, 0x9f, 0x1a, 150);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
@@ -731,7 +731,7 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
     for (r_i, label, value, arrows) in rows {
         let (rect, r) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
         if st.row == r_i {
-            ui.painter().rect(rect, 8.0, vis.selection.bg_fill.gamma_multiply(0.25), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
+            ui.painter().rect(rect, 8.0, crate::view::tint(&vis, 0.25), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
         } else if r.hovered() {
             ui.painter().rect_filled(rect, 8.0, vis.widgets.hovered.weak_bg_fill.gamma_multiply(0.5));
         }
@@ -765,7 +765,7 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
     }
     // Preview in the chosen theme and font.
     ui.add_space(6.0);
-    let theme = super::theme::by_name(&prefs.theme);
+    let theme = super::theme::resolve(&prefs.theme, ui.visuals().dark_mode);
     let font = viewer_font(prefs.font_size);
     let no = std::sync::atomic::AtomicUsize::new(0);
     let spans = super::syntax::highlight("Rust", SAMPLE, &no).unwrap_or_default();
@@ -791,7 +791,7 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
     ui.add_space(6.0);
     let (rect, r) = ui.allocate_exact_size(vec2(w, 38.0), Sense::click());
     let focused = st.row == vrow::CLOSE;
-    let fill = if focused { vis.selection.bg_fill.gamma_multiply(0.5) } else if r.hovered() { vis.widgets.hovered.weak_bg_fill } else { vis.widgets.inactive.weak_bg_fill };
+    let fill = if focused { crate::view::tint(&vis, 0.5) } else if r.hovered() { vis.widgets.hovered.weak_bg_fill } else { vis.widgets.inactive.weak_bg_fill };
     ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, vis.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("Close"), FontId::proportional(15.0), vis.text_color());
     if r.clicked() {

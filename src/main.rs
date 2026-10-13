@@ -1,4 +1,5 @@
 mod app;
+mod appearance;
 mod archive_rw;
 mod config;
 mod fonts;
@@ -7,6 +8,7 @@ mod icons;
 mod input;
 mod launch;
 mod locks;
+mod mouse;
 mod ops;
 mod thumbs;
 mod usage;
@@ -35,6 +37,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             fonts::install(&cc.egui_ctx);
+            appearance::watch(cc.egui_ctx.clone());
             let mut app = app::App::new(cc.egui_ctx.clone(), start);
             use raw_window_handle::HasDisplayHandle;
             app.sys_clip = Some(egui_winit::clipboard::Clipboard::new(cc.display_handle().ok().map(|h| h.as_raw())));

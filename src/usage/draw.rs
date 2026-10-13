@@ -68,7 +68,7 @@ fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool
     let vis = ui.visuals().clone();
     let resp = ui.interact(r, ui.id().with(("usage-btn", label)), Sense::click()).on_hover_text(tip);
     if on {
-        ui.painter().rect_filled(r, 6.0, vis.selection.bg_fill.gamma_multiply(0.45));
+        ui.painter().rect_filled(r, 6.0, crate::view::tint(&vis, 0.45));
     } else if resp.hovered() {
         ui.painter().rect_filled(r, 6.0, vis.widgets.hovered.weak_bg_fill);
     }

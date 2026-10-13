@@ -89,6 +89,17 @@ pub fn presets() -> Vec<Theme> {
     ]
 }
 
+/// The theme to draw with: "Polka" follows the app into its light look.
+pub fn resolve(name: &str, dark: bool) -> Theme {
+    if name == "Polka" && !dark {
+        let mut t = theme!("Polka"; 0xfbfbfb, 0x24292f, 0x9a9a9a, 0xeef1f4;
+            0x6e7781, 0x0b62b8, 0xa04d00, 0x7a3fc4, 0x0f7a60, 0x066a8e, 0xc0254a, 0x3a5f88, 0x4f6575, 0x5f6368, 0x0b62b8, 0x8a6400, 0x066a8e, 0x0b62b8, 0xb05a00, 0x1a7f37, 0xc0254a, 0x0f7a60);
+        t.name = "Polka";
+        return t;
+    }
+    by_name(name)
+}
+
 pub fn by_name(name: &str) -> Theme {
     let all = presets();
     all.iter().find(|t| t.name == name).cloned().unwrap_or_else(|| all[0].clone())

@@ -49,6 +49,10 @@ pub struct Pane {
     pub volumes: HashMap<String, crate::volumes::Member>,
     /// Volume set under the mouse in the last frame.
     pub hover_volume: Option<String>,
+    /// A selection rectangle being drawn with the mouse.
+    pub band: Option<crate::mouse::Band>,
+    /// Entries drawn last frame: (index, row, icon and name), for tests.
+    pub drawn: Vec<(usize, egui::Rect, egui::Rect)>,
     /// Show each volume set as one item (until pointed at).
     pub collapse: bool,
     /// Sets shown open now (under the mouse / cursor).
@@ -80,6 +84,8 @@ impl Pane {
             page_rows: 10,
             volumes: HashMap::new(),
             hover_volume: None,
+            band: None,
+            drawn: Vec::new(),
             collapse: cfg.collapse_volumes,
             expanded: Vec::new(),
             collapsed: HashMap::new(),
@@ -869,18 +875,19 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 10;
+pub const SETTINGS_ROWS: usize = 11;
 pub mod row {
     pub const ACCENT: usize = 0;
-    pub const SIDE_ICON: usize = 1;
-    pub const LIST_ICON: usize = 2;
-    pub const GRID_ICON: usize = 3;
-    pub const ZOOM: usize = 4;
-    pub const THEME: usize = 5;
-    pub const OPEN_IN: usize = 6;
-    pub const VOLUMES: usize = 7;
-    pub const WEB_IMAGES: usize = 8;
-    pub const CLOSE: usize = 9;
+    pub const APPEARANCE: usize = 1;
+    pub const SIDE_ICON: usize = 2;
+    pub const LIST_ICON: usize = 3;
+    pub const GRID_ICON: usize = 4;
+    pub const ZOOM: usize = 5;
+    pub const THEME: usize = 6;
+    pub const OPEN_IN: usize = 7;
+    pub const VOLUMES: usize = 8;
+    pub const WEB_IMAGES: usize = 9;
+    pub const CLOSE: usize = 10;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1053,6 +1060,10 @@ pub struct App {
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
+    /// Items being dragged with the mouse.
+    pub drag: Option<crate::mouse::Drag>,
+    /// Light/dark last set on the context.
+    pub dark_applied: Option<bool>,
     /// Template folders for the "New document" submenus.
     pub templates: Vec<PathBuf>,
 }
@@ -1115,6 +1126,8 @@ impl App {
             edit_hold: None,
             text_clip: None,
             sys_clip: None,
+            dark_applied: None,
+            drag: None,
             templates: Vec::new(),
         };
         app.refresh_sidebar();
@@ -1140,6 +1153,17 @@ impl App {
         if t.active == 0 { (a, b) } else { (b, a) }
     }
 
+    /// Light or dark as chosen (or as the desktop is, which may change).
+    pub fn apply_appearance(&mut self) {
+        let dark = crate::appearance::is_dark(self.cfg.appearance);
+        if self.dark_applied != Some(dark) {
+            self.dark_applied = Some(dark);
+            self.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
+            self.icons.set_dark(dark);
+            apply_accent(&self.ctx, &self.cfg);
+        }
+    }
+
     pub fn toast(&mut self, s: impl Into<String>, err: bool) {
         self.toast = Some((s.into(), err, Instant::now()));
     }
@@ -1147,6 +1171,7 @@ impl App {
     // ------------------------------------------------------------ per frame
 
     pub fn tick(&mut self) {
+        self.apply_appearance();
         self.tick_audio();
         self.tick_usage();
         let cfg = self.cfg.clone();
@@ -2308,6 +2333,7 @@ impl App {
                         self.settings_toggle_open(chip);
                     }
                     row::VOLUMES | row::WEB_IMAGES => self.settings_step(row, 0.0),
+                    row::APPEARANCE => self.settings_step(row, 1.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
                 }
@@ -2448,6 +2474,11 @@ impl App {
                 }
                 return;
             }
+            row::APPEARANCE => {
+                self.cfg.appearance = (self.cfg.appearance as isize + d as isize).rem_euclid(3) as u8;
+                self.cfg.save();
+                self.apply_appearance();
+            }
             row::WEB_IMAGES => {
                 self.cfg.viewer.web_images = !self.cfg.viewer.web_images;
                 self.cfg.save();
@@ -2563,7 +2594,7 @@ impl App {
     }
 
     /// Copy/move, asking first if names clash at the destination.
-    fn request_transfer(&mut self, sources: Vec<Location>, dest: Dest, mv: bool) {
+    pub(crate) fn request_transfer(&mut self, sources: Vec<Location>, dest: Dest, mv: bool) {
         if sources.is_empty() {
             return;
         }

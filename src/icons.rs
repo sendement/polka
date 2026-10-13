@@ -9,7 +9,11 @@ use std::sync::{Arc, Mutex};
 use crate::vfs::Entry;
 
 pub struct Icons {
+    /// The theme in use: the chosen one, or its light/dark sibling.
     theme: String,
+    /// The theme as chosen (or detected).
+    chosen: String,
+    dark: bool,
     /// icon name -> resolved uri (None = not found in any theme)
     names: HashMap<String, Option<String>>,
     /// file path -> uri for per-file icons (.desktop, .exe)
@@ -25,15 +29,19 @@ impl Icons {
     pub fn new(theme: Option<String>, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         let w = wake.clone();
-        Self {
+        let mut icons = Self {
             thumbs: crate::thumbs::Thumbs::new(move || w()),
             thumb_uris: HashSet::new(),
-            theme: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
+            theme: String::new(),
+            chosen: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
+            dark: true,
             names: HashMap::new(),
             files: Default::default(),
             pending: Default::default(),
             wake,
-        }
+        };
+        icons.theme = icons.chosen.clone();
+        icons
     }
 
     /// Thumbnail (uri, width/height) for a real file, if one is ready.
@@ -108,7 +116,15 @@ impl Icons {
 
     /// Switch themes; None follows the desktop's setting.
     pub fn set_theme(&mut self, theme: Option<String>) {
-        self.theme = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
+        self.chosen = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
+        self.theme = variant(&self.chosen, self.dark);
+    }
+
+    /// Light or dark look: themes that come in both (Papirus-Dark /
+    /// Papirus, breeze-dark / breeze) switch to the matching one.
+    pub fn set_dark(&mut self, dark: bool) {
+        self.dark = dark;
+        self.theme = variant(&self.chosen, dark);
     }
 
     fn lookup(&mut self, name: &str, size: u16) -> Option<String> {
@@ -329,6 +345,23 @@ fn icon_roots() -> Vec<PathBuf> {
     let sys = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     roots.extend(sys.split(':').filter(|s| !s.is_empty()).map(|s| Path::new(s).join("icons")));
     roots
+}
+
+/// The installed sibling of `theme` that suits a light or dark look.
+fn variant(theme: &str, dark: bool) -> String {
+    let lower = theme.to_lowercase();
+    let cands: Vec<String> = if dark {
+        match lower.strip_suffix("-light") {
+            Some(_) => vec![theme[..theme.len() - 6].to_string(), format!("{}-Dark", &theme[..theme.len() - 6])],
+            None => Vec::new(),
+        }
+    } else {
+        match lower.strip_suffix("-dark") {
+            Some(_) => vec![theme[..theme.len() - 5].to_string(), format!("{}-Light", &theme[..theme.len() - 5])],
+            None => Vec::new(),
+        }
+    };
+    cands.into_iter().find(|c| !theme_dirs(c).is_empty()).unwrap_or_else(|| theme.to_string())
 }
 
 fn theme_dirs(theme: &str) -> Vec<PathBuf> {

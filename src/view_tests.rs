@@ -1741,3 +1741,261 @@ fn usage_screens() {
     let mut h = harness(dir);
     disk_usage(&mut h);
 }
+
+/// The light look: switched from the settings with the pad, then the main
+/// screens drawn in it.
+fn light_look(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, row};
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    std::fs::write(dir.join("light.rs"), "// A comment\nfn main() {\n    let x = \"text\";\n    println!(\"{x} {}\", 42);\n}\n").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::APPEARANCE;
+    }
+    press(h, &[Action::Right, Action::Right]);
+    assert_eq!(h.state().cfg.appearance, crate::appearance::LIGHT);
+    settle(h);
+    assert!(!(h.state().ctx.theme() == egui::Theme::Dark), "still dark");
+    shot(h, "a0-light-settings");
+    press(h, &[Action::Back]);
+    shot(h, "a1-light-list");
+    h.state_mut().pane_mut().selected.insert("note.txt".into());
+    press(h, &[Action::Actions]);
+    shot(h, "a2-light-menu");
+    press(h, &[Action::Back]);
+    h.state_mut().pane_mut().selected.clear();
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    settle(h);
+    shot(h, "a3-light-grid");
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "light.rs").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    settle(h);
+    shot(h, "a4-light-text");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::UsageOpen(Some(dir.clone())));
+    for _ in 0..50 {
+        settle(h);
+        if h.state().cur_tab().usage.as_ref().unwrap().ready().is_some() {
+            break;
+        }
+    }
+    shot(h, "a5-light-usage");
+    h.state_mut().run(Cmd::UsageMode(1));
+    settle(h);
+    shot(h, "a6-light-tiles");
+    h.state_mut().run(Cmd::UsageClose);
+    h.state_mut().run(Cmd::UsageMode(0));
+    // Back to dark from the keyboard-free path: a click on the segment.
+    h.state_mut().cfg.appearance = crate::appearance::DARK;
+    h.state_mut().apply_appearance();
+    settle(h);
+    assert!((h.state().ctx.theme() == egui::Theme::Dark));
+}
+
+#[test]
+#[ignore]
+fn light_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    light_look(&mut h);
+}
+
+/// The mouse: a selection rectangle, a click on empty space, dragging onto
+/// a folder (a move), onto an archive with Ctrl (a copy into it) and into
+/// the other pane.
+fn mouse(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("mouse");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("A")).unwrap();
+    std::fs::create_dir_all(dir.join("B")).unwrap();
+    std::fs::write(dir.join("B/keep.txt"), "so B isn't empty\n").unwrap();
+    for i in 1..=6 {
+        std::fs::write(dir.join(format!("f{i}.txt")), format!("file {i}\n")).unwrap();
+    }
+    std::fs::write(dir.join("inner.txt"), "in the box\n").unwrap();
+    let st = std::process::Command::new("tar").arg("czf").arg(dir.join("box.tar.gz")).arg("-C").arg(&dir).arg("inner.txt").status().unwrap();
+    assert!(st.success());
+    std::fs::remove_file(dir.join("inner.txt")).unwrap();
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let rect_of = |h: &Harness<'static, App>, name: &str| {
+        let p = h.state().pane();
+        let i = p.entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("{name} not shown"));
+        let (_, row, hot) = *p.drawn.iter().find(|d| d.0 == i).expect("not drawn");
+        (row, hot)
+    };
+    let press_at = |h: &mut Harness<'static, App>, pos: Pos2, down: bool, m: Modifiers| {
+        h.event(Event::PointerMoved(pos));
+        h.event(Event::ModifiersChanged(m));
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: down, modifiers: m });
+        h.step();
+    };
+    let move_to = |h: &mut Harness<'static, App>, pos: Pos2| {
+        h.event(Event::PointerMoved(pos));
+        h.step();
+    };
+    let (r2, _) = rect_of(h, "f2.txt");
+    // A rectangle from the empty right side of f2 down to f4.
+    let (r4, _) = rect_of(h, "f4.txt");
+    let a = pos2(r2.max.x - 60.0, r2.center().y);
+    let b = pos2(r4.max.x - 200.0, r4.center().y);
+    press_at(h, a, true, Modifiers::NONE);
+    move_to(h, a + vec2(10.0, 10.0));
+    move_to(h, b);
+    move_to(h, b);
+    shot(h, "b0-band");
+    press_at(h, b, false, Modifiers::NONE);
+    let mut sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+    sel.sort();
+    assert_eq!(sel, ["f2.txt", "f3.txt", "f4.txt"]);
+    // A click on empty space below the entries clears it.
+    let (last, _) = rect_of(h, "f6.txt");
+    let empty = pos2(last.center().x, last.max.y + 60.0);
+    press_at(h, empty, true, Modifiers::NONE);
+    press_at(h, empty, false, Modifiers::NONE);
+    settle(h);
+    assert!(h.state().pane().selected.is_empty(), "click on empty space");
+
+    // f1 by its name onto folder A: moved (same disk).
+    let (_, hot1) = rect_of(h, "f1.txt");
+    let (ra, _) = rect_of(h, "A");
+    press_at(h, hot1.center(), true, Modifiers::NONE);
+    move_to(h, hot1.center() + vec2(8.0, 8.0));
+    move_to(h, ra.center());
+    move_to(h, ra.center());
+    assert!(h.state().drag.is_some(), "drag did not start");
+    shot(h, "b1-drag-onto-folder");
+    press_at(h, ra.center(), false, Modifiers::NONE);
+    wait_jobs(h);
+    assert!(dir.join("A/f1.txt").exists() && !dir.join("f1.txt").exists(), "not moved");
+    assert!(h.state().drag.is_none());
+    // f5 with Ctrl onto the archive: copied into it.
+    settle(h);
+    let (_, hot5) = rect_of(h, "f5.txt");
+    let (rbox, _) = rect_of(h, "box.tar.gz");
+    press_at(h, hot5.center(), true, Modifiers::NONE);
+    move_to(h, hot5.center() + vec2(8.0, 8.0));
+    move_to(h, rbox.center());
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND));
+    move_to(h, rbox.center());
+    shot(h, "b2-drag-onto-archive");
+    press_at(h, rbox.center(), false, Modifiers::COMMAND);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    wait_jobs(h);
+    assert!(dir.join("f5.txt").exists(), "a copy keeps the file");
+    let listed = std::process::Command::new("tar").arg("tzf").arg(dir.join("box.tar.gz")).output().unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.contains("f5.txt") && listed.contains("inner.txt"), "{listed}");
+    // Two panes: f6 from the left one onto the right one (folder B).
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(h);
+    {
+        let cfg = h.state().cfg.clone();
+        let t = h.state_mut().tab;
+        h.state_mut().tabs[t].panes[1].navigate(Location::Local(dir.join("B")), None, &cfg);
+        h.state_mut().tabs[t].active = 0;
+    }
+    settle(h);
+    // A click in the left pane reaches it (the right pane's background
+    // once covered it).
+    let (r3, _) = rect_of(h, "f3.txt");
+    let t = h.state().tab;
+    h.state_mut().tabs[t].active = 1;
+    press_at(h, r3.center(), true, Modifiers::NONE);
+    press_at(h, r3.center(), false, Modifiers::NONE);
+    assert_eq!(h.state().cur_tab().active, 0);
+    assert_eq!(h.state().pane().current().map(|e| e.name.as_str()), Some("f3.txt"));
+    let (_, hot6) = rect_of(h, "f6.txt");
+    // The right half of the window, below the tabs.
+    let right = pos2(900.0, 400.0);
+    press_at(h, hot6.center(), true, Modifiers::NONE);
+    move_to(h, hot6.center() + vec2(8.0, 8.0));
+    move_to(h, right);
+    move_to(h, right);
+    shot(h, "b3-drag-to-other-pane");
+    press_at(h, right, false, Modifiers::NONE);
+    wait_jobs(h);
+    assert!(dir.join("B/f6.txt").exists() && !dir.join("f6.txt").exists(), "not moved to the other pane");
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(h);
+    // Shift+click: everything from the clicked one to the next.
+    let click = |h: &mut Harness<'static, App>, pos: Pos2, button: PointerButton, m: Modifiers| {
+        h.event(Event::PointerMoved(pos));
+        h.event(Event::ModifiersChanged(m));
+        h.event(Event::PointerButton { pos, button, pressed: true, modifiers: m });
+        h.step();
+        h.event(Event::PointerButton { pos, button, pressed: false, modifiers: m });
+        h.step();
+        h.event(Event::ModifiersChanged(Modifiers::NONE));
+        h.step();
+    };
+    let (r2, _) = rect_of(h, "f2.txt");
+    let (r4, _) = rect_of(h, "f4.txt");
+    click(h, r2.center(), PointerButton::Primary, Modifiers::NONE);
+    click(h, r4.center(), PointerButton::Primary, Modifiers::SHIFT);
+    let mut sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+    sel.sort();
+    assert_eq!(sel, ["f2.txt", "f3.txt", "f4.txt"]);
+    // Middle click: the folder in a new tab, this one stays.
+    let (tabs, here) = (h.state().tabs.len(), h.state().tab);
+    let (ra, _) = rect_of(h, "A");
+    click(h, ra.center(), PointerButton::Middle, Modifiers::NONE);
+    assert_eq!((h.state().tabs.len(), h.state().tab), (tabs + 1, here));
+    assert_eq!(h.state().tabs[tabs].panes[0].loc, Location::Local(dir.join("A")));
+    // A double click: kittest runs a frame per queued event and its clock
+    // jumps between frames, so the four go into one frame directly (well
+    // after the middle click, or egui counts a triple click).
+    settle(h);
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: ra.center(), button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    settle(h);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.join("A")), "double click opens");
+    click(h, ra.center(), PointerButton::Extra1, Modifiers::NONE);
+    settle(h);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.clone()), "back button");
+    // Grid: a rectangle from the empty space after the last item.
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    settle(h);
+    h.state_mut().pane_mut().selected.clear();
+    let (first, _) = rect_of(h, "A");
+    let n = h.state().pane().entries.len();
+    let last_name = h.state().pane().entries[n - 1].name.clone();
+    let (last, _) = rect_of(h, &last_name);
+    let from = pos2(1080.0, last.max.y + 40.0);
+    press_at(h, from, true, Modifiers::NONE);
+    move_to(h, from - vec2(10.0, 10.0));
+    move_to(h, first.center());
+    move_to(h, first.center());
+    shot(h, "b4-grid-band");
+    press_at(h, first.center(), false, Modifiers::NONE);
+    assert_eq!(h.state().pane().selected.len(), n, "the band covers everything from the first item to after the last");
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    settle(h);
+}
+
+#[test]
+#[ignore]
+fn mouse_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    mouse(&mut h);
+}

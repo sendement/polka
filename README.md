@@ -99,6 +99,16 @@ the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu c
 
 Gamepad input is ignored while Polka is not the focused window.
 
+**Mouse.** Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
+click opens a folder in a new tab, the side buttons go back / forward. Drag from empty space
+(right of the names in the list, between icons in the grid) for a selection rectangle; Ctrl
+adds to the selection. Drag items by their icon or name onto a folder, the other pane or a
+sidebar place: a move on the same disk, otherwise a copy (Ctrl copies, Shift moves). Onto a
+writable archive they're added to it; onto the trash they're trashed.
+
+**Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
+live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along.
+
 ## Build
 
 Needs Rust, libarchive and zstd (`pacman -S libarchive zstd`).

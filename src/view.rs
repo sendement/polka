@@ -71,6 +71,7 @@ impl eframe::App for App {
             self.draw_sidebar(ui);
         }
         self.draw_center(ui);
+        self.draw_drag(&ctx);
         self.draw_overlay(&ctx);
 
         // Closing the window with unsaved text asks first.
@@ -93,6 +94,12 @@ impl App {
     // ------------------------------------------------------------ keyboard
 
     fn keyboard(&mut self, ctx: &egui::Context) {
+        // The mouse's back / forward buttons.
+        let (back, fwd) = ctx.input(|i| (i.pointer.button_pressed(egui::PointerButton::Extra1), i.pointer.button_pressed(egui::PointerButton::Extra2)));
+        if (back || fwd) && self.overlay.is_none() {
+            self.focus = Focus::Panes;
+            self.handle(Input::Press(if back { Action::HistoryBack } else { Action::HistoryForward }));
+        }
         if self.range.as_ref().is_some_and(|r| r.keyboard) && !ctx.input(|i| i.modifiers.shift) {
             self.range = None;
         }
@@ -404,7 +411,7 @@ impl App {
             let r = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
             let accent = v.selection.bg_fill;
             let (fill, stroke) = if is_active {
-                (accent.gamma_multiply(0.35), Stroke::new(1.5, accent))
+                (tint(&v, 0.35), Stroke::new(1.5, accent))
             } else if r.hovered() {
                 (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
             } else {
@@ -612,6 +619,10 @@ impl App {
         let focused = self.focus == Focus::Sidebar && self.overlay.is_none();
         let cur_loc = self.pane().loc.clone();
         let usage_here = self.usage_shown();
+        let dragging = self.drag.is_some();
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let released = ui.input(|i| i.pointer.primary_released());
+        let mut dropped = None;
         let mut clicked = None;
         let mut actions = None;
         let side_icon = self.cfg.side_icon;
@@ -637,6 +648,12 @@ impl App {
                         let is_cursor = focused && i == self.side_cursor;
                         let here = if it.usage { usage_here } else { it.loc == cur_loc && !usage_here };
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
+                        if dragging && !it.usage && pointer.is_some_and(|p| rect.contains(p)) {
+                            ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
+                            if released {
+                                dropped = Some(i);
+                            }
+                        }
                         let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon));
                         let px = lookup_px(ui, side_icon);
                         // Custom icons are theme names or image files we stored.
@@ -665,6 +682,9 @@ impl App {
                     }
                 });
             });
+        if let Some(i) = dropped {
+            self.drop_on_side(i);
+        }
         if let Some(i) = clicked {
             self.side_cursor = i;
             self.focus = Focus::Sidebar;
@@ -697,7 +717,7 @@ impl App {
                 tab_act = self.draw_tabs(ui);
             }
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
-                let theme = crate::viewer::theme::by_name(&self.cfg.viewer.theme);
+                let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
                 viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
                 return;
             }
@@ -705,6 +725,7 @@ impl App {
                 usage_act = crate::usage::draw::draw(ui, u, &mut self.icons);
                 return;
             }
+            let dragging = self.drag.is_some();
             let App { tabs, icons, cfg, .. } = self;
             let [a, b] = &mut tabs[tab].panes;
             if dual {
@@ -724,12 +745,12 @@ impl App {
                     };
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx)) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx), dragging) {
                         events.push((idx, e));
                     }
                 }
             } else {
-                for e in draw_pane(ui, a, icons, cfg, focused, (tab, 0)) {
+                for e in draw_pane(ui, a, icons, cfg, focused, (tab, 0), dragging) {
                     events.push((0, e));
                 }
             }
@@ -761,10 +782,18 @@ impl App {
             self.focus = Focus::Panes;
             self.tabs[tab].active = idx;
             match e {
-                PaneEvent::Click(i, toggle) => {
+                PaneEvent::Click(i, toggle, range) => {
                     let p = self.pane_mut();
+                    if range {
+                        let (a, b) = (p.cursor.min(i), p.cursor.max(i));
+                        if !toggle {
+                            p.selected.clear();
+                        }
+                        let names: Vec<String> = p.entries[a..=b.min(p.entries.len() - 1)].iter().map(|e| e.name.clone()).collect();
+                        p.selected.extend(names);
+                    }
                     p.cursor = i;
-                    if toggle {
+                    if toggle && !range {
                         if let Some(n) = p.entries.get(i).map(|e| e.name.clone()) {
                             if !p.selected.remove(&n) {
                                 p.selected.insert(n);
@@ -781,6 +810,18 @@ impl App {
                         self.pane_mut().cursor = i;
                     }
                     self.handle(Input::Press(Action::Actions));
+                }
+                PaneEvent::DragStart(i) => self.drag_start(idx, i),
+                PaneEvent::Drop(i) => self.drop_on_pane(idx, i),
+                PaneEvent::ClearSelection => self.pane_mut().selected.clear(),
+                PaneEvent::NewTab(i) => {
+                    let p = self.pane();
+                    if let Some(loc) = p.entries.get(i).map(|e| p.entry_loc(e)) {
+                        // A middle click opens it beside, not instead.
+                        let here = self.tab;
+                        self.run(Cmd::OpenInNewTab(loc));
+                        self.tab = here;
+                    }
                 }
             }
         }
@@ -799,7 +840,7 @@ impl App {
         let mut cancel = false;
         let v = ui.visuals().clone();
         egui::Frame::new()
-            .fill(v.selection.bg_fill.gamma_multiply(0.3))
+            .fill(tint(&v, 0.3))
             .stroke(Stroke::new(1.0, v.selection.bg_fill))
             .corner_radius(8.0)
             .inner_margin(egui::Margin::symmetric(12, 6))
@@ -908,14 +949,28 @@ impl App {
 // ---------------------------------------------------------------- pane view
 
 enum PaneEvent {
-    /// index, ctrl-toggle
-    Click(usize, bool),
+    /// index, Ctrl (toggle), Shift (range from the cursor)
+    Click(usize, bool, bool),
+    /// Middle click: a folder in a new tab.
+    NewTab(usize),
     Activate(usize),
     Context(Option<usize>),
+    /// Items picked up by the mouse (from this entry).
+    DragStart(usize),
+    /// Dragged items let go over this pane (onto an entry, or not).
+    Drop(Option<usize>),
+    /// A click on empty space.
+    ClearSelection,
 }
 
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize)) -> Vec<PaneEvent> {
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool) -> Vec<PaneEvent> {
     let mut events = Vec::new();
+    // Dragged items over this pane: dropped on release.
+    let whole = ui.max_rect();
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let over = dragging && pointer.is_some_and(|p| whole.contains(p));
+    let released = ui.input(|i| i.pointer.primary_released());
+    let mut drop_entry = None;
     if pane.loading.is_some() {
         ui.centered_and_justified(|ui| ui.spinner());
         return events;
@@ -933,6 +988,12 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         let r = ui.centered_and_justified(|ui| ui.label(egui::RichText::new(empty).weak())).response;
         if r.secondary_clicked() {
             events.push(PaneEvent::Context(None));
+        }
+        if over {
+            ui.painter().rect_stroke(whole, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
+            if released {
+                events.push(PaneEvent::Drop(None));
+            }
         }
         return events;
     }
@@ -988,8 +1049,25 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     });
     let mut hover_set = None;
     let vol_c = volume_color(ui.visuals());
+    let local = pane.loc.local_path().is_some();
+    pane.drawn.clear();
+    let mut band_from: Option<Pos2> = None;
     let out = sa.show_rows(ui, row_h, rows, |ui, range| {
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        // Content coordinates: row r starts r * row_h below this.
+        let origin = ui.cursor().min - vec2(0.0, range.start as f32 * row_h);
+        // (A vertical scroll area's clip spans the window's width; the other
+        // pane must stay clickable.)
+        let view = ui.clip_rect().intersect(whole);
+        // Empty space under the entries: clicks clear, drags draw a band.
+        let bg = ui.interact(view, ui.id().with(("pane-bg", id)), Sense::click_and_drag());
+        if bg.drag_started() {
+            band_from = ui.input(|i| i.pointer.press_origin());
+        } else if bg.clicked() && !ui.input(|i| i.modifiers.command) {
+            events.push(PaneEvent::ClearSelection);
+        } else if bg.secondary_clicked() {
+            events.push(PaneEvent::Context(None));
+        }
         for row in range {
             let (row_rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
             for col in 0..cols {
@@ -1000,7 +1078,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 } else {
                     row_rect
                 };
-                let r = ui.interact(rect, ui.id().with(("entry", i)), Sense::click());
+                let r = ui.interact(rect, ui.id().with(("entry", i)), Sense::click_and_drag());
                 let sel = pane.selected.contains(&e.name);
                 let is_cursor = i == pane.cursor;
                 let vol = pane.volumes.get(&e.name);
@@ -1024,6 +1102,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     }
                 }
                 let path = pane.loc.entry_path(&e.name);
+                let hot;
                 let icon_size = if grid { grid_icon } else { list_icon };
                 let thumb = match (&path, e.mtime) {
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
@@ -1036,6 +1115,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     paint_icon(ui, ir, icon, thumb);
                     lock_badge(ui, ir, e, path.as_deref());
                     let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
+                    hot = ir.union(Rect::from_center_size(pos2(rect.center().x, ir.max.y + 4.0 + g.size().y / 2.0), g.size()));
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
                     if let Some(f) = folded {
                         let font = FontId::proportional((grid_font - 2.0).max(10.0));
@@ -1062,6 +1142,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let name_w = rect.width() - name_x - name_room - tag_w;
                     let g = elided(ui, label, FontId::proportional(list_font), text_c, name_w.max(60.0), 1);
                     let name_end = rect.min.x + name_x + g.size().x;
+                    hot = Rect::from_min_max(rect.min, pos2(name_end + 12.0, rect.max.y));
                     ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
                     if let Some(f) = folded {
                         stack_tag(ui, f.2.len(), pos2(name_end + 10.0, rect.center().y), Align2::LEFT_CENTER, tag_font.clone(), vol_c);
@@ -1077,16 +1158,78 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                         ui.painter().text(pos2(rect.max.x - 145.0 * k, rect.center().y), Align2::LEFT_CENTER, fmt_time(t), f, weak);
                     }
                 }
+                pane.drawn.push((i, rect, hot));
+                // Picked up by the icon or name; elsewhere a band starts.
+                if r.drag_started() {
+                    let o = ui.input(|i| i.pointer.press_origin());
+                    if o.is_some_and(|o| hot.contains(o)) {
+                        events.push(PaneEvent::DragStart(i));
+                    } else {
+                        band_from = o;
+                    }
+                }
+                if dragging && pointer.is_some_and(|p| rect.contains(p)) && crate::mouse::drop_target(e, local) && !sel {
+                    drop_entry = Some(i);
+                    let a = ui.visuals().selection.bg_fill;
+                    ui.painter().rect(rect, 6.0, tint(ui.visuals(), 0.35), Stroke::new(2.0, a), StrokeKind::Inside);
+                }
                 if r.double_clicked() {
                     events.push(PaneEvent::Activate(i));
                 } else if r.clicked() {
-                    events.push(PaneEvent::Click(i, ui.input(|i| i.modifiers.command)));
+                    let m = ui.input(|i| i.modifiers);
+                    events.push(PaneEvent::Click(i, m.command, m.shift));
+                } else if r.middle_clicked() && e.is_dir {
+                    events.push(PaneEvent::NewTab(i));
                 } else if r.secondary_clicked() {
                     events.push(PaneEvent::Context(Some(i)));
                 }
             }
         }
+        // The selection rectangle.
+        let ctrl = ui.input(|i| i.modifiers.command);
+        if let Some(o) = band_from.take() {
+            pane.band = Some(crate::mouse::Band { start: o.to_vec2() - origin.to_vec2(), base: if ctrl { pane.selected.clone() } else { Default::default() } });
+        }
+        if let Some(b) = &pane.band {
+            match ui.input(|i| i.pointer.primary_down().then(|| i.pointer.latest_pos()).flatten()) {
+                Some(p) => {
+                    let area = Rect::from_two_pos(b.start.to_pos2(), (p - origin).to_pos2());
+                    let mut picked = b.base.clone();
+                    for (i, e) in pane.entries.iter().enumerate() {
+                        let (r, c) = ((i / cols) as f32, (i % cols) as f32);
+                        let item = if grid {
+                            Rect::from_min_size(pos2(c * grid_w + 4.0, r * row_h), vec2(grid_w - 4.0, grid_h - 4.0))
+                        } else {
+                            Rect::from_min_size(pos2(0.0, r * row_h), vec2(view.width(), row_h))
+                        };
+                        if item.intersects(area) {
+                            picked.insert(e.name.clone());
+                        }
+                    }
+                    pane.selected = picked;
+                    let screen = area.translate(origin.to_vec2());
+                    let a = ui.visuals().selection.bg_fill;
+                    ui.painter().rect(screen, 2.0, a.gamma_multiply(0.15), Stroke::new(1.0, a), StrokeKind::Inside);
+                    // Near the edges the list scrolls along.
+                    let edge = 28.0;
+                    let d = if p.y > view.max.y - edge { -(p.y - view.max.y + edge) } else if p.y < view.min.y + edge { view.min.y + edge - p.y } else { 0.0 };
+                    if d != 0.0 {
+                        ui.scroll_with_delta(vec2(0.0, d.clamp(-24.0, 24.0)));
+                    }
+                    ui.ctx().request_repaint();
+                }
+                None => pane.band = None,
+            }
+        }
     });
+    if over {
+        if drop_entry.is_none() {
+            ui.painter().rect_stroke(whole, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
+        }
+        if released {
+            events.push(PaneEvent::Drop(drop_entry));
+        }
+    }
     // Sets under the mouse or the cursor unfold (from the next frame).
     let mut open: Vec<String> = hover_set.iter().cloned().collect();
     if focused {
@@ -1102,6 +1245,12 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     pane.view_h = out.inner_rect.height();
     pane.page_rows = ((pane.view_h / row_h) as usize).saturating_sub(1).max(1);
     events
+}
+
+/// The accent as a fill behind text: lighter on a light background, where
+/// the dark look's translucency would turn grey.
+pub(crate) fn tint(v: &egui::Visuals, k: f32) -> Color32 {
+    v.selection.bg_fill.gamma_multiply(if v.dark_mode { k } else { k * 0.5 })
 }
 
 /// Highlight for the volumes of one archive: the accent's complement, so it
@@ -1204,13 +1353,13 @@ fn paint_entry_bg(ui: &Ui, rect: Rect, cursor: bool, focused: bool, selected: bo
     let accent = v.selection.bg_fill;
     let p = ui.painter();
     if selected {
-        p.rect_filled(rect, 6.0, accent.gamma_multiply(0.45));
+        p.rect_filled(rect, 6.0, tint(&v, 0.45));
     } else if hovered {
         p.rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
     }
     if cursor {
         if focused {
-            p.rect_filled(rect, 6.0, accent.gamma_multiply(if selected { 0.35 } else { 0.55 }));
+            p.rect_filled(rect, 6.0, tint(&v, if selected { 0.35 } else { 0.55 }));
             p.rect_stroke(rect, 6.0, Stroke::new(2.0, accent), StrokeKind::Inside);
         } else {
             p.rect_stroke(rect, 6.0, Stroke::new(1.0, accent.gamma_multiply(0.7)), StrokeKind::Inside);
@@ -1222,10 +1371,10 @@ pub(crate) fn paint_row_bg(ui: &Ui, rect: Rect, cursor: bool, current: bool, hov
     let v = ui.visuals();
     let accent = v.selection.bg_fill;
     if cursor {
-        ui.painter().rect_filled(rect, 6.0, accent.gamma_multiply(0.55));
+        ui.painter().rect_filled(rect, 6.0, tint(&v, 0.55));
         ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, accent), StrokeKind::Inside);
     } else if current {
-        ui.painter().rect_filled(rect, 6.0, accent.gamma_multiply(0.25));
+        ui.painter().rect_filled(rect, 6.0, tint(&v, 0.25));
     } else if hovered {
         ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
     }
@@ -1456,7 +1605,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                     let cur = i == t.cursor;
                     let v = ui.visuals();
                     if cur {
-                        ui.painter().rect_filled(rect, 6.0, v.selection.bg_fill.gamma_multiply(0.55));
+                        ui.painter().rect_filled(rect, 6.0, tint(&v, 0.55));
                         ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
                     }
                     // Each row shows its own folder icon.
@@ -1699,7 +1848,7 @@ fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&str], fallb
     let v = ui.visuals();
     let accent = v.selection.bg_fill;
     if on {
-        ui.painter().rect(rect, 8.0, accent.gamma_multiply(0.4), Stroke::new(1.0, accent), StrokeKind::Inside);
+        ui.painter().rect(rect, 8.0, tint(&v, 0.4), Stroke::new(1.0, accent), StrokeKind::Inside);
     } else if r.hovered() {
         ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill);
     }
@@ -1734,7 +1883,7 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
         let g = painter.layout_no_wrap(format!("{}: {f}  ✕", tr("Filter")), font, v.strong_text_color());
         let chip = Rect::from_min_max(pos2(right - g.size().x - 16.0, inner.min.y + 2.0), pos2(right, inner.max.y - 2.0));
         let r = ui.interact(chip, ui.id().with(("filter-chip", idx)), Sense::click());
-        painter.rect_filled(chip, 6.0, v.selection.bg_fill.gamma_multiply(if r.hovered() { 0.8 } else { 0.5 }));
+        painter.rect_filled(chip, 6.0, tint(&v, if r.hovered() { 0.8 } else { 0.5 }));
         painter.galley(pos2(chip.min.x + 8.0, chip.center().y - g.size().y / 2.0), g, Color32::WHITE);
         if r.clicked() {
             act = Some(TopAction::ClearFilter(idx));
@@ -1814,6 +1963,8 @@ pub enum SettingsEvent {
     Close,
     Chip(usize),
     Toggle(usize),
+    /// Light/dark choice clicked.
+    Appearance(u8),
     EditorRow(usize),
     EditorSet(usize, f32),
     Save,
@@ -1837,6 +1988,12 @@ impl App {
             }
             SettingsEvent::Close => self.overlay = None,
             SettingsEvent::Chip(i) => self.settings_toggle_open(i),
+            SettingsEvent::Appearance(i) => {
+                st.row = row::APPEARANCE;
+                self.cfg.appearance = i;
+                self.cfg.save();
+                self.apply_appearance();
+            }
             SettingsEvent::Toggle(r) => {
                 st.row = r;
                 self.settings_step(r, 0.0);
@@ -1874,7 +2031,7 @@ fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) ->
     }
     let v = ui.visuals();
     if focused {
-        ui.painter().rect(rect, 8.0, v.selection.bg_fill.gamma_multiply(0.25), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+        ui.painter().rect(rect, 8.0, tint(&v, 0.25), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
     } else if r.hovered() {
         ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.5));
     }
@@ -1936,6 +2093,33 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         }
     }
 
+    // Light or dark: three segments.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::APPEARANCE, "appearance");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::APPEARANCE));
+    }
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Appearance"), label_font.clone(), v.text_color());
+    let names = [tr("System"), tr("Dark"), tr("Light")];
+    let seg_w = 96.0;
+    let x0 = rect.max.x - 10.0 - seg_w * 3.0;
+    let whole = Rect::from_min_size(pos2(x0, rect.center().y - 15.0), vec2(seg_w * 3.0, 30.0));
+    ui.painter().rect_filled(whole, 8.0, v.extreme_bg_color);
+    for (i, name) in names.iter().enumerate() {
+        let seg = Rect::from_min_size(pos2(x0 + i as f32 * seg_w, whole.min.y), vec2(seg_w, 30.0)).shrink(2.0);
+        let resp = ui.interact(seg, ui.id().with(("appearance", i)), Sense::click());
+        let on = cfg.appearance as usize == i;
+        if on {
+            ui.painter().rect_filled(seg, 6.0, v.selection.bg_fill);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(seg, 6.0, v.widgets.hovered.weak_bg_fill);
+        }
+        let c = if on { v.selection.stroke.color } else { v.text_color() };
+        ui.painter().text(seg.center(), Align2::CENTER_CENTER, *name, FontId::proportional(14.0), c);
+        if resp.clicked() {
+            ev = Some(SettingsEvent::Appearance(i as u8));
+        }
+    }
+
     // Steppers.
     let steppers: [(usize, &str, String); 4] = [
         (row::SIDE_ICON, tr("Sidebar icons"), format!("{} px", cfg.side_icon)),
@@ -1988,7 +2172,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
         let on = flags[i];
         let cursor = st.row == row::OPEN_IN && st.chip == i;
-        let fill = if on { v.selection.bg_fill.gamma_multiply(0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
         let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
         ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
         let color = v.text_color();
@@ -2081,7 +2265,7 @@ fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<Settin
         for (i, label) in [(3, tr("Save")), (4, tr("Cancel"))] {
             let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
             let focused = ed.row == i;
-            let fill = if focused { v.selection.bg_fill.gamma_multiply(0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+            let fill = if focused { tint(&v, 0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
             ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), v.text_color());
             if r.clicked() {
@@ -2115,7 +2299,7 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
                 let gal = ui.painter().layout_no_wrap(label, font, v.text_color());
                 let (rect, resp) = ui.allocate_exact_size(vec2(gal.size().x + 36.0, 26.0), Sense::click());
                 let (fill, stroke) = if on {
-                    (v.selection.bg_fill.gamma_multiply(0.4), Stroke::new(1.5, v.selection.bg_fill))
+                    (tint(&v, 0.4), Stroke::new(1.5, v.selection.bg_fill))
                 } else if resp.hovered() {
                     (v.widgets.hovered.weak_bg_fill, Stroke::NONE)
                 } else {
@@ -2165,7 +2349,7 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
                 let rect = Rect::from_min_size(row_rect.min + vec2(col as f32 * cell, 0.0), Vec2::splat(cell)).shrink(3.0);
                 let r = ui.interact(rect, ui.id().with(("icon", i)), Sense::click());
                 if i == p.cursor {
-                    ui.painter().rect(rect, 8.0, v.selection.bg_fill.gamma_multiply(0.4), Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
+                    ui.painter().rect(rect, 8.0, tint(&v, 0.4), Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
                 } else if r.hovered() {
                     ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill);
                 }
@@ -2273,7 +2457,7 @@ fn draw_compress(ui: &mut Ui, d: &crate::app::CompressDlg, pad: PadKind) -> Opti
         for (i, label, g) in [(crow::CREATE, tr("Create"), Action::Menu), (crow::CANCEL, tr("Cancel"), Action::Back)] {
             let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
             let focused = d.row == i;
-            let fill = if focused { v.selection.bg_fill.gamma_multiply(0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+            let fill = if focused { tint(&v, 0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
             ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
             let gal = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), v.text_color());
             let w = gal.size().x + 26.0;

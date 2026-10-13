@@ -62,6 +62,8 @@ pub struct Config {
     pub collapse_volumes: bool,
     /// Disk usage page: rings, tiles or list.
     pub usage_mode: u8,
+    /// Light or dark: 0 as the desktop, 1 dark, 2 light.
+    pub appearance: u8,
 }
 
 /// Text viewer look.
@@ -155,6 +157,7 @@ impl Default for Config {
             open_videos: true,
             collapse_volumes: true,
             usage_mode: 0,
+            appearance: 0,
         }
     }
 }
