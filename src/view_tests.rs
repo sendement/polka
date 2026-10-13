@@ -386,6 +386,7 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     templates(h);
     cursors(h);
     music(h);
+    video(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -1043,8 +1044,10 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     assert!(!h.state().cfg.open_music);
     press(h, &[Action::Accept]); // and on again
     assert!(h.state().cfg.open_music);
-    press(h, &[Action::Right, Action::Accept]); // video: not yet
-    assert!(!h.state().cfg.open_video);
+    press(h, &[Action::Right, Action::Accept]); // video: off
+    assert!(!h.state().cfg.open_videos);
+    press(h, &[Action::Accept]); // and on again
+    assert!(h.state().cfg.open_videos);
     press(h, &[Action::Down]);
     if h.state().cfg.collapse_volumes {
         press(h, &[Action::Accept]);
@@ -1335,4 +1338,96 @@ fn music_screens() {
         settle(&mut h);
     }
     shot(&mut h, "64-music-narrow");
+}
+
+fn video(h: &mut Harness<'static, App>) {
+    use crate::app::Overlay;
+    use crate::vfs::Location;
+    use crate::viewer::Content;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("video");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ff = |args: &[&str]| std::process::Command::new("ffmpeg").args(["-v", "quiet", "-y"]).args(args).current_dir(&dir).status().is_ok_and(|s| s.success());
+    std::fs::write(dir.join("s.srt"), "1\n00:00:00,000 --> 00:00:30,000\nПривет из субтитров\n").unwrap();
+    if !ff(&[
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=30", "-f", "lavfi", "-i", "sine=f=440:d=30", "-f", "lavfi", "-i", "sine=f=660:d=30",
+        "-i", "s.srt", "-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-c:s", "srt", "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=rus", "-metadata:s:s:0", "language=rus", "Фильм.mkv",
+    ]) {
+        return; // no ffmpeg
+    }
+    std::fs::remove_file(dir.join("s.srt")).unwrap();
+    assert!(ff(&["-f", "lavfi", "-i", "smptebars=size=480x360:rate=25:duration=5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "Клип.mp4"]));
+
+    let vid = |h: &Harness<'static, App>| match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Video(m)) => Some((m.index, m.texture.is_some(), m.playing(), m.pos(), m.full, m.subs.clone(), m.audio_track)),
+        _ => None,
+    };
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "Фильм.mkv").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    for _ in 0..10 {
+        settle(h);
+        if vid(h).is_some_and(|v| v.1) {
+            break;
+        }
+    }
+    let launched = crate::launch::LAUNCHED.with(|l| l.borrow().clone());
+    assert!(launched.iter().all(|c| !c.contains("video")), "handed to another app: {launched:?}");
+    let v = vid(h).expect("video opens in the player");
+    assert!(v.1 && v.2, "frames and playing: {v:?}");
+    assert!(matches!(v.5, crate::viewer::video::Subs::Inside(_)), "its subtitles are on");
+    shot(h, "65-video");
+    // → seeks 10 s; ✕ pauses.
+    let before = vid(h).unwrap().3;
+    press(h, &[Action::Right]);
+    assert!(vid(h).unwrap().3 >= before + 9.0, "seeked: {:?}", vid(h));
+    press(h, &[Action::Accept]);
+    for _ in 0..3 {
+        settle(h);
+    }
+    assert!(!vid(h).unwrap().2);
+    shot(h, "66-video-paused");
+    // View: full screen without the app around it; ○ leaves it.
+    press(h, &[Action::View]);
+    assert!(vid(h).unwrap().4 && h.state().video_full());
+    shot(h, "67-video-full");
+    press(h, &[Action::Back]);
+    assert!(!vid(h).unwrap().4 && h.state().cur_tab().viewer.is_some());
+    // □ tap: subtitles off; the menu offers the audio track.
+    press(h, &[Action::Select]);
+    assert_eq!(vid(h).unwrap().5, crate::viewer::video::Subs::Off);
+    h.state_mut().run(crate::app::Cmd::VideoAudio);
+    assert_eq!(vid(h).unwrap().6, 1);
+    press(h, &[Action::Actions]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))));
+    shot(h, "68-video-menu");
+    h.state_mut().overlay = None;
+    // R2: the next video of the folder.
+    press(h, &[Action::RightTrigger]);
+    for _ in 0..5 {
+        settle(h);
+    }
+    assert!(h.state().cur_tab().viewer.as_ref().unwrap().name.starts_with("Клип"));
+    shot(h, "69-video-next");
+    press(h, &[Action::Back]);
+    assert!(h.state().cur_tab().viewer.is_none());
+    h.state_mut().run(crate::app::Cmd::SetView(crate::config::ViewMode::Grid));
+    for _ in 0..15 {
+        settle(h);
+    }
+    shot(h, "70-video-thumbs");
+    h.state_mut().run(crate::app::Cmd::SetView(crate::config::ViewMode::List));
+}
+
+/// Just the video player (quick to rerun).
+#[test]
+#[ignore]
+fn video_screens() {
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    video(&mut h);
 }

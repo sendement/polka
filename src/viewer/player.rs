@@ -1,5 +1,6 @@
 //! The app side of the music player: gamepad, keyboard, the △ menu and
-//! moving on to the next track in every tab (also ones not shown).
+//! moving on to the next track in every tab (also ones not shown). Videos
+//! get their frames here too (and pause when their tab is hidden).
 
 use egui::{Event, Key};
 
@@ -133,6 +134,9 @@ impl App {
 
     /// Player commands; always true (for use as "key handled").
     pub fn audio_cmd(&mut self, cmd: Cmd) -> bool {
+        if self.video_shown() && !matches!(cmd, Cmd::AudioVolume(_)) {
+            return self.video_cmd(cmd);
+        }
         let ctx = self.ctx.clone();
         let vol = self.cfg.viewer.volume;
         match cmd {
@@ -186,15 +190,17 @@ impl App {
         self.cfg.viewer.volume = v;
         // Every tab's player follows.
         for t in &mut self.tabs {
-            if let Some(Content::Audio(a)) = t.viewer.as_mut().map(|v| &mut v.content) {
-                a.set_volume(v);
+            match t.viewer.as_mut().map(|v| &mut v.content) {
+                Some(Content::Audio(a)) => a.set_volume(v),
+                Some(Content::Video(m)) => m.set_volume(v),
+                _ => {}
             }
         }
         self.cfg.save();
     }
 
     /// The viewer's file (and the pane's cursor) follow the track.
-    fn audio_moved(&mut self) {
+    pub(super) fn audio_moved(&mut self) {
         let tab = self.tab;
         self.audio_follow(tab);
     }
@@ -202,8 +208,11 @@ impl App {
     fn audio_follow(&mut self, tab: usize) {
         let t = &mut self.tabs[tab];
         let Some(v) = t.viewer.as_mut() else { return };
-        let Content::Audio(a) = &v.content else { return };
-        let path = a.path().to_path_buf();
+        let path = match &v.content {
+            Content::Audio(a) => a.path().to_path_buf(),
+            Content::Video(m) => m.path().to_path_buf(),
+            _ => return,
+        };
         v.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         v.path = path.clone();
         let p = &mut t.panes[v.origin];
@@ -218,6 +227,11 @@ impl App {
         let (repeat, vol) = (Repeat::from(self.cfg.viewer.repeat), self.cfg.viewer.volume);
         let mut playing = false;
         for tab in 0..self.tabs.len() {
+            let visible = tab == self.tab;
+            if let Some(Content::Video(m)) = self.tabs[tab].viewer.as_mut().map(|v| &mut v.content) {
+                m.tick(visible, &ctx);
+                continue;
+            }
             let Some(Content::Audio(a)) = self.tabs[tab].viewer.as_mut().map(|v| &mut v.content) else { continue };
             let moved = a.tick(repeat, vol, &ctx);
             playing |= a.playing();

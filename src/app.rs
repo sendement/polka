@@ -434,6 +434,9 @@ pub enum Cmd {
     AudioRepeat,
     AudioVolume(i8),
     AudioSeek(f32),
+    VideoFullscreen,
+    VideoAudio,
+    VideoSubs,
     ExtractHere,
     ExtractOther,
     Pin(PathBuf),
@@ -864,10 +867,8 @@ pub mod row {
     pub const CLOSE: usize = 8;
 }
 
-/// "Open in Polka" kinds, in the settings' order. Video waits for its
-/// player.
+/// "Open in Polka" kinds, in the settings' order.
 pub const OPEN_KINDS: usize = 4;
-pub const OPEN_READY: [bool; OPEN_KINDS] = [true, true, true, false];
 
 impl Config {
     pub fn open_flag(&mut self, i: usize) -> &mut bool {
@@ -875,7 +876,7 @@ impl Config {
             0 => &mut self.open_text,
             1 => &mut self.open_images,
             2 => &mut self.open_music,
-            _ => &mut self.open_video,
+            _ => &mut self.open_videos,
         }
     }
 }
@@ -1022,6 +1023,8 @@ pub struct App {
     msg_rx: Receiver<Msg>,
     pub ctx: egui::Context,
     pub quit: bool,
+    /// Full screen asked of the window (for a video).
+    pub full_sent: bool,
     /// x of the line between the two panes (last frame), to split the
     /// address bar at the same place.
     pub divider_x: Option<f32>,
@@ -1086,6 +1089,7 @@ impl App {
             msg_rx,
             ctx,
             quit: false,
+            full_sent: false,
             divider_x: None,
             edit_hold: None,
             text_clip: None,
@@ -1275,7 +1279,9 @@ impl App {
             }
             Input::Release(Action::Select) => {
                 self.range = None;
-                if self.overlay.is_none() && self.audio_shown() {
+                if self.overlay.is_none() && self.video_shown() {
+                    self.video_select_released();
+                } else if self.overlay.is_none() && self.audio_shown() {
                     self.audio_select_released();
                 } else if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
                     self.viewer_select_released();
@@ -1854,6 +1860,8 @@ impl App {
             Some(crate::viewer::image::is_picture)
         } else if crate::viewer::audio::is_audio(&e.name) {
             Some(|_, n| crate::viewer::audio::is_audio(n))
+        } else if crate::viewer::video::is_video(&e.name) {
+            Some(|_, n| crate::viewer::video::is_video(n))
         } else {
             None
         };
@@ -1889,7 +1897,7 @@ impl App {
     }
 
     fn viewer_input(&mut self, a: Action) {
-        if self.viewer_text_input(a) || self.viewer_audio_input(a) {
+        if self.viewer_text_input(a) || self.viewer_audio_input(a) || self.viewer_video_input(a) {
             return;
         }
         let ctx = self.ctx.clone();
@@ -1971,6 +1979,9 @@ impl App {
         }
         if self.audio_shown() {
             return self.viewer_audio_menu();
+        }
+        if self.video_shown() {
+            return self.viewer_video_menu();
         }
         if let Some(v) = &self.cur_tab().viewer {
             let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
@@ -2418,14 +2429,11 @@ impl App {
         }
     }
 
-    /// Flip "open in Polka" for kind `i` (if its viewer exists).
+    /// Flip "open in Polka" for kind `i`.
     pub fn settings_toggle_open(&mut self, i: usize) {
         if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
             st.row = row::OPEN_IN;
             st.chip = i;
-        }
-        if !OPEN_READY[i] {
-            return self.toast(tr("Comes with the built-in video player"), false);
         }
         let f = self.cfg.open_flag(i);
         *f = !*f;
@@ -2716,6 +2724,9 @@ impl App {
             Cmd::CloseViewer => self.request_close_viewer(),
             Cmd::AudioToggle | Cmd::AudioNext | Cmd::AudioPrev | Cmd::AudioPlay(_) | Cmd::AudioRepeat | Cmd::AudioVolume(_) | Cmd::AudioSeek(_) => {
                 self.audio_cmd(cmd);
+            }
+            Cmd::VideoFullscreen | Cmd::VideoAudio | Cmd::VideoSubs => {
+                self.video_cmd(cmd);
             }
             Cmd::ViewerSettings => {
                 self.overlay = Some(Overlay::ViewerSettings(ViewerSettings { row: vrow::THEME }));

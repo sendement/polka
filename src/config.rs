@@ -57,7 +57,7 @@ pub struct Config {
     pub open_text: bool,
     pub open_images: bool,
     pub open_music: bool,
-    pub open_video: bool,
+    pub open_videos: bool,
     /// Show a multi-volume archive as one item until it's pointed at.
     pub collapse_volumes: bool,
 }
@@ -148,7 +148,7 @@ impl Default for Config {
             open_text: true,
             open_images: true,
             open_music: true,
-            open_video: false,
+            open_videos: true,
             collapse_volumes: true,
         }
     }

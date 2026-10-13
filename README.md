@@ -42,6 +42,19 @@ instead: Settings → "Open in Polka"):
 | Repeat: off / all / one | □ / X tap | R |
 | Volume | □ / X held + ↑ ↓ | + / − |
 
+- Video (needs `ffmpeg`): mp4, mkv, webm, avi, mov and the rest of what ffmpeg reads; sound in
+  sync, audio track choice, subtitles (text ones inside the file, or `.srt`/`.ass`/`.vtt` next
+  to it), full screen, the folder's videos one after another. Pauses when its tab is left.
+
+| Video | Gamepad | Keyboard |
+|---|---|---|
+| Play / pause | ✕ / A, click | Space, K |
+| Seek 10 s (60 s) | ← → (□ held) | ← → (Shift) |
+| Volume | ↑ ↓ | ↑ ↓, + / − |
+| Previous / next video | L2 / R2 | PgUp / PgDn, P / N |
+| Full screen | Create / View, double click | F, F11 |
+| Subtitles / audio track | □ / X tap / △ menu | S / A |
+
 ## Controls
 
 | Gamepad (PlayStation / Xbox) | Action | Keyboard |
@@ -79,7 +92,8 @@ cargo build --release
 
 Arch package: `packaging/arch/make-tarball.sh`, then `makepkg` in `packaging/arch`
 (installs the binary, desktop entry and icon).
-Video thumbnails need `ffmpegthumbnailer`; music in formats Symphonia can't decode needs `ffmpeg`.
+Video playback and thumbnails need `ffmpeg` (or `ffmpegthumbnailer` for thumbnails); so does
+music in formats Symphonia can't decode.
 
 Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,
 `icon_theme` override, `zoom` for TV use; Ctrl+= / Ctrl+- also zoom).

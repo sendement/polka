@@ -48,6 +48,12 @@ fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool
 pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> Option<HeaderAct> {
     let mut act = None;
     let vis = ui.visuals().clone();
+    // Full screen video: nothing but the picture.
+    if let Content::Video(m) = &mut v.content {
+        if m.full {
+            return draw_video(ui, m, prefs, true);
+        }
+    }
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let mut x = head.min.x + 6.0;
     let dirty = matches!(&v.content, Content::Text(t) if t.ed.dirty);
@@ -106,6 +112,11 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
         Content::Image(im) => draw_image(ui, im),
         Content::Audio(a) => {
             if let Some(x) = draw_audio(ui, a, prefs) {
+                act = Some(x);
+            }
+        }
+        Content::Video(m) => {
+            if let Some(x) = draw_video(ui, m, prefs, false) {
                 act = Some(x);
             }
         }
@@ -284,6 +295,25 @@ fn details(v: &Viewer) -> String {
                 parts.push(format!("{b} {}", tr("kbit/s")));
             }
             if let Ok(md) = std::fs::metadata(a.path()) {
+                parts.push(crate::app::human_size(md.len()));
+            }
+            parts.join(" · ")
+        }
+        Content::Video(m) => {
+            let p = &m.probe;
+            let mut parts = Vec::new();
+            if m.tracks.len() > 1 {
+                parts.push(format!("{}/{}", m.index + 1, m.tracks.len()));
+            }
+            if p.has_video {
+                parts.push(format!("{}×{}", p.width, p.height));
+                parts.push(p.codec.clone());
+                parts.push(format!("{} {}", trim_num(p.fps as f32), tr("fps")));
+            }
+            if let Some(d) = p.duration {
+                parts.push(super::audio::clock(std::time::Duration::from_secs_f64(d)));
+            }
+            if let Ok(md) = std::fs::metadata(m.path()) {
                 parts.push(crate::app::human_size(md.len()));
             }
             parts.join(" · ")
@@ -978,5 +1008,175 @@ fn speaker(p: &egui::Painter, c: egui::Pos2, volume: f32, color: Color32) {
     if volume <= 0.0 {
         p.line_segment([c + vec2(6.0, -5.0), c + vec2(14.0, 5.0)], Stroke::new(1.8, color));
         p.line_segment([c + vec2(6.0, 5.0), c + vec2(14.0, -5.0)], Stroke::new(1.8, color));
+    }
+}
+
+// ------------------------------------------------------------ video
+
+/// The picture, letterboxed. Controls sit under it in the window; full
+/// screen they cover its bottom while recently used (or paused). Click
+/// pauses, double click goes full screen.
+fn draw_video(ui: &mut Ui, m: &mut super::video::VideoState, prefs: &ViewerPrefs, full: bool) -> Option<HeaderAct> {
+    use super::audio::clock;
+    use crate::app::Cmd;
+    let mut act = None;
+    let vis = ui.visuals().clone();
+    let accent = vis.selection.bg_fill;
+    let whole = ui.available_rect_before_wrap();
+    ui.advance_cursor_after_rect(whole);
+    let painter = ui.painter().with_clip_rect(whole);
+    painter.rect_filled(whole, if full { 0.0 } else { 6.0 }, Color32::BLACK);
+    const BAND: f32 = 84.0;
+    let area = if full { whole } else { Rect::from_min_max(whole.min, pos2(whole.max.x, whole.max.y - BAND)) };
+    let resp = ui.interact(area, ui.id().with("video-view"), Sense::click());
+    if resp.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+        m.show_controls();
+    }
+    let white = Color32::from_gray(235);
+    if let Some(e) = &m.error {
+        painter.text(area.center(), Align2::CENTER_CENTER, e, FontId::proportional(16.0), vis.error_fg_color);
+        return None;
+    }
+    if !m.probe.has_video {
+        note_glyph(&painter, area.center(), area.height().min(area.width()) * 0.25, accent);
+    } else if let Some(t) = &m.texture {
+        let s = t.size_vec2();
+        let aspect = if m.probe.height > 0 { m.probe.width as f32 / m.probe.height as f32 } else { s.x / s.y.max(1.0) };
+        let k = (area.width() / aspect).min(area.height());
+        let r = Rect::from_center_size(area.center(), vec2(k * aspect, k));
+        painter.image(t.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    } else {
+        ui.put(Rect::from_center_size(area.center(), Vec2::splat(32.0)), egui::Spinner::new().color(white));
+    }
+    if resp.double_clicked() {
+        act = Some(HeaderAct::Run(Cmd::VideoFullscreen));
+    } else if resp.clicked() {
+        act = Some(HeaderAct::Run(Cmd::AudioToggle));
+    }
+    // Paused: a big ▶ in the middle.
+    if m.paused() || m.ended() {
+        let c = area.center();
+        painter.circle_filled(c, 40.0, Color32::from_black_alpha(150));
+        tri(&painter, c + vec2(5.0, 0.0), 18.0, true, white);
+    }
+    let shown = !full || m.controls_shown() || resp.hover_pos().is_some_and(|p| p.y > area.max.y - 90.0);
+    if !shown {
+        if full && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        }
+        // Come back when the controls are due to hide.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        return act;
+    }
+    if full {
+        // To hide the controls on time.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    // Controls: a band at the bottom (over the picture when full screen).
+    let band = Rect::from_min_max(pos2(whole.min.x, whole.max.y - BAND), whole.max);
+    if full {
+        painter.rect_filled(band, 0.0, Color32::from_black_alpha(170));
+    }
+    let pad = 18.0;
+    let pos = m.pos();
+    let len = m.duration();
+    let by = band.min.y + 22.0;
+    let bar = Rect::from_min_max(pos2(band.min.x + pad, by - 3.0), pos2(band.max.x - pad, by + 3.0));
+    let hit = ui.interact(bar.expand2(vec2(4.0, 10.0)), ui.id().with("video-seek"), Sense::click_and_drag());
+    let frac = len.map_or(0.0, |l| (pos / l.max(0.001)).clamp(0.0, 1.0)) as f32;
+    let shown_frac = match hit.interact_pointer_pos() {
+        Some(p) if hit.dragged() || hit.clicked() => {
+            let f = ((p.x - bar.min.x) / bar.width()).clamp(0.0, 1.0);
+            if hit.drag_stopped() || hit.clicked() {
+                act = Some(HeaderAct::Run(Cmd::AudioSeek(f)));
+            }
+            f
+        }
+        _ => frac,
+    };
+    if hit.hovered() || hit.dragged() {
+        m.show_controls();
+    }
+    painter.rect_filled(bar, 3.0, Color32::from_white_alpha(60));
+    painter.rect_filled(Rect::from_min_max(bar.min, pos2(bar.min.x + bar.width() * shown_frac, bar.max.y)), 3.0, accent);
+    painter.circle_filled(pos2(bar.min.x + bar.width() * shown_frac, by), if hit.hovered() || hit.dragged() { 8.0 } else { 6.0 }, white);
+    // Second row: play, time; subtitles/audio, volume, full screen.
+    let cy = band.min.y + 58.0;
+    let pr = Rect::from_center_size(pos2(band.min.x + pad + 14.0, cy), Vec2::splat(30.0));
+    let presp = ui.interact(pr, ui.id().with("video-play"), Sense::click());
+    if presp.hovered() {
+        painter.circle_filled(pr.center(), 16.0, Color32::from_white_alpha(30));
+    }
+    if m.playing() {
+        for dx in [-5.0, 5.0] {
+            painter.rect_filled(Rect::from_center_size(pr.center() + vec2(dx, 0.0), vec2(5.0, 16.0)), 1.0, white);
+        }
+    } else {
+        tri(&painter, pr.center() + vec2(2.0, 0.0), 9.0, true, white);
+    }
+    if presp.clicked() {
+        act = Some(HeaderAct::Run(Cmd::AudioToggle));
+    }
+    let time = format!("{} / {}", clock(std::time::Duration::from_secs_f64(pos)), len.map_or("--:--".into(), |l| clock(std::time::Duration::from_secs_f64(l))));
+    painter.text(pos2(pr.max.x + 12.0, cy), Align2::LEFT_CENTER, time, FontId::proportional(14.0), white);
+    // Right side, from the edge inwards.
+    let mut x = band.max.x - pad;
+    let fr = Rect::from_min_max(pos2(x - 28.0, cy - 14.0), pos2(x, cy + 14.0));
+    let fresp = ui.interact(fr, ui.id().with("video-full"), Sense::click()).on_hover_text(if full { tr("Leave full screen") } else { tr("Full screen") });
+    if fresp.hovered() {
+        painter.rect_filled(fr, 5.0, Color32::from_white_alpha(30));
+    }
+    corners(&painter, fr.shrink(5.0), full, white);
+    if fresp.clicked() {
+        act = Some(HeaderAct::Run(Cmd::VideoFullscreen));
+    }
+    x = fr.min.x - 16.0;
+    let vw = 90.0;
+    let vbar = Rect::from_min_max(pos2(x - vw, cy - 3.0), pos2(x, cy + 3.0));
+    let vhit = ui.interact(vbar.expand2(vec2(6.0, 12.0)), ui.id().with("video-volume"), Sense::click_and_drag());
+    if let Some(p) = vhit.interact_pointer_pos().filter(|_| vhit.dragged() || vhit.clicked()) {
+        act = Some(HeaderAct::Volume(((p.x - vbar.min.x) / vbar.width()).clamp(0.0, 1.0)));
+    }
+    if vhit.hovered() {
+        let d = ui.input(|i| i.smooth_scroll_delta.y);
+        if d.abs() > 0.5 {
+            act = Some(HeaderAct::Volume((prefs.volume + d / 600.0).clamp(0.0, 1.0)));
+        }
+    }
+    painter.rect_filled(vbar, 3.0, Color32::from_white_alpha(60));
+    painter.rect_filled(Rect::from_min_max(vbar.min, pos2(vbar.min.x + vw * prefs.volume, vbar.max.y)), 3.0, accent);
+    speaker(&painter, pos2(vbar.min.x - 24.0, cy), prefs.volume, white);
+    x = vbar.min.x - 46.0;
+    // Audio track and subtitles, when there's a choice; click switches.
+    let mut chip = |label: String, id: &str, cmd: Cmd, x: &mut f32| {
+        let g = painter.layout_no_wrap(label, FontId::proportional(13.0), white);
+        let r = Rect::from_min_max(pos2(*x - g.size().x - 16.0, cy - 12.0), pos2(*x, cy + 12.0));
+        let resp = ui.interact(r, ui.id().with(("video-chip", id)), Sense::click());
+        painter.rect_filled(r, 12.0, Color32::from_white_alpha(if resp.hovered() { 45 } else { 22 }));
+        painter.galley(r.center() - g.size() / 2.0, g, white);
+        if resp.clicked() {
+            act = Some(HeaderAct::Run(cmd));
+        }
+        *x = r.min.x - 8.0;
+    };
+    if m.sub_choices().len() > 1 {
+        chip(format!("{}: {}", tr("Subtitles"), m.subs.label()), "subs", Cmd::VideoSubs, &mut x);
+    }
+    if m.probe.audio.len() > 1 {
+        let label = m.probe.audio[m.audio_track.min(m.probe.audio.len() - 1)].label.clone();
+        chip(format!("{}: {label}", tr("Audio")), "audio", Cmd::VideoAudio, &mut x);
+    }
+    act
+}
+
+/// Four corner marks: outwards for "full screen", inwards to leave it.
+fn corners(p: &egui::Painter, r: Rect, inwards: bool, color: Color32) {
+    let l = r.width() * 0.32;
+    let s = Stroke::new(2.0, color);
+    for (c, dx, dy) in [(r.left_top(), 1.0, 1.0), (r.right_top(), -1.0, 1.0), (r.left_bottom(), 1.0, -1.0), (r.right_bottom(), -1.0, -1.0)] {
+        let (dx, dy) = if inwards { (-dx, -dy) } else { (dx, dy) };
+        let o = if inwards { c + vec2(-dx * l, -dy * l) } else { c };
+        p.line_segment([o, o + vec2(dx * l, 0.0)], s);
+        p.line_segment([o, o + vec2(0.0, dy * l)], s);
     }
 }

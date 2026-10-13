@@ -107,13 +107,15 @@ struct Ffmpeg {
 }
 
 impl Ffmpeg {
-    fn spawn(path: &Path, from: Duration) -> Result<Self, String> {
-        let mut child = std::process::Command::new("ffmpeg")
-            .args(["-nostdin", "-v", "quiet", "-ss"])
-            .arg(format!("{:.3}", from.as_secs_f64()))
-            .arg("-i")
-            .arg(path)
-            .args(["-vn", "-f", "f32le", "-ac", "2", "-ar"])
+    /// `stream`: which audio stream of the file (videos may have several).
+    fn spawn(path: &Path, from: Duration, stream: Option<usize>) -> Result<Self, String> {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-nostdin", "-v", "quiet", "-ss"]).arg(format!("{:.3}", from.as_secs_f64())).arg("-i").arg(path);
+        if let Some(n) = stream {
+            cmd.args(["-map", &format!("0:a:{n}")]);
+        }
+        let mut child = cmd
+            .args(["-vn", "-sn", "-f", "f32le", "-ac", "2", "-ar"])
             .arg(FF_RATE.to_string())
             .arg("pipe:1")
             .stdin(std::process::Stdio::null())
@@ -167,6 +169,8 @@ pub struct Playback {
     path: PathBuf,
     /// Decoded by ffmpeg: seeking restarts it at `base`.
     ffmpeg: bool,
+    /// Audio stream of a video (always through ffmpeg).
+    stream: Option<usize>,
     base: Duration,
     /// Length as the decoder knows it.
     pub length: Option<Duration>,
@@ -178,6 +182,11 @@ pub struct Playback {
 
 impl Playback {
     pub fn start(path: &Path, volume: f32) -> Result<Self, String> {
+        Self::start_at(path, None, Duration::ZERO, false, volume)
+    }
+
+    /// Audio stream `stream` of a video from `at`.
+    pub fn start_at(path: &Path, stream: Option<usize>, at: Duration, paused: bool, volume: f32) -> Result<Self, String> {
         let (out, no_device) = if silent_mode() {
             (None, None)
         } else {
@@ -187,8 +196,8 @@ impl Playback {
             }
         };
         let (player, null) = silent_player();
-        let mut p = Playback { out, player, _null: Some(null), path: path.to_path_buf(), ffmpeg: false, base: Duration::ZERO, length: None, no_device, volume, started: Instant::now() };
-        p.load(Duration::ZERO, false)?;
+        let mut p = Playback { out, player, _null: Some(null), path: path.to_path_buf(), ffmpeg: stream.is_some(), stream, base: Duration::ZERO, length: None, no_device, volume, started: Instant::now() };
+        p.load(at, paused)?;
         Ok(p)
     }
 
@@ -220,7 +229,7 @@ impl Playback {
             }
         }
         if self.ffmpeg {
-            player.append(Ffmpeg::spawn(&self.path, at)?);
+            player.append(Ffmpeg::spawn(&self.path, at, self.stream)?);
             self.base = at;
         }
         // The old one stops when dropped.
@@ -261,6 +270,10 @@ impl Playback {
 
     pub fn pause(&mut self) {
         self.player.pause();
+    }
+
+    pub fn resume(&mut self) {
+        self.player.play();
     }
 
     pub fn seek(&mut self, to: Duration) {

@@ -6,6 +6,17 @@ use std::sync::OnceLock;
 static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
 
 const RU: &[(&str, &str)] = &[
+    ("Audio track", "Звуковая дорожка"),
+    ("Full screen", "Во весь экран"),
+    ("Leave full screen", "Выйти из полноэкранного режима"),
+    ("Next video", "Следующее видео"),
+    ("Previous video", "Предыдущее видео"),
+    ("No other audio tracks", "Других звуковых дорожек нет"),
+    ("No subtitles", "Субтитров нет"),
+    ("Subtitles", "Субтитры"),
+    ("Videos need ffmpeg", "Для видео нужен ffmpeg"),
+    ("fps", "к/с"),
+    ("Sound volume", "Громкость"),
     ("Can't play this file", "Не удаётся воспроизвести файл"),
     ("This format needs ffmpeg", "Для этого формата нужен ffmpeg"),
     ("No sound output", "Нет звукового устройства"),
@@ -221,7 +232,6 @@ const RU: &[(&str, &str)] = &[
     ("cursor sizes", "размеры курсора"),
     ("frames", "кадров"),
     ("Open in Polka", "Открывать в Polka"),
-    ("Comes with the built-in video player", "Появится вместе со встроенным видеоплеером"),
     ("Fold multi-volume archives", "Сворачивать многотомные архивы"),
     ("Caution", "Осторожно"),
     ("Don't save", "Не сохранять"),

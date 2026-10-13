@@ -11,6 +11,8 @@ pub mod player;
 pub mod syntax;
 pub mod text;
 pub mod theme;
+pub mod video;
+pub mod video_app;
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +25,7 @@ pub enum Kind {
     Text,
     Image,
     Audio,
+    Video,
 }
 
 /// What the viewer can show for this file, if anything. Launchers and
@@ -33,6 +36,9 @@ pub fn kind(path: &Path, name: &str) -> Option<Kind> {
     }
     if audio::is_audio(name) {
         return Some(Kind::Audio);
+    }
+    if video::is_video(name) {
+        return Some(Kind::Video);
     }
     if crate::launch::runs(path) || crate::vfs::is_archive_name(name) {
         return None;
@@ -54,11 +60,12 @@ pub struct OpenIn {
     pub text: bool,
     pub images: bool,
     pub audio: bool,
+    pub video: bool,
 }
 
 impl OpenIn {
     pub fn from(cfg: &crate::config::Config) -> Self {
-        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music }
+        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music, video: cfg.open_videos }
     }
 }
 
@@ -68,6 +75,7 @@ pub fn kind_in(path: &Path, name: &str, open: OpenIn) -> Option<Kind> {
         Kind::Text if open.text => Some(Kind::Text),
         Kind::Image if open.images => Some(Kind::Image),
         Kind::Audio if open.audio => Some(Kind::Audio),
+        Kind::Video if open.video => Some(Kind::Video),
         _ => None,
     }
 }
@@ -113,6 +121,7 @@ pub enum Content {
     Text(Box<TextState>),
     Image(Box<ImageState>),
     Audio(Box<audio::AudioState>),
+    Video(Box<video::VideoState>),
     Error(String),
 }
 
@@ -142,6 +151,7 @@ impl Viewer {
     pub fn open(path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>, volume: f32, ctx: &egui::Context) -> Self {
         let content = match kind(&path, &name) {
             Some(Kind::Audio) => Content::Audio(Box::new(audio::AudioState::open(path.clone(), siblings, volume, ctx))),
+            Some(Kind::Video) => Content::Video(Box::new(video::VideoState::open(path.clone(), siblings, volume, ctx))),
             Some(Kind::Image) => {
                 let index = siblings.iter().position(|p| *p == path).unwrap_or(0);
                 let siblings = if siblings.is_empty() { vec![path.clone()] } else { siblings };
@@ -246,7 +256,7 @@ impl Viewer {
                 }
                 Out::Nothing
             }
-            Content::Audio(_) | Content::Error(_) => Out::Nothing,
+            Content::Audio(_) | Content::Video(_) | Content::Error(_) => Out::Nothing,
         }
     }
 }

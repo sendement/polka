@@ -44,8 +44,13 @@ fn ext_of(path: &Path) -> String {
 fn video_tool() -> bool {
     static HAS: OnceLock<bool> = OnceLock::new();
     *HAS.get_or_init(|| {
-        std::process::Command::new("ffmpegthumbnailer").arg("-v").output().is_ok()
+        std::process::Command::new("ffmpegthumbnailer").arg("-v").output().is_ok() || ffmpeg()
     })
+}
+
+fn ffmpeg() -> bool {
+    static HAS: OnceLock<bool> = OnceLock::new();
+    *HAS.get_or_init(|| std::process::Command::new("ffmpeg").arg("-version").output().is_ok())
 }
 
 /// Files in a cursor theme's `cursors` folder (checked when decoding).
@@ -214,18 +219,17 @@ fn from_video(path: &Path) -> Option<image::DynamicImage> {
         std::thread::current().id()
     ));
     std::fs::create_dir_all(tmp.parent()?).ok()?;
-    let ok = std::process::Command::new("ffmpegthumbnailer")
-        .arg("-i")
-        .arg(path)
-        .arg("-o")
-        .arg(&tmp)
-        .args(["-s", &SIZE.to_string(), "-c", "png"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?
-        .success();
+    let quiet = |c: &mut std::process::Command| {
+        c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
+    };
+    let ok = quiet(std::process::Command::new("ffmpegthumbnailer").arg("-i").arg(path).arg("-o").arg(&tmp).args(["-s", &SIZE.to_string(), "-c", "png"]))
+        // No ffmpegthumbnailer: a frame a few seconds in (or the first one).
+        || ["5", "0"].iter().any(|at| {
+            let _ = std::fs::remove_file(&tmp);
+            let scale = format!("scale={SIZE}:{SIZE}:force_original_aspect_ratio=decrease");
+            quiet(std::process::Command::new("ffmpeg").args(["-v", "quiet", "-y", "-ss", at, "-i"]).arg(path).args(["-frames:v", "1", "-vf", &scale]).arg(&tmp))
+                && tmp.exists()
+        });
     let img = ok.then(|| image::open(&tmp).ok()).flatten();
     let _ = std::fs::remove_file(&tmp);
     img

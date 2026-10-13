@@ -59,9 +59,17 @@ impl eframe::App for App {
         self.tick();
         self.icons.trim(&ctx);
 
-        self.draw_bottom(ui);
-        self.draw_top(ui);
-        self.draw_sidebar(ui);
+        // A video full screen: the window too, and no chrome around it.
+        let full = self.video_full();
+        if full != self.full_sent {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
+            self.full_sent = full;
+        }
+        if !full {
+            self.draw_bottom(ui);
+            self.draw_top(ui);
+            self.draw_sidebar(ui);
+        }
         self.draw_center(ui);
         self.draw_overlay(&ctx);
 
@@ -96,6 +104,9 @@ impl App {
         }
         if self.overlay.is_none() && self.focus == Focus::Panes && self.audio_shown() {
             events = self.audio_keyboard(events);
+        }
+        if self.overlay.is_none() && self.focus == Focus::Panes && self.video_shown() {
+            events = self.video_keyboard(events);
         }
         for ev in events {
             match ev {
@@ -553,6 +564,16 @@ impl App {
                 (Action::Menu, tr("Settings")),
                 (Action::Back, tr("Close")),
             ],
+            None if self.video_shown() && self.focus == Focus::Panes => vec![
+                (Action::Accept, tr("Play / pause")),
+                (Action::Left, tr("Seek")),
+                (Action::Up, tr("Sound volume")),
+                (Action::LeftTrigger, tr("Video")),
+                (Action::View, tr("Full screen")),
+                (Action::Select, tr("Subtitles")),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Close")),
+            ],
             None if self.audio_shown() && self.focus == Focus::Panes => vec![
                 (Action::Accept, tr("Play / pause")),
                 (Action::Left, tr("Seek")),
@@ -664,9 +685,13 @@ impl App {
         let mut divider = None;
         let mut tab_act = None;
         let mut viewer_act = None;
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.draw_icon_pick_banner(ui);
-            tab_act = self.draw_tabs(ui);
+        let full = self.video_full();
+        let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
+        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+            if !full {
+                self.draw_icon_pick_banner(ui);
+                tab_act = self.draw_tabs(ui);
+            }
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
                 let theme = crate::viewer::theme::by_name(&self.cfg.viewer.theme);
                 viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
@@ -1944,21 +1969,19 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
     let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
-    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_video];
+    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos];
     let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
     for (i, label) in kinds.iter().enumerate() {
         let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
         let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
-        let ready = crate::app::OPEN_READY[i];
-        let on = flags[i] && ready;
+        let on = flags[i];
         let cursor = st.row == row::OPEN_IN && st.chip == i;
         let fill = if on { v.selection.bg_fill.gamma_multiply(0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
         let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
         ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
-        let color = if ready { v.text_color() } else { v.weak_text_color() };
+        let color = v.text_color();
         let text = if on { format!("✔ {label}") } else { label.to_string() };
         ui.painter().text(chip.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), color);
-        let resp = if ready { resp } else { resp.on_hover_text(tr("Comes with the built-in video player")) };
         if resp.clicked() {
             ev = Some(SettingsEvent::Chip(i));
         }
