@@ -1865,6 +1865,19 @@ fn mouse(h: &mut Harness<'static, App>) {
     let mut sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
     sel.sort();
     assert_eq!(sel, ["f2.txt", "f3.txt", "f4.txt"]);
+    // All three picked up: a stack with a count; let go back in the same
+    // folder nothing happens and the selection stays.
+    let (_, hot3) = rect_of(h, "f3.txt");
+    press_at(h, hot3.center(), true, Modifiers::NONE);
+    move_to(h, hot3.center() + vec2(8.0, 8.0));
+    move_to(h, hot3.center() + vec2(-200.0, 120.0));
+    move_to(h, hot3.center() + vec2(-180.0, 140.0));
+    assert_eq!(h.state().drag.as_ref().map(|d| d.shown.len()), Some(3));
+    shot(h, "b0b-drag-three");
+    press_at(h, hot3.center() + vec2(-180.0, 140.0), false, Modifiers::NONE);
+    settle(h);
+    assert_eq!(h.state().pane().selected.len(), 3);
+    assert!(!h.state().pane().cursor_hidden);
     // A click on empty space below the entries clears it.
     let (last, _) = rect_of(h, "f6.txt");
     let empty = pos2(last.center().x, last.max.y + 60.0);
@@ -1878,14 +1891,26 @@ fn mouse(h: &mut Harness<'static, App>) {
     let (ra, _) = rect_of(h, "A");
     press_at(h, hot1.center(), true, Modifiers::NONE);
     move_to(h, hot1.center() + vec2(8.0, 8.0));
-    move_to(h, ra.center());
+    // A quick swing sideways tilts the stack following the pointer.
+    move_to(h, hot1.center() + vec2(300.0, 8.0));
     move_to(h, ra.center());
     assert!(h.state().drag.is_some(), "drag did not start");
+    assert!(h.state().drag.as_ref().unwrap().angle.abs() > 0.02, "no sway: {}", h.state().drag.as_ref().unwrap().angle);
     shot(h, "b1-drag-onto-folder");
+    move_to(h, ra.center());
+    move_to(h, ra.center());
+    shot(h, "b1b-drag-settled");
     press_at(h, ra.center(), false, Modifiers::NONE);
     wait_jobs(h);
     assert!(dir.join("A/f1.txt").exists() && !dir.join("f1.txt").exists(), "not moved");
     assert!(h.state().drag.is_none());
+    // No cursor jumping to the top in the moved item's place; the pad's
+    // first press only brings the cursor back.
+    assert!(h.state().pane().cursor_hidden && h.state().pane().selected.is_empty());
+    let before = h.state().pane().cursor;
+    press(h, &[Action::Down]);
+    assert!(!h.state().pane().cursor_hidden);
+    assert_eq!(h.state().pane().cursor, before);
     // f5 with Ctrl onto the archive: copied into it.
     settle(h);
     let (_, hot5) = rect_of(h, "f5.txt");

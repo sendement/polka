@@ -53,6 +53,9 @@ pub struct Pane {
     pub band: Option<crate::mouse::Band>,
     /// Entries drawn last frame: (index, row, icon and name), for tests.
     pub drawn: Vec<(usize, egui::Rect, egui::Rect)>,
+    /// No cursor shown (after a mouse drop took its item away); the next
+    /// pad or arrow press only brings it back.
+    pub cursor_hidden: bool,
     /// Show each volume set as one item (until pointed at).
     pub collapse: bool,
     /// Sets shown open now (under the mouse / cursor).
@@ -86,6 +89,7 @@ impl Pane {
             hover_volume: None,
             band: None,
             drawn: Vec::new(),
+            cursor_hidden: false,
             collapse: cfg.collapse_volumes,
             expanded: Vec::new(),
             collapsed: HashMap::new(),
@@ -326,6 +330,7 @@ impl Pane {
     pub fn set_cursor(&mut self, i: usize) {
         if i < self.entries.len() {
             self.cursor = i;
+            self.cursor_hidden = false;
             self.scroll_to_cursor = true;
         }
     }
@@ -1360,6 +1365,13 @@ impl App {
         }
         if self.cur_tab().viewer.is_some() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.viewer_input(a);
+        }
+        // A hidden cursor comes back first instead of acting unseen.
+        if self.pane().cursor_hidden && !self.usage_shown() {
+            self.pane_mut().cursor_hidden = false;
+            if matches!(a, Action::Up | Action::Down | Action::Left | Action::Right | Action::Accept | Action::Select | Action::Actions | Action::Home | Action::End) {
+                return;
+            }
         }
         if self.usage_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.usage_input(a);

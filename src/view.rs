@@ -654,7 +654,9 @@ impl App {
                                 dropped = Some(i);
                             }
                         }
-                        let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon));
+                        let under = dragging && !it.usage && pointer.is_some_and(|p| rect.contains(p));
+                        let grow = 1.0 + 0.15 * ui.ctx().animate_bool_with_time(ui.id().with(("side-grow", i)), under, 0.12);
+                        let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon * grow));
                         let px = lookup_px(ui, side_icon);
                         // Custom icons are theme names or image files we stored.
                         let custom = it.custom_icon.as_deref().and_then(|c| {
@@ -726,7 +728,8 @@ impl App {
                 return;
             }
             let dragging = self.drag.is_some();
-            let App { tabs, icons, cfg, .. } = self;
+            let App { tabs, icons, cfg, drag, .. } = self;
+            let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab, pane)).map(|d| &d.names);
             let [a, b] = &mut tabs[tab].panes;
             if dual {
                 let full = ui.available_rect_before_wrap();
@@ -745,12 +748,12 @@ impl App {
                     };
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx), dragging) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx), dragging, lifted(idx)) {
                         events.push((idx, e));
                     }
                 }
             } else {
-                for e in draw_pane(ui, a, icons, cfg, focused, (tab, 0), dragging) {
+                for e in draw_pane(ui, a, icons, cfg, focused, (tab, 0), dragging, lifted(0)) {
                     events.push((0, e));
                 }
             }
@@ -784,6 +787,7 @@ impl App {
             match e {
                 PaneEvent::Click(i, toggle, range) => {
                     let p = self.pane_mut();
+                    p.cursor_hidden = false;
                     if range {
                         let (a, b) = (p.cursor.min(i), p.cursor.max(i));
                         if !toggle {
@@ -963,7 +967,7 @@ enum PaneEvent {
     ClearSelection,
 }
 
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool) -> Vec<PaneEvent> {
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>) -> Vec<PaneEvent> {
     let mut events = Vec::new();
     // Dragged items over this pane: dropped on release.
     let whole = ui.max_rect();
@@ -1080,7 +1084,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 };
                 let r = ui.interact(rect, ui.id().with(("entry", i)), Sense::click_and_drag());
                 let sel = pane.selected.contains(&e.name);
-                let is_cursor = i == pane.cursor;
+                let is_cursor = i == pane.cursor && !pane.cursor_hidden;
                 let vol = pane.volumes.get(&e.name);
                 // A folded volume set: the archive's name, all volumes' size.
                 let folded = pane.collapsed.get(&e.name);
@@ -1110,9 +1114,16 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 };
                 let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), lookup_px(ui, icon_size)) };
                 let text_c = if e.hidden() { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
+                // While dragging: the items picked up fade where they lie, and
+                // the icon under the pointer grows a little.
+                let lifted = lifted.is_some_and(|l| l.contains(&e.name));
+                let alpha = if lifted { 0.35 } else { 1.0 };
+                let under = dragging && !lifted && pointer.is_some_and(|p| rect.contains(p));
+                let grow = 1.0 + 0.15 * ui.ctx().animate_bool_with_time(ui.id().with(("grow", i)), under, 0.12);
+                let big = |r: Rect| Rect::from_center_size(r.center(), r.size() * grow);
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
-                    paint_icon(ui, ir, icon, thumb);
+                    paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     hot = ir.union(Rect::from_center_size(pos2(rect.center().x, ir.max.y + 4.0 + g.size().y / 2.0), g.size()));
@@ -1127,7 +1138,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     }
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
-                    paint_icon(ui, ir, icon, thumb);
+                    paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     let tag_font = FontId::proportional((list_font - 2.0).max(10.0));
                     // Room for the volume tag: "archive · 2/4" on the active set.
@@ -1334,7 +1345,8 @@ fn lock_badge(ui: &Ui, icon: Rect, e: &crate::vfs::Entry, path: Option<&std::pat
 }
 
 /// Theme icon, or a thumbnail fitted into the square keeping its aspect.
-fn paint_icon(ui: &Ui, rect: Rect, icon: Option<String>, thumb: Option<(String, f32)>) {
+fn paint_icon(ui: &Ui, rect: Rect, icon: Option<String>, thumb: Option<(String, f32)>, alpha: f32) {
+    let tint = Color32::WHITE.gamma_multiply(alpha);
     if let Some((uri, aspect)) = thumb {
         let size = if aspect >= 1.0 {
             vec2(rect.width(), rect.width() / aspect)
@@ -1342,9 +1354,9 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Option<String>, thumb: Option<(String, 
             vec2(rect.height() * aspect, rect.height())
         };
         let r = Rect::from_center_size(rect.center(), size);
-        egui::Image::new(uri).corner_radius(3).paint_at(ui, r);
+        egui::Image::new(uri).corner_radius(3).tint(tint).paint_at(ui, r);
     } else if let Some(u) = icon {
-        egui::Image::new(u).paint_at(ui, rect);
+        egui::Image::new(u).tint(tint).paint_at(ui, rect);
     }
 }
 
