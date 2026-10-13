@@ -49,6 +49,12 @@ pub struct Pane {
     pub volumes: HashMap<String, crate::volumes::Member>,
     /// Volume set under the mouse in the last frame.
     pub hover_volume: Option<String>,
+    /// Show each volume set as one item (until pointed at).
+    pub collapse: bool,
+    /// Sets shown open now (under the mouse / cursor).
+    pub expanded: Vec<String>,
+    /// Collapsed sets on screen: head entry name → (set, total size, names).
+    pub collapsed: HashMap<String, (crate::volumes::Member, u64, Vec<String>)>,
 }
 
 impl Pane {
@@ -74,6 +80,9 @@ impl Pane {
             page_rows: 10,
             volumes: HashMap::new(),
             hover_volume: None,
+            collapse: cfg.collapse_volumes,
+            expanded: Vec::new(),
+            collapsed: HashMap::new(),
         };
         p.load(loc, None, cfg);
         p
@@ -93,15 +102,43 @@ impl Pane {
 
     /// Selection if any, else the entry under the cursor.
     pub fn targets(&self) -> Vec<Entry> {
-        if self.selected.is_empty() {
+        let picked: Vec<Entry> = if self.selected.is_empty() {
             self.current().cloned().into_iter().collect()
         } else {
             self.entries.iter().filter(|e| self.selected.contains(&e.name)).cloned().collect()
+        };
+        // A collapsed volume set stands for all its volumes.
+        let mut out = Vec::with_capacity(picked.len());
+        for e in picked {
+            match self.collapsed.get(&e.name) {
+                Some((_, _, names)) => out.extend(self.all.iter().filter(|x| names.contains(&x.name)).cloned()),
+                None => out.push(e),
+            }
         }
+        out
+    }
+
+    /// Open these volume sets (others collapse); keeps the cursor's item.
+    pub fn set_expanded(&mut self, keys: Vec<String>) {
+        if keys == self.expanded || !self.collapse {
+            return;
+        }
+        self.expanded = keys;
+        let keep = self.scroll_to_cursor;
+        self.refilter(None);
+        self.scroll_to_cursor = keep;
+    }
+
+    /// `refilter` after settings changed.
+    pub fn refilter_with(&mut self, focus: Option<String>, cfg: &Config) {
+        self.collapse = cfg.collapse_volumes;
+        self.refilter(focus);
     }
 
     fn load(&mut self, loc: Location, focus: Option<String>, cfg: &Config) {
         self.loc = loc.clone();
+        self.collapse = cfg.collapse_volumes;
+        self.expanded.clear();
         self.selected.clear();
         self.error = None;
         if !matches!(loc, Location::Local(_)) {
@@ -170,10 +207,44 @@ impl Pane {
         } else {
             HashMap::new()
         };
-        self.entries = match self.filter.as_deref() {
+        let shown: Vec<Entry> = match self.filter.as_deref() {
             Some(f) if !f.is_empty() => self.all.iter().filter(|e| vfs::name_matches(&e.name, f)).cloned().collect(),
             _ => self.all.clone(),
         };
+        // Fold each volume set into its first item, unless it's open.
+        self.collapsed.clear();
+        self.entries = if self.collapse && !self.volumes.is_empty() {
+            let mut out = Vec::with_capacity(shown.len());
+            let mut head_of: HashMap<String, String> = HashMap::new();
+            for e in shown {
+                let Some(m) = self.volumes.get(&e.name).filter(|m| !self.expanded.contains(&m.key)) else {
+                    out.push(e);
+                    continue;
+                };
+                match head_of.get(&m.key) {
+                    Some(head) => {
+                        let c = self.collapsed.get_mut(head).unwrap();
+                        c.1 += e.size;
+                        c.2.push(e.name.clone());
+                    }
+                    None => {
+                        head_of.insert(m.key.clone(), e.name.clone());
+                        self.collapsed.insert(e.name.clone(), (m.clone(), e.size, vec![e.name.clone()]));
+                        out.push(e);
+                    }
+                }
+            }
+            out
+        } else {
+            shown
+        };
+        // A hidden volume's place is taken by its set's first item.
+        let focus = focus.map(|n| {
+            if self.entries.iter().any(|e| e.name == n) {
+                return n;
+            }
+            self.collapsed.iter().find(|(_, (_, _, names))| names.contains(&n)).map(|(h, _)| h.clone()).unwrap_or(n)
+        });
         self.cursor = focus
             .and_then(|n| self.entries.iter().position(|e| e.name == n))
             .unwrap_or(0);
@@ -390,12 +461,17 @@ pub enum Cmd {
     Help,
     Quit,
     Nothing,
+    /// New file from a template (None = empty).
+    NewFile(Option<PathBuf>),
+    OpenTemplates,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubMenu {
     View,
     Sort,
+    /// A folder of templates (index into `App::templates`).
+    Templates(usize),
 }
 
 pub struct MenuItem {
@@ -466,6 +542,7 @@ pub enum OskPurpose {
     Rename { old: PathBuf },
     RenameInArchive { archive: PathBuf, from: String },
     NewFolder { dest: Dest },
+    NewFile { dest: Dest, template: Option<PathBuf> },
     GoTo,
     /// Live quick filter; `prev` is restored on cancel.
     Filter { prev: Option<String> },
@@ -526,7 +603,7 @@ impl Osk {
                 let s: String = text.iter().collect();
                 ops::split_ext(&s).0.chars().count()
             }
-            OskPurpose::RenameInArchive { .. } => {
+            OskPurpose::RenameInArchive { .. } | OskPurpose::NewFile { .. } => {
                 let s: String = text.iter().collect();
                 ops::split_ext(&s).0.chars().count()
             }
@@ -767,7 +844,7 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 7;
+pub const SETTINGS_ROWS: usize = 9;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const SIDE_ICON: usize = 1;
@@ -775,12 +852,32 @@ pub mod row {
     pub const GRID_ICON: usize = 3;
     pub const ZOOM: usize = 4;
     pub const THEME: usize = 5;
-    pub const CLOSE: usize = 6;
+    pub const OPEN_IN: usize = 6;
+    pub const VOLUMES: usize = 7;
+    pub const CLOSE: usize = 8;
+}
+
+/// "Open in Polka" kinds, in the settings' order. Audio and video wait for
+/// their players.
+pub const OPEN_KINDS: usize = 4;
+pub const OPEN_READY: [bool; OPEN_KINDS] = [true, true, false, false];
+
+impl Config {
+    pub fn open_flag(&mut self, i: usize) -> &mut bool {
+        match i {
+            0 => &mut self.open_text,
+            1 => &mut self.open_images,
+            2 => &mut self.open_audio,
+            _ => &mut self.open_video,
+        }
+    }
 }
 
 /// Settings dialog. Changes apply (and save) immediately.
 pub struct Settings {
     pub row: usize,
+    /// Cursor among the "open in Polka" kinds.
+    pub chip: usize,
     /// Cursor in the colour row: presets, then saved colours, then "+".
     pub swatch: usize,
     pub editor: Option<ColorEditor>,
@@ -925,6 +1022,8 @@ pub struct App {
     pub edit_hold: Option<bool>,
     /// Text copied in the viewer (when the system clipboard can't be read).
     pub text_clip: Option<String>,
+    /// Template folders for the "New document" submenus.
+    pub templates: Vec<PathBuf>,
 }
 
 impl App {
@@ -957,6 +1056,7 @@ impl App {
         ctx.set_zoom_factor(cfg.zoom);
         apply_accent(&ctx, &cfg);
         crate::fonts::install_with(&ctx, cfg.viewer.font.as_deref());
+        crate::locks::set_waker(ctx.clone());
         let mut app = Self {
             cfg,
             tabs: vec![tab],
@@ -982,6 +1082,7 @@ impl App {
             divider_x: None,
             edit_hold: None,
             text_clip: None,
+            templates: Vec::new(),
         };
         app.refresh_sidebar();
         app
@@ -1597,6 +1698,45 @@ impl App {
                 self.pane_mut().navigate(loc, None, &cfg);
             }
             OskPurpose::Filter { .. } => {}
+            OskPurpose::NewFile { dest, template } => {
+                if bad_name {
+                    return self.toast(format!("{}: {text}", tr("Failed")), true);
+                }
+                if self.pane().all.iter().any(|e| e.name == text) {
+                    return self.toast(format!("{}: {} {}", tr("Failed"), text, tr("already exists")), true);
+                }
+                let write = |to: &Path| -> std::io::Result<()> {
+                    match &template {
+                        Some(t) => std::fs::copy(t, to).map(|_| ()),
+                        None => std::fs::File::create_new(to).map(|_| ()),
+                    }
+                };
+                match dest {
+                    Dest::Dir(dir) => match write(&dir.join(&text)) {
+                        Ok(()) => {
+                            let p = self.pane_mut();
+                            p.reload(&cfg);
+                            if let Some(i) = p.entries.iter().position(|e| e.name == text) {
+                                p.set_cursor(i);
+                            }
+                        }
+                        Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
+                    },
+                    Dest::Archive { archive, inner } => {
+                        // Made on disk under its final name, then added.
+                        let tmp = vfs::temp_root().join(format!("new-{}", std::process::id()));
+                        let _ = std::fs::remove_dir_all(&tmp);
+                        let made = std::fs::create_dir_all(&tmp).and_then(|_| write(&tmp.join(&text)));
+                        if let Err(e) = made {
+                            return self.toast(format!("{}: {e}", tr("Failed")), true);
+                        }
+                        let path = if inner.is_empty() { text.clone() } else { format!("{inner}/{text}") };
+                        let plan = crate::archive_rw::Plan { add: vec![(tmp.join(&text), path)], ..Default::default() };
+                        self.pending_focus(text);
+                        self.start(Op::ArchiveEdit { archive, plan, label: tr("New document") });
+                    }
+                }
+            }
             OskPurpose::NewFolder { dest: Dest::Dir(dir) } => {
                 if bad_name {
                     return self.toast(format!("{}: {text}", tr("Failed")), true);
@@ -1642,7 +1782,7 @@ impl App {
                 let path = p.entry_path(&e).expect("local entry");
                 if vfs::is_archive_name(&e.name) {
                     self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
-                } else if crate::viewer::kind(&path, &e.name).is_some() {
+                } else if crate::viewer::kind_in(&path, &e.name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
                     self.view_current();
                 } else if let Err(err) = crate::launch::open(&path) {
                     self.toast(format!("{}: {err}", tr("Failed")), true);
@@ -1668,9 +1808,10 @@ impl App {
                     let (archive, tx) = (archive.clone(), self.msg_tx.clone());
                     let wake = self.wake();
                     let (tab, origin, name) = (self.tab, self.cur_tab().active, e.name.clone());
+                    let open_in = crate::viewer::OpenIn::from(&self.cfg);
                     std::thread::spawn(move || {
                         let msg = match vfs::extract_to_temp(&archive, &inner_path) {
-                            Ok(p) if crate::viewer::kind(&p, &name).is_some() => {
+                            Ok(p) if crate::viewer::kind_in(&p, &name, open_in).is_some() => {
                                 let source = Some((archive.clone(), inner_path.clone()));
                                 Some(Msg::View { tab, path: p, name, origin, source })
                             }
@@ -1698,8 +1839,12 @@ impl App {
         let Some(e) = p.current().filter(|e| !e.is_dir).cloned() else { return };
         let Some(path) = p.entry_path(&e) else { return self.activate() };
         // Pictures of the folder, in the pane's order, for ←/→.
-        let siblings: Vec<PathBuf> = if crate::viewer::image::is_image(&e.name) {
-            p.entries.iter().filter(|x| !x.is_dir && crate::viewer::image::is_image(&x.name)).filter_map(|x| p.entry_path(x)).collect()
+        let siblings: Vec<PathBuf> = if crate::viewer::image::is_picture(&path, &e.name) {
+            p.entries
+                .iter()
+                .filter(|x| !x.is_dir)
+                .filter_map(|x| p.entry_path(x).filter(|xp| crate::viewer::image::is_picture(xp, &x.name)))
+                .collect()
         } else {
             Vec::new()
         };
@@ -1802,6 +1947,7 @@ impl App {
     }
 
     fn open_actions_menu(&mut self) {
+        self.scan_templates();
         if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
             return self.viewer_text_menu();
         }
@@ -1839,8 +1985,10 @@ impl App {
         add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
         if let Some(path) = targets.first().filter(|e| single && !e.is_dir).and_then(|e| p.entry_path(e)) {
             let name = targets[0].name.clone();
-            if crate::viewer::kind(&path, &name).is_some() {
+            if crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
                 add(tr("Open in another app"), Cmd::OpenExternal, true);
+            } else if crate::viewer::kind(&path, &name).is_some() {
+                add(tr("Open in Polka"), Cmd::OpenInViewer, true);
             } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
                 add(tr("View as text"), Cmd::OpenInViewer, true);
             }
@@ -1848,6 +1996,8 @@ impl App {
         add(tr("Copy"), Cmd::Copy, any);
         add(tr("Cut"), Cmd::Cut, any && editable);
         add(tr("Paste"), Cmd::Paste, self.clip.is_some() && writable);
+        add(tr("New folder"), Cmd::NewFolder, writable);
+        add(tr("New document"), Cmd::Submenu(SubMenu::Templates(0)), writable);
         if dual {
             add(tr("Copy to other pane"), Cmd::CopyOther, any && other_writable);
             add(tr("Move to other pane"), Cmd::MoveOther, any && editable && other_writable);
@@ -1882,13 +2032,76 @@ impl App {
         self.overlay = Some(Overlay::Menu(Menu::new(title, items).first_enabled()));
     }
 
+    /// Template folders, the top one first (for the submenus).
+    fn scan_templates(&mut self) {
+        fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+            out.push(dir.to_path_buf());
+            if depth >= 3 {
+                return;
+            }
+            let mut subs: Vec<PathBuf> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.'))
+                .map(|e| e.path())
+                .collect();
+            subs.sort();
+            for d in subs {
+                walk(&d, depth + 1, out);
+            }
+        }
+        self.templates.clear();
+        if let Some(t) = dirs::template_dir() {
+            walk(&t, 0, &mut self.templates);
+        }
+    }
+
+    fn templates_menu(&self, i: usize) -> Vec<MenuItem> {
+        let mut items = Vec::new();
+        if i == 0 {
+            items.push(item(tr("Empty file"), Cmd::NewFile(None)));
+        }
+        let Some(dir) = self.templates.get(i) else {
+            items.push(MenuItem { enabled: false, ..item(tr("No templates folder"), Cmd::Nothing) });
+            return items;
+        };
+        let mut entries: Vec<(bool, String, PathBuf)> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| (!e.path().is_dir(), e.file_name().to_string_lossy().into_owned(), e.path()))
+            .collect();
+        entries.sort_by(|a, b| (a.0, a.1.to_lowercase()).cmp(&(b.0, b.1.to_lowercase())));
+        for (file, name, path) in entries {
+            if !file {
+                if let Some(j) = self.templates.iter().position(|t| *t == path) {
+                    items.push(item(&name, Cmd::Submenu(SubMenu::Templates(j))));
+                }
+            } else {
+                // Shown without the extension, as in Nautilus.
+                items.push(item(ops::split_ext(&name).0, Cmd::NewFile(Some(path))));
+            }
+        }
+        if i == 0 {
+            if items.len() == 1 {
+                items.push(MenuItem { enabled: false, ..item(tr("Put files into Templates to see them here"), Cmd::Nothing) });
+            }
+            items.push(item(tr("Open templates folder"), Cmd::OpenTemplates));
+        }
+        items
+    }
+
     fn open_app_menu(&mut self) {
+        self.scan_templates();
         let local = self.pane().loc.local_path().is_some();
         let writable = self.pane().loc.dest().is_some();
         let items = vec![
             item(tr("New tab"), Cmd::NewTab),
             MenuItem { enabled: self.tabs.len() > 1, ..item(tr("Close tab"), Cmd::CloseTab) },
             MenuItem { enabled: writable, ..item(tr("New folder"), Cmd::NewFolder) },
+            MenuItem { enabled: writable, ..item(tr("New document"), Cmd::Submenu(SubMenu::Templates(0))) },
             MenuItem { enabled: self.clip.is_some() && writable, ..item(tr("Paste"), Cmd::Paste) },
             item(tr("Filter…"), Cmd::Filter),
             MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
@@ -1907,7 +2120,7 @@ impl App {
         let c = &self.cfg;
         let (title, items) = match kind {
             SubMenu::View => (
-                tr("View"),
+                tr("View").to_string(),
                 vec![
                     toggle(tr("List"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
                     toggle(tr("Grid"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
@@ -1918,8 +2131,12 @@ impl App {
                     item(tr("Icon theme…"), Cmd::IconThemes),
                 ],
             ),
+            SubMenu::Templates(i) => {
+                let title = if i == 0 { tr("New document").to_string() } else { self.templates[i].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
+                (title, self.templates_menu(i))
+            }
             SubMenu::Sort => (
-                tr("Sorting"),
+                tr("Sorting").to_string(),
                 vec![
                     toggle(tr("By name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
                     toggle(tr("By size"), Cmd::Sort(SortKey::Size), c.sort == SortKey::Size),
@@ -1930,7 +2147,7 @@ impl App {
                 ],
             ),
         };
-        Menu { kind: Some(kind), ..Menu::new(title, items) }
+        Menu { kind: Some(kind), ..Menu::new(&title, items) }
     }
 
     /// Accept the cursor item of the menu at `depth`: open a submenu, run a
@@ -1988,8 +2205,11 @@ impl App {
             _ => 0.0,
         };
         match a {
-            Action::Up => st.row = st.row.saturating_sub(1),
-            Action::Down => st.row = (st.row + 1).min(SETTINGS_ROWS - 1),
+            Action::Up | Action::Down => {
+                st.row = if a == Action::Up { st.row.saturating_sub(1) } else { (st.row + 1).min(SETTINGS_ROWS - 1) };
+                // Long settings scroll to the row.
+                self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
+            }
             Action::Back | Action::Menu => self.overlay = None,
             Action::Left | Action::Right => {
                 let row = st.row;
@@ -2000,6 +2220,14 @@ impl App {
                 match row {
                     row::ACCENT => self.settings_pick(swatch),
                     row::THEME => self.run(Cmd::IconThemes),
+                    row::OPEN_IN => {
+                        let chip = match &self.overlay {
+                            Some(Overlay::Settings(st)) => st.chip,
+                            _ => 0,
+                        };
+                        self.settings_toggle_open(chip);
+                    }
+                    row::VOLUMES => self.settings_step(row::VOLUMES, 0.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
                 }
@@ -2134,6 +2362,23 @@ impl App {
                     }
                 }
             }
+            row::OPEN_IN => {
+                if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+                    st.chip = (st.chip as isize + d as isize).clamp(0, OPEN_KINDS as isize - 1) as usize;
+                }
+                return;
+            }
+            row::VOLUMES => {
+                self.cfg.collapse_volumes = !self.cfg.collapse_volumes;
+                self.cfg.save();
+                let cfg = self.cfg.clone();
+                for t in &mut self.tabs {
+                    for p in &mut t.panes {
+                        p.refilter_with(None, &cfg);
+                    }
+                }
+                return;
+            }
             row::SIDE_ICON => step(&mut self.cfg.side_icon, SIDE_ICON),
             row::LIST_ICON => step(&mut self.cfg.list_icon, LIST_ICON),
             row::GRID_ICON => step(&mut self.cfg.grid_icon, GRID_ICON),
@@ -2150,6 +2395,20 @@ impl App {
                 p.scroll_to_cursor = true;
             }
         }
+    }
+
+    /// Flip "open in Polka" for kind `i` (if its viewer exists).
+    pub fn settings_toggle_open(&mut self, i: usize) {
+        if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+            st.row = row::OPEN_IN;
+            st.chip = i;
+        }
+        if !OPEN_READY[i] {
+            return self.toast(tr("Comes with the built-in player"), false);
+        }
+        let f = self.cfg.open_flag(i);
+        *f = !*f;
+        self.cfg.save();
     }
 
     /// Choose swatch `i` (or open the mixer on the "+" tile).
@@ -2399,6 +2658,25 @@ impl App {
                 }
             }
             Cmd::OpenInViewer => self.view_current(),
+            Cmd::NewFile(template) => {
+                let Some(dest) = self.pane().loc.dest() else { return };
+                let name = match &template {
+                    Some(t) => t.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    None => tr("New file").to_string(),
+                };
+                // A free name to start from.
+                let taken: HashSet<String> = self.pane().all.iter().map(|e| e.name.clone()).collect();
+                let name = ops::unique_name(&name, |n| taken.contains(n));
+                self.overlay = Some(Overlay::Osk(Osk::new(tr("File name"), &name, OskPurpose::NewFile { dest, template })));
+            }
+            Cmd::OpenTemplates => {
+                if let Some(t) = dirs::template_dir() {
+                    let _ = std::fs::create_dir_all(&t);
+                    let cfg = self.cfg.clone();
+                    self.close_viewer();
+                    self.pane_mut().navigate(Location::Local(t), None, &cfg);
+                }
+            }
             Cmd::ViewerEdit
             | Cmd::ViewerInsertAsk
             | Cmd::ViewerNewline
@@ -2554,7 +2832,7 @@ impl App {
             Cmd::Settings => {
                 let sw = swatches(&self.cfg);
                 let swatch = sw.iter().position(|c| *c == self.cfg.accent).unwrap_or(0);
-                self.overlay = Some(Overlay::Settings(Settings { row: 0, swatch, editor: None }));
+                self.overlay = Some(Overlay::Settings(Settings { row: 0, chip: 0, swatch, editor: None }));
             }
             Cmd::IconThemes => {
                 let system = crate::icons::detect_theme().unwrap_or_else(|| "hicolor".into());

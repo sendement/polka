@@ -8,6 +8,11 @@ use crossbeam_channel::Receiver;
 
 pub const EXTS: &[&str] = &["png", "jpg", "jpeg", "jpe", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "svgz"];
 
+/// A picture by name, or an X cursor (no extension) by its content.
+pub fn is_picture(path: &Path, name: &str) -> bool {
+    is_image(name) || crate::xcursor::is_cursor(path)
+}
+
 pub fn is_image(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.rsplit_once('.').is_some_and(|(_, e)| EXTS.contains(&e))
@@ -33,6 +38,11 @@ pub struct Decoded {
 pub struct Picture {
     pub path: PathBuf,
     pub pixels: Option<Pixels>,
+    /// Animated cursor frames with their delays (ms); `pixels` shows one.
+    pub frames: Vec<(egui::TextureHandle, u32)>,
+    /// X cursor: its nominal sizes and the hotspot (pixels).
+    pub cursor_sizes: Vec<u32>,
+    pub hotspot: Option<(u32, u32)>,
     pub full: Option<[usize; 2]>,
     pub error: Option<String>,
     loading: Option<Receiver<Result<Decoded, String>>>,
@@ -58,7 +68,33 @@ impl Picture {
     pub fn open(path: PathBuf, ctx: &egui::Context) -> Self {
         if by_uri(&path) {
             let uri = format!("file://{}", path.display());
-            return Picture { path, pixels: Some(Pixels::Uri(uri)), full: None, error: None, loading: None };
+            return Picture { path, pixels: Some(Pixels::Uri(uri)), frames: Vec::new(), cursor_sizes: Vec::new(), hotspot: None, full: None, error: None, loading: None };
+        }
+        if crate::xcursor::is_cursor(&path) {
+            // Small: decoded right here, every frame of the biggest size.
+            let frames = crate::xcursor::largest(&path).unwrap_or_default();
+            let full = frames.first().map(|f| [f.width as usize, f.height as usize]);
+            let hotspot = frames.first().map(|f| f.hot);
+            let opts = egui::TextureOptions::NEAREST;
+            let frames: Vec<(egui::TextureHandle, u32)> = frames
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let img = egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.rgba);
+                    (ctx.load_texture(format!("{}#{i}", path.display()), img, opts), f.delay.max(20))
+                })
+                .collect();
+            let error = frames.is_empty().then(|| "not a cursor".to_string());
+            return Picture {
+                pixels: frames.first().map(|(t, _)| Pixels::Texture(t.clone())),
+                cursor_sizes: crate::xcursor::sizes(&path),
+                hotspot,
+                frames,
+                full,
+                error,
+                loading: None,
+                path,
+            };
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         let max_side = ctx.input(|i| i.max_texture_side).clamp(2048, 16384);
@@ -70,11 +106,23 @@ impl Picture {
                 ctx2.request_repaint();
             })
             .ok();
-        Picture { path, pixels: None, full: None, error: None, loading: Some(rx) }
+        Picture { path, pixels: None, frames: Vec::new(), cursor_sizes: Vec::new(), hotspot: None, full: None, error: None, loading: Some(rx) }
     }
 
-    /// Pick up a finished decode.
+    /// Pick up a finished decode; step animated cursors.
     pub fn poll(&mut self, ctx: &egui::Context) {
+        if self.frames.len() > 1 {
+            let total: u32 = self.frames.iter().map(|f| f.1).sum();
+            let mut t = (ctx.input(|i| i.time) * 1000.0) as u64 % total.max(1) as u64;
+            for (tex, delay) in &self.frames {
+                if t < *delay as u64 {
+                    self.pixels = Some(Pixels::Texture(tex.clone()));
+                    ctx.request_repaint_after(std::time::Duration::from_millis(*delay as u64 - t));
+                    break;
+                }
+                t -= *delay as u64;
+            }
+        }
         let Some(rx) = &self.loading else { return };
         if let Ok(r) = rx.try_recv() {
             self.loading = None;

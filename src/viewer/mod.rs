@@ -25,7 +25,7 @@ pub enum Kind {
 /// What the viewer can show for this file, if anything. Launchers and
 /// programs keep running instead of being shown.
 pub fn kind(path: &Path, name: &str) -> Option<Kind> {
-    if image::is_image(name) {
+    if image::is_picture(path, name) {
         return Some(Kind::Image);
     }
     if crate::launch::runs(path) || crate::vfs::is_archive_name(name) {
@@ -40,6 +40,28 @@ pub fn kind(path: &Path, name: &str) -> Option<Kind> {
         return Some(Kind::Text);
     }
     None
+}
+
+/// Which kinds open in Polka (from the settings).
+#[derive(Clone, Copy)]
+pub struct OpenIn {
+    pub text: bool,
+    pub images: bool,
+}
+
+impl OpenIn {
+    pub fn from(cfg: &crate::config::Config) -> Self {
+        OpenIn { text: cfg.open_text, images: cfg.open_images }
+    }
+}
+
+/// [`kind`], if that kind is set to open in Polka.
+pub fn kind_in(path: &Path, name: &str, open: OpenIn) -> Option<Kind> {
+    match kind(path, name)? {
+        Kind::Text if open.text => Some(Kind::Text),
+        Kind::Image if open.images => Some(Kind::Image),
+        _ => None,
+    }
 }
 
 pub struct TextState {

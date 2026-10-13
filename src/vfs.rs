@@ -520,6 +520,7 @@ pub fn archive_index(archive: &Path) -> std::io::Result<Arc<ArchiveIndex>> {
 }
 
 fn headers_libarchive(archive: &Path) -> std::io::Result<Vec<(String, u32, u64, i64)>> {
+    crate::archive_rw::utf8_locale();
     let headers: Arc<Mutex<Vec<(String, u32, u64, i64)>>> = Default::default();
     let sink = headers.clone();
     let file = crate::volumes::open(archive)?;
@@ -623,6 +624,7 @@ pub fn extract(archive: &Path, items: &[String], dest: &Path, progress: impl FnM
     if crate::volumes::is_rar_set(archive) {
         return with_rar_set(archive, |pw| extract_7z(archive, items, dest, pw));
     }
+    crate::archive_rw::utf8_locale();
     let pw = password(archive);
     match extract_libarchive(archive, items, dest, progress, pw.as_deref()) {
         Ok(()) => Ok(()),

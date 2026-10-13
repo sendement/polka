@@ -382,6 +382,9 @@ fn pin_icons(h: &mut Harness<'static, App>) {
     volumes(h);
     viewer(h);
     editing(h);
+    folding_and_locks(h);
+    templates(h);
+    cursors(h);
 }
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
@@ -592,6 +595,8 @@ fn volumes(h: &mut Harness<'static, App>) {
             std::fs::copy(e.path(), work.join(e.file_name())).unwrap();
         }
     }
+    // Volumes one by one first; folding is checked further down.
+    h.state_mut().cfg.collapse_volumes = false;
     let cfg = h.state().cfg.clone();
     h.state_mut().overlay = None;
     h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
@@ -877,6 +882,14 @@ fn editing(h: &mut Harness<'static, App>) {
     open(h, "notes.txt");
     key(h, Key::End, Modifiers::NONE);
     type_text(h, "!");
+    // A space typed on the keyboard stays (the key must not act as □).
+    h.event(egui::Event::Key { key: Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.event(egui::Event::Text(" ".into()));
+    h.step();
+    key(h, Key::Space, Modifiers::NONE);
+    settle(h);
+    assert_eq!(text(h).0, "first line! \nfoo bar foo\nfood fork\n", "space");
+    key(h, Key::Backspace, Modifiers::NONE);
     assert_eq!(text(h), ("first line!\nfoo bar foo\nfood fork\n".into(), true));
     settle(h);
     shot(h, "43-edit-keyboard");
@@ -994,4 +1007,213 @@ fn editing(h: &mut Harness<'static, App>) {
     press(h, &[Action::Back]);
     assert!(h.state().cur_tab().viewer.is_none());
     let _ = Cmd::Nothing;
+}
+
+/// Pick a menu item by its label (opening submenus) with the gamepad.
+fn menu_pick(h: &mut Harness<'static, App>, label: &str) {
+    use crate::app::Overlay;
+    let Some(Overlay::Menu(root)) = h.state_mut().overlay.as_mut() else { panic!("no menu") };
+    let depth = root.depth();
+    let m = root.at_depth_mut(depth);
+    let i = m.items.iter().position(|it| it.label == label).unwrap_or_else(|| panic!("no {label:?} in {:?}", m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()));
+    m.cursor = i;
+    press(h, &[Action::Accept]);
+}
+
+fn folding_and_locks(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, row};
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let work = dir.join("vols");
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().focus = crate::app::Focus::Panes;
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+    // Settings: the new rows; folding switched on from there.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::THEME;
+    }
+    press(h, &[Action::Down]);
+    press(h, &[Action::Right, Action::Accept]); // pictures: off
+    assert!(!h.state().cfg.open_images);
+    press(h, &[Action::Accept]); // and on again
+    press(h, &[Action::Right, Action::Accept]); // music: not yet
+    assert!(!h.state().cfg.open_audio);
+    press(h, &[Action::Down]);
+    if h.state().cfg.collapse_volumes {
+        press(h, &[Action::Accept]);
+    }
+    press(h, &[Action::Accept]);
+    assert!(h.state().cfg.collapse_volumes);
+    shot(h, "50-settings-open-in");
+    press(h, &[Action::Back]);
+    // Pictures off: they go to the desktop app, and the menu offers Polka.
+    h.state_mut().cfg.open_images = false;
+    let png = dir.join("view/a-red.png");
+    assert!(crate::viewer::kind_in(&png, "a-red.png", crate::viewer::OpenIn::from(&h.state().cfg)).is_none());
+    h.state_mut().cfg.open_images = true;
+    assert!(crate::viewer::kind_in(&png, "a-red.png", crate::viewer::OpenIn::from(&h.state().cfg)).is_some());
+
+    // Folding: the RAR set and the split zip are one item each.
+    h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg);
+    let c2 = h.state().cfg.clone();
+    h.state_mut().pane_mut().refilter_with(None, &c2);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "notes.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    settle(h);
+    let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    let n = names(h);
+    assert!(n.contains(&"pack.zip.001".to_string()) && !n.iter().any(|x| x.starts_with("multi.part") && x != "multi.part1.rar"), "{n:?}");
+    let folded = h.state().pane().collapsed.get("multi.part1.rar").map(|c| (c.0.archive.clone(), c.2.len()));
+    if let Some(f) = &folded {
+        assert_eq!(f.0, "multi.rar");
+    }
+    shot(h, "51-folded");
+    // The cursor on a folded set opens it; moving away folds it again.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "pack.zip.001").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    settle(h);
+    assert!(names(h).iter().any(|x| x == "pack.zip.001"));
+    let open = h.state().pane().entries.iter().filter(|e| e.name.starts_with("pack.zip.")).count();
+    assert!(open >= 1);
+    shot(h, "52-unfolded");
+    // Whole set as the target when folded: copy names.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "notes.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    settle(h);
+    if folded.is_some() {
+        let head = h.state().pane().entries.iter().position(|e| e.name == "multi.part1.rar").unwrap();
+        let name = h.state().pane().entries[head].name.clone();
+        h.state_mut().pane_mut().selected.insert(name);
+        let t = h.state().pane().targets();
+        assert_eq!(t.len(), 4, "folded set selects all volumes: {:?}", t.iter().map(|e| &e.name).collect::<Vec<_>>());
+        h.state_mut().pane_mut().selected.clear();
+    }
+
+    // Lock badges on password archives (made by `passwords`).
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    for _ in 0..20 {
+        settle(h);
+        let ok = ["locked.zip", "names.7z"].iter().all(|n| {
+            let p = dir.join(n);
+            let t = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+            t.and_then(|t| crate::locks::locked(&p, t)) == Some(true)
+        });
+        if ok {
+            break;
+        }
+    }
+    settle(h);
+    shot(h, "53-lock-badges");
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
+}
+
+fn templates(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay};
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let tmpl = dir.join("tmpl");
+    std::fs::create_dir_all(tmpl.join("Код")).unwrap();
+    std::fs::write(tmpl.join("Заметка.md"), "# Заметка\n").unwrap();
+    std::fs::write(tmpl.join("Код/script.sh"), "#!/bin/sh\n").unwrap();
+    // dirs reads the templates folder from user-dirs.dirs.
+    let conf = std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap());
+    std::fs::create_dir_all(&conf).unwrap();
+    std::fs::write(conf.join("user-dirs.dirs"), format!("XDG_TEMPLATES_DIR=\"{}\"\n", tmpl.display())).unwrap();
+    let work = dir.join("made");
+    std::fs::create_dir_all(&work).unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg);
+    settle(h);
+    press(h, &[Action::Menu]);
+    menu_pick(h, crate::i18n::tr("New document"));
+    shot(h, "54-templates-menu");
+    menu_pick(h, "Заметка");
+    let start = match &h.state().overlay {
+        Some(Overlay::Osk(k)) => (k.string(), k.caret),
+        _ => panic!("no name prompt"),
+    };
+    assert_eq!(start, ("Заметка.md".to_string(), 7), "caret before the extension");
+    h.state_mut().osk_submit();
+    settle(h);
+    assert_eq!(std::fs::read_to_string(work.join("Заметка.md")).unwrap(), "# Заметка\n");
+    assert_eq!(h.state().pane().current().unwrap().name, "Заметка.md");
+    // A subfolder is a submenu; the empty file from △.
+    press(h, &[Action::Menu]);
+    menu_pick(h, crate::i18n::tr("New document"));
+    menu_pick(h, "Код");
+    menu_pick(h, "script");
+    h.state_mut().osk_submit();
+    settle(h);
+    assert!(work.join("script.sh").exists());
+    press(h, &[Action::Actions]);
+    menu_pick(h, crate::i18n::tr("New document"));
+    menu_pick(h, crate::i18n::tr("Empty file"));
+    h.state_mut().osk_submit();
+    settle(h);
+    assert_eq!(std::fs::metadata(work.join(crate::i18n::tr("New file"))).unwrap().len(), 0);
+    // Taken names get a number.
+    h.state_mut().run(Cmd::NewFile(Some(tmpl.join("Заметка.md"))));
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if k.string() == "Заметка (2).md"));
+    h.state_mut().overlay = None;
+    // Inside an archive.
+    h.state_mut().pane_mut().navigate(Location::Archive { archive: dir.join("code.tar.gz"), inner: "src".into() }, None, &cfg);
+    for _ in 0..20 {
+        settle(h);
+        if h.state().pane().loading.is_none() {
+            break;
+        }
+    }
+    h.state_mut().run(Cmd::NewFile(Some(tmpl.join("Заметка.md"))));
+    h.state_mut().osk_submit();
+    wait_jobs(h);
+    let out = dir.join("x-tmpl");
+    std::fs::create_dir_all(&out).unwrap();
+    crate::vfs::extract(&dir.join("code.tar.gz"), &["src/Заметка.md".into()], &out, |_| true).unwrap();
+    assert_eq!(std::fs::read_to_string(out.join("Заметка.md")).unwrap(), "# Заметка\n");
+}
+
+fn cursors(h: &mut Harness<'static, App>) {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    use crate::viewer::Content;
+    let src = std::path::Path::new("/usr/share/icons/Adwaita/cursors");
+    if !src.is_dir() {
+        return;
+    }
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let cur = dir.join("theme/cursors");
+    std::fs::create_dir_all(&cur).unwrap();
+    for n in ["left_ptr", "hand2", "watch", "text", "crosshair", "help"] {
+        let _ = std::fs::copy(src.join(n), cur.join(n));
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    h.state_mut().pane_mut().navigate(Location::Local(cur.clone()), None, &cfg);
+    for _ in 0..10 {
+        settle(h);
+    }
+    shot(h, "55-cursor-thumbs");
+    let i = h.state().pane().entries.iter().position(|e| e.name == "watch").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    settle(h);
+    match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(Content::Image(im)) => {
+            assert!(im.pic.frames.len() > 1, "watch is animated");
+            assert!(!im.pic.cursor_sizes.is_empty() && im.pic.hotspot.is_some());
+            assert_eq!(im.siblings.len(), 6, "←/→ walk the cursors");
+        }
+        _ => panic!("cursor not shown"),
+    }
+    shot(h, "56-cursor-view");
+    press(h, &[Action::Right]);
+    settle(h);
+    shot(h, "57-cursor-next");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
 }

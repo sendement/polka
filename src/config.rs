@@ -53,6 +53,13 @@ pub struct Config {
     /// Last archive settings (never the password).
     pub compress: Option<CompressPrefs>,
     pub viewer: ViewerPrefs,
+    /// Open these in Polka's own viewer (else the desktop's app).
+    pub open_text: bool,
+    pub open_images: bool,
+    pub open_audio: bool,
+    pub open_video: bool,
+    /// Show a multi-volume archive as one item until it's pointed at.
+    pub collapse_volumes: bool,
 }
 
 /// Text viewer look.
@@ -135,6 +142,11 @@ impl Default for Config {
             grid_icon: 56.0,
             compress: None,
             viewer: ViewerPrefs::default(),
+            open_text: true,
+            open_images: true,
+            open_audio: false,
+            open_video: false,
+            collapse_volumes: true,
         }
     }
 }

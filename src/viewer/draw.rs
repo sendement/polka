@@ -236,6 +236,13 @@ fn details(v: &Viewer) -> String {
             if let Some([w, h]) = im.pic.full {
                 parts.push(format!("{w}×{h}"));
             }
+            if !im.pic.cursor_sizes.is_empty() {
+                let sizes: Vec<String> = im.pic.cursor_sizes.iter().map(|s| s.to_string()).collect();
+                parts.push(format!("{}: {}", tr("cursor sizes"), sizes.join(", ")));
+            }
+            if im.pic.frames.len() > 1 {
+                parts.push(format!("{} {}", im.pic.frames.len(), tr("frames")));
+            }
             if let Ok(m) = std::fs::metadata(&im.pic.path) {
                 parts.push(crate::app::human_size(m.len()));
             }
@@ -511,7 +518,13 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
     // Points per texture pixel that show the picture 1:1 on screen.
     im.actual = full_w / tex_size.x / ppp;
     let room = area.shrink(8.0).size();
-    im.fit = (room.x / tex_size.x).min(room.y / tex_size.y).min(im.actual);
+    im.fit = (room.x / tex_size.x).min(room.y / tex_size.y);
+    im.fit = if im.pic.hotspot.is_some() {
+        // Cursors are tiny: blow them up by whole steps (crisp pixels).
+        (im.fit * ppp).floor().clamp(1.0, 8.0) / ppp
+    } else {
+        im.fit.min(im.actual)
+    };
     im.view = area.size();
 
     // Mouse: wheel zooms at the pointer, drag pans, double click 1:1 ↔ fit.
@@ -561,6 +574,14 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
         }
     }
     painter.image(tex.id, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+    // A cursor's hotspot: where the click lands.
+    if let Some((hx, hy)) = im.pic.hotspot {
+        let k = im.scale();
+        let p = rect.min + vec2(hx as f32 + 0.5, hy as f32 + 0.5) * k;
+        let c = Color32::from_rgb(0xff, 0x40, 0x40);
+        painter.line_segment([p - vec2(8.0, 0.0), p + vec2(8.0, 0.0)], Stroke::new(1.5, c));
+        painter.line_segment([p - vec2(0.0, 8.0), p + vec2(0.0, 8.0)], Stroke::new(1.5, c));
+    }
 }
 
 /// A Rust sample for the settings preview.

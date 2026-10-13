@@ -48,9 +48,15 @@ fn video_tool() -> bool {
     })
 }
 
+/// Files in a cursor theme's `cursors` folder (checked when decoding).
+fn in_cursor_dir(path: &Path) -> bool {
+    path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "cursors")
+}
+
 pub fn supported(path: &Path) -> bool {
     let e = ext_of(path);
-    IMAGE_EXT.contains(&e.as_str()) || (VIDEO_EXT.contains(&e.as_str()) && video_tool())
+    in_cursor_dir(path)
+        || IMAGE_EXT.contains(&e.as_str()) || (VIDEO_EXT.contains(&e.as_str()) && video_tool())
 }
 
 impl Thumbs {
@@ -149,7 +155,13 @@ pub fn thumbnail(path: &Path, mtime: i64) -> Option<(PathBuf, u32, u32)> {
     if let Some((w, h)) = valid_cached(&out, mtime) {
         return Some((out, w, h));
     }
-    let img = if IMAGE_EXT.contains(&ext_of(path).as_str()) { from_image(path)? } else { from_video(path)? };
+    let img = if in_cursor_dir(path) {
+        from_cursor(path)?
+    } else if IMAGE_EXT.contains(&ext_of(path).as_str()) {
+        from_image(path)?
+    } else {
+        from_video(path)?
+    };
     let img = img.thumbnail(SIZE, SIZE).to_rgba8();
     let (w, h) = img.dimensions();
     write_png(&dir, &out, &img, &uri, mtime)?;
@@ -180,6 +192,15 @@ fn from_image(path: &Path) -> Option<image::DynamicImage> {
         img.apply_orientation(o);
     }
     Some(img)
+}
+
+/// The biggest size's first frame of an X cursor.
+fn from_cursor(path: &Path) -> Option<image::DynamicImage> {
+    if !crate::xcursor::is_cursor(path) {
+        return None;
+    }
+    let f = crate::xcursor::largest(path)?.into_iter().next()?;
+    Some(image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(f.width, f.height, f.rgba)?))
 }
 
 fn from_video(path: &Path) -> Option<image::DynamicImage> {

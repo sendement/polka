@@ -22,6 +22,29 @@ struct ArchiveEntry {
     _p: [u8; 0],
 }
 
+unsafe extern "C" {
+    fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
+}
+
+/// libarchive converts names through the C locale's charset; a Rust
+/// program starts in "C" (ASCII), so non-Latin names would be lost. Take the
+/// user's character type (only that: numbers keep their format), UTF-8 at
+/// least.
+pub fn utf8_locale() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        const LC_CTYPE: c_int = 0;
+        let got = setlocale(LC_CTYPE, c"".as_ptr());
+        let utf8 = !got.is_null() && {
+            let s = CStr::from_ptr(got).to_string_lossy().to_lowercase();
+            s.contains("utf-8") || s.contains("utf8")
+        };
+        if !utf8 {
+            setlocale(LC_CTYPE, c"C.UTF-8".as_ptr());
+        }
+    });
+}
+
 #[link(name = "archive")]
 unsafe extern "C" {
     fn archive_read_new() -> *mut Archive;
@@ -224,6 +247,7 @@ pub fn estimate(archive: &Path, plan: &Plan) -> u64 {
 
 /// Apply `plan` to `archive`. `progress(bytes)` returning false cancels.
 pub fn rewrite(archive: &Path, plan: &Plan, mut progress: impl FnMut(u64) -> bool) -> io::Result<()> {
+    utf8_locale();
     let file_name = archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
     if !writable_name(&file_name) {
         return Err(io::Error::other(crate::i18n::tr("This archive format is read-only")));
@@ -460,6 +484,52 @@ pub fn rewrite(archive: &Path, plan: &Plan, mut progress: impl FnMut(u64) -> boo
     }
 }
 
+/// Does the archive need a password? Reads only the first few headers:
+/// encrypted names fail right away, encrypted data is flagged per entry.
+pub fn probe_encrypted(archive: &Path) -> io::Result<bool> {
+    utf8_locale();
+    let split = crate::volumes::set_of(archive).filter(|s| s.kind == crate::volumes::Kind::Split);
+    let mut feed = match &split {
+        Some(s) => Some(Feed { src: Box::new(crate::volumes::Joined::open(&s.files)?), buf: vec![0; 1 << 16] }),
+        None => None,
+    };
+    let path_c = CString::new(archive.as_os_str().as_bytes()).map_err(|_| io::Error::other("bad path"))?;
+    let h = Handles { r: ptr_or(unsafe { archive_read_new() })?, w: std::ptr::null_mut(), w_open: false };
+    unsafe {
+        archive_read_support_filter_all(h.r);
+        archive_read_support_format_all(h.r);
+        let rc = match feed.as_mut() {
+            Some(f) => {
+                archive_read_set_callback_data(h.r, f as *mut Feed as *mut c_void);
+                archive_read_set_read_callback(h.r, feed_read);
+                archive_read_set_seek_callback(h.r, feed_seek);
+                archive_read_open1(h.r)
+            }
+            None => archive_read_open_filename(h.r, path_c.as_ptr(), 1 << 16),
+        };
+        if rc != 0 {
+            return Err(err(h.r, "open"));
+        }
+        for _ in 0..16 {
+            let mut e: *mut ArchiveEntry = std::ptr::null_mut();
+            let rc = archive_read_next_header(h.r, &mut e);
+            if rc == ARCHIVE_EOF {
+                return Ok(false);
+            }
+            if rc < ARCHIVE_WARN {
+                let msg = err(h.r, "read").to_string().to_lowercase();
+                return if msg.contains("encrypt") || msg.contains("passphrase") || msg.contains("password") { Ok(true) } else { Err(io::Error::other(msg)) };
+            }
+            if archive_entry_is_encrypted(e) != 0 {
+                return Ok(true);
+            }
+        }
+    }
+    drop(h);
+    drop(feed);
+    Ok(false)
+}
+
 fn ptr_or<T>(p: *mut T) -> io::Result<*mut T> {
     if p.is_null() { Err(io::Error::other("libarchive: out of memory")) } else { Ok(p) }
 }
@@ -533,4 +603,36 @@ fn write_all(w: *mut Archive, data: &[u8]) -> io::Result<()> {
         off += n as usize;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Non-Latin names survive being added to every writable format.
+    #[test]
+    fn cyrillic_names() {
+        use crate::ops::{ArchiveFormat, CompressOpts, Op};
+        let dir = std::env::temp_dir().join(format!("polka-cyr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Папка")).unwrap();
+        std::fs::write(dir.join("Папка/Привет.txt"), "мир").unwrap();
+        std::fs::write(dir.join("Заметка.md"), "#").unwrap();
+        for f in [ArchiveFormat::Zip, ArchiveFormat::TarGz, ArchiveFormat::SevenZ] {
+            if f == ArchiveFormat::SevenZ && !crate::ops::have_7z() {
+                continue;
+            }
+            let a = dir.join(format!("a{}", f.ext()));
+            let job = crate::ops::spawn(Op::Compress { sources: vec![dir.join("Папка")], out: a.clone(), opts: CompressOpts::new(f) }, || {});
+            while job.finished_at.lock().unwrap().is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let plan = Plan { add: vec![(dir.join("Заметка.md"), "Папка/Заметка.md".into())], ..Default::default() };
+            rewrite(&a, &plan, |_| true).unwrap();
+            let idx = crate::vfs::archive_index(&a).unwrap();
+            let names: Vec<String> = idx.dirs.get("Папка").map(|v| v.iter().map(|e| e.name.clone()).collect()).unwrap_or_default();
+            assert!(names.contains(&"Привет.txt".to_string()) && names.contains(&"Заметка.md".to_string()), "{f:?}: {names:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

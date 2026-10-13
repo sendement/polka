@@ -6,16 +6,19 @@ mod i18n;
 mod icons;
 mod input;
 mod launch;
+mod locks;
 mod ops;
 mod thumbs;
 mod vfs;
 mod volumes;
+mod xcursor;
 mod view;
 mod viewer;
 #[cfg(test)]
 mod view_tests;
 
 fn main() -> eframe::Result {
+    archive_rw::utf8_locale();
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

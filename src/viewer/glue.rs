@@ -513,6 +513,14 @@ impl App {
         if m.command && matches!(key, Key::C | Key::X | Key::V) {
             return true; // arrive as Copy / Cut / Paste events
         }
+        // A space arrives as a Text event too; the key itself must not turn
+        // into □ (select, whose release erases while editing).
+        if key == Key::Space && !m.command {
+            if md {
+                self.viewer_text_input(if m.shift { Action::LeftTrigger } else { Action::RightTrigger });
+            }
+            return true;
+        }
         if md {
             // GitHub view: scrolling, search, editing.
             return match key {

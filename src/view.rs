@@ -814,7 +814,11 @@ impl App {
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
-                    Some(Overlay::Settings(st)) => settings_ev = draw_settings(ui, st, cfg, icons),
+                    Some(Overlay::Settings(st)) => {
+                        // Taller than small windows: scroll.
+                        let max_h = (screen.height() - 120.0).max(240.0);
+                        settings_ev = egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).show(ui, |ui| draw_settings(ui, st, cfg, icons)).inner;
+                    }
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
                     Some(Overlay::ViewerSettings(st)) => viewer_ev = crate::viewer::draw::draw_settings(ui, st, &vprefs),
@@ -950,7 +954,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let sel = pane.selected.contains(&e.name);
                 let is_cursor = i == pane.cursor;
                 let vol = pane.volumes.get(&e.name);
-                let in_set = vol.is_some_and(|m| active_set.as_ref() == Some(&m.key));
+                // A folded volume set: the archive's name, all volumes' size.
+                let folded = pane.collapsed.get(&e.name);
+                let label = folded.map_or(e.name.as_str(), |f| f.0.archive.as_str());
+                let in_set = vol.is_some_and(|m| active_set.as_ref() == Some(&m.key)) && folded.is_none();
                 if let (Some(m), true) = (vol, r.hovered()) {
                     hover_set = Some(m.key.clone());
                 }
@@ -977,9 +984,13 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
-                    let g = elided_centered(ui, &e.name, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
+                    lock_badge(ui, ir, e, path.as_deref());
+                    let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
-                    if let Some(m) = vol {
+                    if let Some(f) = folded {
+                        let font = FontId::proportional((grid_font - 2.0).max(10.0));
+                        stack_tag(ui, f.2.len(), pos2(ir.max.x + 2.0, ir.min.y + 2.0), Align2::RIGHT_TOP, font, vol_c);
+                    } else if let Some(m) = vol {
                         let font = FontId::proportional((grid_font - 2.0).max(10.0));
                         let at = pos2(ir.max.x + 2.0, ir.min.y + 2.0);
                         volume_tag(ui, m, None, at, Align2::RIGHT_TOP, font, in_set, vol_c);
@@ -987,23 +998,30 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, ir, icon, thumb);
+                    lock_badge(ui, ir, e, path.as_deref());
                     let tag_font = FontId::proportional((list_font - 2.0).max(10.0));
                     // Room for the volume tag: "archive · 2/4" on the active set.
-                    let tag_w = vol.map_or(0.0, |m| {
-                        let t = volume_tag_text(m, in_set.then_some(m.archive.as_str()));
-                        ui.painter().layout_no_wrap(t, tag_font.clone(), Color32::WHITE).size().x + 22.0
-                    });
+                    let tag_w = match (folded, vol) {
+                        (Some(f), _) => ui.painter().layout_no_wrap(crate::i18n::volumes(f.2.len()), tag_font.clone(), Color32::WHITE).size().x + 22.0,
+                        (None, Some(m)) => {
+                            let t = volume_tag_text(m, in_set.then_some(m.archive.as_str()));
+                            ui.painter().layout_no_wrap(t, tag_font.clone(), Color32::WHITE).size().x + 22.0
+                        }
+                        _ => 0.0,
+                    };
                     let name_w = rect.width() - name_x - name_room - tag_w;
-                    let g = elided(ui, &e.name, FontId::proportional(list_font), text_c, name_w.max(60.0), 1);
+                    let g = elided(ui, label, FontId::proportional(list_font), text_c, name_w.max(60.0), 1);
                     let name_end = rect.min.x + name_x + g.size().x;
                     ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
-                    if let Some(m) = vol {
+                    if let Some(f) = folded {
+                        stack_tag(ui, f.2.len(), pos2(name_end + 10.0, rect.center().y), Align2::LEFT_CENTER, tag_font.clone(), vol_c);
+                    } else if let Some(m) = vol {
                         let at = pos2(name_end + 10.0, rect.center().y);
                         volume_tag(ui, m, in_set.then_some(m.archive.as_str()), at, Align2::LEFT_CENTER, tag_font, in_set, vol_c);
                     }
                     let weak = ui.visuals().weak_text_color();
                     let f = FontId::proportional(list_font - 1.0);
-                    let size = if e.is_dir { String::new() } else { human_size(e.size) };
+                    let size = if e.is_dir { String::new() } else { human_size(folded.map_or(e.size, |f| f.1)) };
                     ui.painter().text(pos2(rect.max.x - size_right, rect.center().y), Align2::RIGHT_CENTER, size, f.clone(), weak);
                     if let (true, Some(t)) = (show_date, e.mtime) {
                         ui.painter().text(pos2(rect.max.x - 145.0 * k, rect.center().y), Align2::LEFT_CENTER, fmt_time(t), f, weak);
@@ -1019,6 +1037,16 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
             }
         }
     });
+    // Sets under the mouse or the cursor unfold (from the next frame).
+    let mut open: Vec<String> = hover_set.iter().cloned().collect();
+    if focused {
+        if let Some(k) = pane.current().and_then(|e| pane.volumes.get(&e.name)).map(|m| m.key.clone()) {
+            if !open.contains(&k) {
+                open.push(k);
+            }
+        }
+    }
+    pane.set_expanded(open);
     pane.hover_volume = hover_set;
     pane.scroll_y = out.state.offset.y;
     pane.view_h = out.inner_rect.height();
@@ -1034,6 +1062,21 @@ fn volume_color(v: &egui::Visuals) -> Color32 {
     c.s = c.s.max(0.6);
     c.v = c.v.max(0.85);
     c.into()
+}
+
+/// "▤ 4 volumes" on a folded set.
+fn stack_tag(ui: &Ui, n: usize, at: Pos2, align: Align2, font: FontId, c: Color32) {
+    let v = ui.visuals();
+    let g = ui.painter().layout_no_wrap(crate::i18n::volumes(n), font, v.text_color());
+    let size = g.size() + vec2(22.0, 4.0);
+    let rect = align.anchor_size(at, size);
+    ui.painter().rect(rect, rect.height() / 2.0, v.window_fill, Stroke::new(1.0, c.gamma_multiply(0.7)), StrokeKind::Inside);
+    let cy = rect.center().y;
+    for k in 0..3 {
+        let r = Rect::from_min_size(pos2(rect.min.x + 5.0 + k as f32 * 2.0, cy - 5.0 + k as f32), vec2(6.0, 7.0));
+        ui.painter().rect(r, 1.0, c, Stroke::new(0.8, v.extreme_bg_color), StrokeKind::Middle);
+    }
+    ui.painter().galley(pos2(rect.min.x + 17.0, cy - g.size().y / 2.0), g, v.text_color());
 }
 
 fn volume_tag_text(m: &crate::volumes::Member, archive: Option<&str>) -> String {
@@ -1065,6 +1108,30 @@ fn volume_tag(ui: &Ui, m: &crate::volumes::Member, archive: Option<&str>, at: Po
         x += 12.0;
     }
     ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fg);
+}
+
+/// A small padlock on archives that need a password.
+fn lock_badge(ui: &Ui, icon: Rect, e: &crate::vfs::Entry, path: Option<&std::path::Path>) {
+    let (Some(path), Some(mtime)) = (path, e.mtime) else { return };
+    if e.is_dir || !crate::vfs::is_archive_name(&e.name) || crate::locks::locked(path, mtime) != Some(true) {
+        return;
+    }
+    let s = (icon.width() * 0.5).clamp(11.0, 26.0);
+    let r = Rect::from_min_size(icon.max - Vec2::splat(s * 0.85), Vec2::splat(s));
+    let p = ui.painter();
+    let v = ui.visuals();
+    p.circle_filled(r.center(), s * 0.55, v.extreme_bg_color);
+    // Shackle over a body.
+    let body = Rect::from_center_size(r.center() + vec2(0.0, s * 0.12), vec2(s * 0.62, s * 0.46));
+    let gold = Color32::from_rgb(0xf0, 0xc0, 0x40);
+    let arc = Rect::from_center_size(pos2(body.center().x, body.min.y), vec2(s * 0.38, s * 0.5));
+    let pts: Vec<Pos2> = (0..=12).map(|i| {
+        let a = std::f32::consts::PI * (1.0 + i as f32 / 12.0);
+        pos2(arc.center().x + arc.width() / 2.0 * a.cos(), arc.center().y + arc.height() / 2.0 * a.sin())
+    }).collect();
+    p.add(egui::Shape::line(pts, Stroke::new((s * 0.11).max(1.2), gold)));
+    p.rect_filled(body, s * 0.08, gold);
+    p.circle_filled(body.center(), s * 0.06, v.extreme_bg_color);
 }
 
 /// Theme icon, or a thumbnail fitted into the square keeping its aspect.
@@ -1695,6 +1762,8 @@ pub enum SettingsEvent {
     Pick(usize),
     Theme,
     Close,
+    Chip(usize),
+    Toggle(usize),
     EditorRow(usize),
     EditorSet(usize, f32),
     Save,
@@ -1717,6 +1786,11 @@ impl App {
                 self.run(Cmd::IconThemes);
             }
             SettingsEvent::Close => self.overlay = None,
+            SettingsEvent::Chip(i) => self.settings_toggle_open(i),
+            SettingsEvent::Toggle(r) => {
+                st.row = r;
+                self.settings_step(r, 0.0);
+            }
             SettingsEvent::EditorRow(r) => {
                 if let Some(ed) = st.editor.as_mut() {
                     ed.row = r;
@@ -1744,6 +1818,10 @@ fn rgb(c: [u8; 3]) -> Color32 {
 fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) -> (Rect, egui::Response) {
     let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W, h), Sense::click());
     let _ = id;
+    // Up/Down in long settings scroll the focused row into view.
+    if focused && ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::new("settings-reveal"))).unwrap_or(false) {
+        ui.scroll_to_rect(rect.expand(8.0), None);
+    }
     let v = ui.visuals();
     if focused {
         ui.painter().rect(rect, 8.0, v.selection.bg_fill.gamma_multiply(0.25), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
@@ -1844,6 +1922,45 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     ui.painter().text(pos2(ir.min.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color());
     if r.clicked() {
         ev = Some(SettingsEvent::Theme);
+    }
+
+    // Open in Polka: a chip per kind.
+    let (rect, r) = settings_row(ui, 86.0, st.row == row::OPEN_IN, "open-in");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::OPEN_IN));
+    }
+    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
+    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
+    let flags = [cfg.open_text, cfg.open_images, cfg.open_audio, cfg.open_video];
+    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
+    for (i, label) in kinds.iter().enumerate() {
+        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
+        let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
+        let ready = crate::app::OPEN_READY[i];
+        let on = flags[i] && ready;
+        let cursor = st.row == row::OPEN_IN && st.chip == i;
+        let fill = if on { v.selection.bg_fill.gamma_multiply(0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
+        let color = if ready { v.text_color() } else { v.weak_text_color() };
+        let text = if on { format!("✔ {label}") } else { label.to_string() };
+        ui.painter().text(chip.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), color);
+        let resp = if ready { resp } else { resp.on_hover_text(tr("Comes with the built-in player")) };
+        if resp.clicked() {
+            ev = Some(SettingsEvent::Chip(i));
+        }
+    }
+
+    // Folding multi-volume archives.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::VOLUMES, "volumes");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Fold multi-volume archives"), label_font.clone(), v.text_color());
+    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+    if cfg.collapse_volumes {
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+    }
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::VOLUMES));
     }
 
     // Close.

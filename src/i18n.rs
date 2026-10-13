@@ -181,6 +181,18 @@ const RU: &[(&str, &str)] = &[
     ("Passwords don't match", "Пароли не совпадают"),
     ("Create", "Создать"),
     ("Volume", "Том"),
+    ("New document", "Создать документ"),
+    ("Empty file", "Пустой файл"),
+    ("New file", "Новый файл"),
+    ("File name", "Имя файла"),
+    ("No templates folder", "Нет папки шаблонов"),
+    ("Put files into Templates to see them here", "Положите файлы в «Шаблоны», и они появятся здесь"),
+    ("Open templates folder", "Открыть папку шаблонов"),
+    ("cursor sizes", "размеры курсора"),
+    ("frames", "кадров"),
+    ("Open in Polka", "Открывать в Polka"),
+    ("Comes with the built-in player", "Появится вместе со встроенным плеером"),
+    ("Fold multi-volume archives", "Сворачивать многотомные архивы"),
     ("Caution", "Осторожно"),
     ("Don't save", "Не сохранять"),
     ("Edit", "Редактировать"),
@@ -253,6 +265,22 @@ fn table() -> &'static HashMap<&'static str, &'static str> {
 
 pub fn tr(s: &'static str) -> &'static str {
     table().get(s).copied().unwrap_or(s)
+}
+
+/// "4 volumes" with the language's plural form.
+pub fn volumes(n: usize) -> String {
+    if tr("Volume") == "Том" {
+        let word = match (n % 10, n % 100) {
+            (1, x) if x != 11 => "том",
+            (2..=4, x) if !(12..=14).contains(&x) => "тома",
+            _ => "томов",
+        };
+        format!("{n} {word}")
+    } else if n == 1 {
+        "1 volume".into()
+    } else {
+        format!("{n} volumes")
+    }
 }
 
 /// `tr` with `%n` replaced by a number.
