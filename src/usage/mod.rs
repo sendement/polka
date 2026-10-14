@@ -212,7 +212,10 @@ fn mount_points(root: &Path) -> HashSet<PathBuf> {
 /// A mounted file system worth measuring.
 #[derive(Clone, Debug)]
 pub struct Mount {
+    /// Where to read it from (inside Flatpak maybe under /run/host/root).
     pub path: PathBuf,
+    /// Where the host has it, for names and filters.
+    pub host: PathBuf,
     pub fstype: String,
     pub total: u64,
     pub used: u64,
@@ -228,20 +231,51 @@ fn boring(p: &Path) -> bool {
 
 pub fn mounts() -> Vec<Mount> {
     let text = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let mut out: Vec<Mount> = Vec::new();
+    // (device, folder of that file system shown, where, type)
+    let mut all: Vec<(&str, String, PathBuf, &str)> = Vec::new();
     for l in text.lines() {
         let f: Vec<&str> = l.split(' ').collect();
         let Some(dash) = f.iter().position(|x| *x == "-") else { continue };
-        let (Some(mnt), Some(fstype)) = (f.get(4), f.get(dash + 1)) else { continue };
-        let path = PathBuf::from(unescape(mnt));
-        if !REAL_FS.contains(fstype) || boring(&path) || out.iter().any(|m| m.path == path) {
+        let (Some(dev), Some(root), Some(mnt), Some(fstype)) = (f.get(2), f.get(3), f.get(4), f.get(dash + 1)) else { continue };
+        if REAL_FS.contains(fstype) {
+            all.push((dev, unescape(root), PathBuf::from(unescape(mnt)), fstype));
+        }
+    }
+    let mut out: Vec<Mount> = Vec::new();
+    for (dev, root, path, fstype) in &all {
+        // A plain folder of a disk already listed, bound elsewhere (as a
+        // sandbox shares /media and /mnt): not a disk of its own.
+        let inner = all.iter().any(|(d, r, _, _)| d == dev && r != root && (r == "/" || root.starts_with(&format!("{}/", r.trim_end_matches('/')))));
+        let Some(host) = host_path(path) else { continue };
+        if inner || boring(&host) {
             continue;
         }
-        let Some((total, used)) = fs_space(&path) else { continue };
-        out.push(Mount { path, fstype: fstype.to_string(), total, used });
+        // The same disk shared twice into the sandbox: the plain path wins.
+        if let Some(i) = out.iter().position(|m| m.host == host) {
+            if *path == host {
+                out[i].path = path.clone();
+            }
+            continue;
+        }
+        let Some((total, used)) = fs_space(path) else { continue };
+        out.push(Mount { path: path.clone(), host, fstype: fstype.to_string(), total, used });
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out.sort_by(|a, b| a.host.cmp(&b.host));
     out
+}
+
+/// The host's path of a mount seen here; None for the sandbox's own parts
+/// (the app, the runtime, its private folders).
+fn host_path(p: &Path) -> Option<PathBuf> {
+    if !crate::sandbox::flatpak() {
+        return Some(p.to_path_buf());
+    }
+    if let Ok(rest) = p.strip_prefix("/run/host/root") {
+        return Some(Path::new("/").join(rest));
+    }
+    let shared = ["/home", "/media", "/mnt", "/run/media", "/srv", "/opt"].iter().any(|d| p.starts_with(d));
+    let own = p.components().any(|c| c.as_os_str() == ".var");
+    (shared && !own).then(|| p.to_path_buf())
 }
 
 /// Size and bytes used of the file system holding `p`.

@@ -1358,7 +1358,7 @@ impl App {
                 v.push(place(tr(label).into(), icon, p, "Places", &self.cfg));
             }
         }
-        v.push(place(tr("File system").into(), &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"], "/".into(), "Places", &self.cfg));
+        v.push(place(tr("File system").into(), &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"], crate::sandbox::root(), "Places", &self.cfg));
         if let Some(t) = trash_files().filter(|t| t.is_dir()) {
             // A full bin looks full.
             let icon: &'static [&'static str] = if crate::trashbin::count() > 0 { &["user-trash-full", "user-trash"] } else { &["user-trash", "user-trash-full"] };

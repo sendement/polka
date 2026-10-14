@@ -54,3 +54,8 @@ pub fn host(cmd: std::process::Command) -> std::process::Command {
     c.arg(cmd.get_program()).args(cmd.get_args());
     c
 }
+
+/// The host's file system root (the sandbox's own / is a stage set).
+pub fn root() -> PathBuf {
+    if flatpak() && std::path::Path::new("/run/host/root").is_dir() { "/run/host/root".into() } else { "/".into() }
+}

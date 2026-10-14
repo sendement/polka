@@ -152,6 +152,10 @@ flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.gi
 flatpak run io.github.sendement.Polka
 ```
 
+`polka --diagnose` (or `flatpak run io.github.sendement.Polka --diagnose`) prints what Polka sees
+around it — folders, icon themes, trash, disks, gamepads, whether it can start host programs — handy
+for bug reports.
+
 After changing dependencies, regenerate `packaging/flatpak/cargo-sources.json` with
 [flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo).
 

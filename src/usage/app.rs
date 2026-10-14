@@ -29,11 +29,11 @@ impl App {
             v.push(Target { label: tr("This folder").into(), path: here.to_path_buf(), icon: &["folder-open", "folder"], space: None });
         }
         for m in super::mounts() {
-            let removable = ["/run/media/", "/media/", "/mnt/"].iter().any(|p| m.path.starts_with(p));
-            let label = if m.path == std::path::Path::new("/") {
+            let removable = ["/run/media/", "/media/", "/mnt/"].iter().any(|p| m.host.starts_with(p));
+            let label = if m.host == std::path::Path::new("/") {
                 tr("System disk").to_string()
             } else {
-                m.path.file_name().map_or_else(|| m.path.display().to_string(), |n| n.to_string_lossy().into_owned())
+                m.host.file_name().map_or_else(|| m.host.display().to_string(), |n| n.to_string_lossy().into_owned())
             };
             let icon: &'static [&'static str] = if removable { &["drive-removable-media", "drive-harddisk", "media-flash"] } else { &["drive-harddisk-root", "drive-harddisk", "folder-root"] };
             v.push(Target { label: format!("{label}  ·  {}", m.fstype), path: m.path, icon, space: Some((m.total, m.used)) });

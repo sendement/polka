@@ -2,6 +2,7 @@ mod app;
 mod appearance;
 mod archive_rw;
 mod config;
+mod diagnose;
 mod drives;
 mod fonts;
 mod i18n;
@@ -27,6 +28,11 @@ mod view_tests;
 fn main() -> eframe::Result {
     sandbox::fix_env();
     archive_rw::utf8_locale();
+    if std::env::args().nth(1).as_deref() == Some("--diagnose") {
+        i18n::set(None);
+        diagnose::run();
+        return Ok(());
+    }
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
