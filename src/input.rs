@@ -129,6 +129,8 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
             loop {
                 let timeout = t.next_deadline().map(|d| d.saturating_duration_since(Instant::now()));
                 let ev = gilrs.next_event_blocking(Some(timeout.unwrap_or(Duration::from_millis(500))));
+                // Touch screens and pens look like pads to gilrs.
+                let ev = ev.filter(|e| !not_a_pad(&gilrs.gamepad(e.id)));
                 if let Some(ev) = ev {
                     let before = t.owner.map(|(o, _)| o);
                     t.handle(ev.id, ev.event);
@@ -149,6 +151,14 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
             }
         })
         .expect("spawn gamepad thread");
+}
+
+/// Devices gilrs takes for gamepads that aren't: a touch screen (the Steam
+/// Deck's, FocalTech), touchpads (DualSense's), pens. Their position reads
+/// as a stick pushed to one side and never let go.
+pub fn not_a_pad(pad: &gilrs::Gamepad) -> bool {
+    let name = format!("{} {}", pad.name(), pad.os_name()).to_lowercase();
+    ["touch", "fts3528", "stylus", "wacom", " pen"].iter().any(|k| name.contains(k)) || pad.vendor_id() == Some(0x2808)
 }
 
 fn map_button(b: Button) -> Option<Action> {

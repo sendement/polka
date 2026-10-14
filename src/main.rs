@@ -9,6 +9,7 @@ mod i18n;
 mod icons;
 mod input;
 mod keyboard;
+mod log;
 mod launch;
 mod locks;
 mod mouse;
@@ -31,11 +32,30 @@ mod view_tests;
 fn main() -> eframe::Result {
     sandbox::fix_env();
     archive_rw::utf8_locale();
+    // Lists an archive the way the panels see it (for bug reports).
+    if std::env::args().nth(1).as_deref() == Some("--list") {
+        for a in std::env::args_os().skip(2) {
+            match vfs::archive_index(std::path::Path::new(&a)) {
+                Ok(idx) => {
+                    let mut all: Vec<_> = idx.dirs.iter().flat_map(|(d, es)| es.iter().map(move |e| if d.is_empty() { e.name.clone() } else { format!("{d}/{}", e.name) })).collect();
+                    all.sort();
+                    println!("{}: {} entries", std::path::Path::new(&a).display(), all.len());
+                    for e in all {
+                        println!("  {e}");
+                    }
+                }
+                Err(e) => println!("{}: error: {e}", std::path::Path::new(&a).display()),
+            }
+        }
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--diagnose") {
         i18n::set(None);
         diagnose::run();
         return Ok(());
     }
+    log::catch_panics();
+    log::startup();
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -51,6 +71,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            if let Some(gl) = cc.gl.as_ref() {
+                use eframe::glow::HasContext;
+                let (r, v) = unsafe { (gl.get_parameter_string(eframe::glow::RENDERER), gl.get_parameter_string(eframe::glow::VERSION)) };
+                log::line(format!("renderer {r} / {v}"));
+            }
             fonts::install(&cc.egui_ctx);
             appearance::watch(cc.egui_ctx.clone());
             let mut app = app::App::new(cc.egui_ctx.clone(), start);

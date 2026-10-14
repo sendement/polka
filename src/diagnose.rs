@@ -11,6 +11,13 @@ pub fn run() {
         println!("{k}: {}", env(k));
     }
     println!("language: {}", crate::i18n::current());
+    let (ctype, codeset) = unsafe {
+        let l = libc::setlocale(libc::LC_CTYPE, std::ptr::null());
+        let c = libc::nl_langinfo(libc::CODESET);
+        let s = |p: *const libc::c_char| if p.is_null() { "-".to_string() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() };
+        (s(l), s(c))
+    };
+    println!("character set: {ctype} ({codeset}); LANG={} LC_ALL={} LC_CTYPE={}", env("LANG"), env("LC_ALL"), env("LC_CTYPE"));
     println!("file system root: {}", crate::sandbox::root().display());
     println!("icon theme: {}", crate::icons::detect_theme().unwrap_or_else(|| "-".into()));
     let themes = crate::icons::installed_themes();
@@ -54,7 +61,7 @@ pub fn run() {
             while std::time::Instant::now() < until {
                 g.next_event_blocking(Some(std::time::Duration::from_millis(50)));
             }
-            let pads: Vec<String> = g.gamepads().map(|(_, p)| p.name().to_string()).collect();
+            let pads: Vec<String> = g.gamepads().map(|(_, p)| if crate::input::not_a_pad(&p) { format!("{} (ignored)", p.name()) } else { p.name().to_string() }).collect();
             println!("gamepads: {}", if pads.is_empty() { "-".into() } else { pads.join(", ") });
         }
         Err(e) => println!("gamepads: unavailable ({e})"),

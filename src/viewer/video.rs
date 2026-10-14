@@ -181,6 +181,12 @@ struct Decoder {
     _link: Option<PathBuf>,
 }
 
+impl Drop for VideoState {
+    fn drop(&mut self) {
+        self.report();
+    }
+}
+
 impl Drop for Decoder {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -296,6 +302,22 @@ pub struct VideoState {
     /// Frames put on screen, and how late the last one was (seconds).
     pub shown: u64,
     pub late: f64,
+    /// Playback figures for the log.
+    stats: Stats,
+}
+
+/// How smoothly a video played: logged when it closes.
+#[derive(Default)]
+struct Stats {
+    secs: f64,
+    last: Option<Instant>,
+    /// Frames shown, skipped (several due at once) and late by over a frame.
+    shown: u64,
+    skipped: u64,
+    late: u64,
+    worst: f64,
+    /// Frames the window drew meanwhile.
+    paints: u64,
 }
 
 impl VideoState {
@@ -323,6 +345,7 @@ impl VideoState {
             volume,
             shown: 0,
             late: 0.0,
+            stats: Stats::default(),
         };
         v.load(ctx);
         v
@@ -333,7 +356,33 @@ impl VideoState {
     }
 
     /// Open the current file from the start.
+    /// The figures of what just played, into the log.
+    fn report(&mut self) {
+        let st = std::mem::take(&mut self.stats);
+        if st.secs < 2.0 {
+            return;
+        }
+        let p = &self.probe;
+        crate::log::line(format!(
+            "video {}x{} {:.2} fps {}{}: played {:.1} s, shown {} of ~{:.0} frames ({:.1} fps), skipped {}, late {}, worst {:.0} ms, window drew {:.1} fps",
+            p.width,
+            p.height,
+            p.fps,
+            p.codec,
+            if self.audio.is_some() { " +sound" } else { "" },
+            st.secs,
+            st.shown,
+            st.secs * p.fps,
+            st.shown as f64 / st.secs,
+            st.skipped,
+            st.late,
+            st.worst * 1000.0,
+            st.paints as f64 / st.secs,
+        ));
+    }
+
     fn load(&mut self, ctx: &egui::Context) {
+        self.report();
         self.decoder = None;
         self.audio = None;
         self.pending = None;
@@ -524,6 +573,7 @@ impl VideoState {
         let Some(dec) = &self.decoder else { return };
         let clock = self.pos() + 0.005;
         let mut due = None;
+        let mut due_n = 0u64;
         loop {
             let f = match self.pending.take() {
                 Some(f) => f,
@@ -538,15 +588,33 @@ impl VideoState {
             };
             // The first frame after a restart shows even when early (paused).
             if f.ts <= clock || (self.texture.is_none() && due.is_none()) {
+                due_n += 1;
                 due = Some(f);
             } else {
                 self.pending = Some(f);
                 break;
             }
         }
+        let playing = self.playing();
+        let now = Instant::now();
+        if playing {
+            let st = &mut self.stats;
+            st.secs += st.last.map_or(0.0, |l| now.duration_since(l).as_secs_f64().min(0.5));
+            st.paints += 1;
+            st.skipped += due_n.saturating_sub(1);
+        }
+        self.stats.last = playing.then_some(now);
         if let Some(f) = due {
             self.shown += 1;
             self.late = clock - f.ts;
+            if playing {
+                let st = &mut self.stats;
+                st.shown += 1;
+                st.worst = st.worst.max(self.late);
+                if self.late > 1.0 / self.probe.fps.max(1.0) {
+                    st.late += 1;
+                }
+            }
             match &mut self.texture {
                 Some(t) => t.set(f.image, egui::TextureOptions::LINEAR),
                 None => self.texture = Some(ctx.load_texture(format!("video:{}", self.path().display()), f.image, egui::TextureOptions::LINEAR)),

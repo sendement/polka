@@ -34,13 +34,27 @@ pub fn utf8_locale() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
         const LC_CTYPE: c_int = 0;
-        let got = setlocale(LC_CTYPE, c"".as_ptr());
-        let utf8 = !got.is_null() && {
-            let s = CStr::from_ptr(got).to_string_lossy().to_lowercase();
-            s.contains("utf-8") || s.contains("utf8")
+        let is_utf8 = |p: *const c_char| {
+            !p.is_null() && {
+                let s = CStr::from_ptr(p).to_string_lossy().to_lowercase();
+                s.contains("utf-8") || s.contains("utf8")
+            }
         };
-        if !utf8 {
-            setlocale(LC_CTYPE, c"C.UTF-8".as_ptr());
+        if is_utf8(setlocale(LC_CTYPE, c"".as_ptr())) {
+            return;
+        }
+        // A plain C (or missing) locale, as some launchers give (Steam's game
+        // mode): take a UTF-8 one — and put it in the environment too, since
+        // libraries and child programs (compress-tools, 7z, shells) read the
+        // locale from there, and in "C" libarchive can't name non-Latin files.
+        for name in [c"C.UTF-8", c"C.utf8", c"en_US.UTF-8", c"en_US.utf8"] {
+            if is_utf8(setlocale(LC_CTYPE, name.as_ptr())) {
+                let name = name.to_str().unwrap_or("C.UTF-8");
+                let all = std::env::var("LC_ALL").is_ok_and(|v| !v.is_empty());
+                std::env::set_var(if all { "LC_ALL" } else { "LC_CTYPE" }, name);
+                crate::log::line(format!("locale from the environment isn't UTF-8 (LANG={:?} LC_ALL={:?}): using {name}", std::env::var("LANG").ok(), std::env::var("LC_ALL").ok()));
+                return;
+            }
         }
     });
 }
