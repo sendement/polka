@@ -1,6 +1,8 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Keyboard layouts", "Раскладки клавиатуры"),
+    ("Install packages on open", "Устанавливать пакеты при открытии"),
     ("Wrong password — administrator password (sudo)", "Неверный пароль — пароль администратора (sudo)"),
     ("Hidden", "Скрыто"),
     ("Passwords as you type", "Пароли при вводе"),

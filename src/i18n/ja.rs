@@ -1,6 +1,8 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Keyboard layouts", "キーボード配列"),
+    ("Install packages on open", "開くとパッケージをインストール"),
     ("Wrong password — administrator password (sudo)", "パスワードが違います — 管理者パスワード (sudo)"),
     ("Hidden", "非表示"),
     ("Passwords as you type", "パスワード入力時の表示"),

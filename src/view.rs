@@ -167,13 +167,14 @@ impl App {
         let bottom = if typing { self.osk_top.unwrap_or(screen.max.y) - 8.0 } else { screen.max.y - 40.0 };
         let w = (screen.width() * 0.86).min(1200.0);
         let rect = Rect::from_min_max(pos2(screen.center().x - w / 2.0, screen.min.y + 30.0), pos2(screen.center().x + w / 2.0, bottom.max(screen.min.y + 220.0)));
-        ctx.layer_painter(egui::LayerId::new(Order::Middle, egui::Id::new("term-window-dim"))).rect_filled(screen, 0.0, Color32::from_black_alpha(150));
         let dark = ctx.global_style().visuals.dark_mode;
         let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, dark);
         let size = self.cfg.terminal.font_size;
         let title = self.term_window_title.clone();
         let mut act = None;
         egui::Area::new("term-window".into()).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+            // The dimmed app behind, on the window's own layer (under it).
+            ui.painter().clone().with_clip_rect(screen).rect_filled(screen, 0.0, Color32::from_black_alpha(120));
             egui::Frame::popup(ui.style()).inner_margin(12.0).corner_radius(10.0).show(ui, |ui| {
                 ui.set_min_size(rect.size() - vec2(24.0, 24.0));
                 ui.set_max_size(rect.size() - vec2(24.0, 24.0));
@@ -1305,6 +1306,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
+                    package_badge(ui, ir, e, path.as_deref());
                     let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     hot = ir.union(Rect::from_center_size(pos2(rect.center().x, ir.max.y + 4.0 + g.size().y / 2.0), g.size()));
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
@@ -1320,6 +1322,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
+                    package_badge(ui, ir, e, path.as_deref());
                     let tag_font = FontId::proportional((list_font - 2.0).max(10.0));
                     // Room for the volume tag: "archive · 2/4" on the active set.
                     let tag_w = match (folded, vol) {
@@ -1518,6 +1521,35 @@ fn volume_tag(ui: &Ui, m: &crate::volumes::Member, archive: Option<&str>, at: Po
         x += 12.0;
     }
     ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fg);
+}
+
+/// Installable packages show their format: a tag under a big icon, a dot
+/// with an arrow on a small one.
+fn package_badge(ui: &Ui, icon: Rect, e: &crate::vfs::Entry, path: Option<&std::path::Path>) {
+    let (Some(path), Some(mtime)) = (path, e.mtime) else { return };
+    if e.is_dir {
+        return;
+    }
+    let Some(k) = crate::packages::package(path, &e.name, mtime) else { return };
+    let (name, [r, g, b]) = crate::packages::badge(k);
+    let color = Color32::from_rgb(r, g, b);
+    let p = ui.painter();
+    if icon.width() >= 40.0 {
+        let font = FontId::proportional((icon.width() * 0.2).clamp(10.0, 13.0));
+        let gal = p.layout_no_wrap(name.to_string(), font, Color32::WHITE);
+        let tag = Rect::from_min_size(pos2(icon.min.x - 2.0, icon.max.y - gal.size().y - 4.0), gal.size() + vec2(8.0, 4.0));
+        p.rect(tag, 4.0, color, Stroke::new(1.0, ui.visuals().extreme_bg_color), StrokeKind::Outside);
+        p.galley(tag.min + vec2(4.0, 2.0), gal, Color32::WHITE);
+    } else {
+        let rad = (icon.width() * 0.28).max(5.0);
+        let c = pos2(icon.min.x + rad * 0.7, icon.max.y - rad * 0.7);
+        p.circle(c, rad, color, Stroke::new(1.0, ui.visuals().extreme_bg_color));
+        // An arrow into a tray: "installs".
+        let st = Stroke::new((rad * 0.22).max(1.0), Color32::WHITE);
+        p.line_segment([c + vec2(0.0, -rad * 0.55), c + vec2(0.0, rad * 0.35)], st);
+        p.line_segment([c + vec2(-rad * 0.38, 0.0), c + vec2(0.0, rad * 0.38)], st);
+        p.line_segment([c + vec2(rad * 0.38, 0.0), c + vec2(0.0, rad * 0.38)], st);
+    }
 }
 
 /// A small padlock on archives that need a password.
@@ -1800,12 +1832,14 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool) -> Option<OskKey> {
                 OskKey::Char(c) => c.to_string(),
                 OskKey::Backspace => "⌫".into(),
                 OskKey::Tab => "Tab ⇥".into(),
+                // Caps writes katakana on the kana keyboard.
+                OskKey::Caps if keyboard::LAYOUTS[k.layout].script == keyboard::Script::Kana => "カナ".into(),
                 OskKey::Caps => "Caps".into(),
                 OskKey::Enter => "Enter ⏎".into(),
                 OskKey::Shift => "⇧ Shift".into(),
                 OskKey::Ctrl => "Ctrl".into(),
                 OskKey::Alt => "Alt".into(),
-                OskKey::Lang => format!("⇄ {}", keyboard::LAYOUTS[(k.layout + 1) % keyboard::LAYOUTS.len()].name),
+                OskKey::Lang => format!("⇄ {}", keyboard::LAYOUTS[keyboard::next_layout(k.layout)].name),
                 OskKey::Space => tr("Space").into(),
                 OskKey::Left => "←".into(),
                 OskKey::Up => "↑".into(),
@@ -2221,6 +2255,7 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
 // ---------------------------------------------------------------- settings
 
 pub enum SettingsEvent {
+    LayoutChip(usize),
     Row(usize),
     Step(usize, f32),
     Pick(usize),
@@ -2253,6 +2288,7 @@ impl App {
             }
             SettingsEvent::Close => self.overlay = None,
             SettingsEvent::Chip(i) => self.settings_toggle_open(i),
+            SettingsEvent::LayoutChip(i) => self.settings_toggle_layout(i),
             SettingsEvent::Appearance(i) => {
                 st.row = row::APPEARANCE;
                 self.cfg.appearance = i;
@@ -2494,6 +2530,42 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::WEB_IMAGES));
+    }
+
+    // Keyboard layouts for ⇄.
+    let (rect, r) = settings_row(ui, 86.0, st.row == row::LAYOUTS, "layouts");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::LAYOUTS));
+    }
+    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Keyboard layouts"), label_font.clone(), v.text_color());
+    let on_layouts = cfg.layouts();
+    let n = crate::keyboard::CODES.len();
+    let chip_w = (SETTINGS_W - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
+    for (i, code) in crate::keyboard::CODES.iter().enumerate() {
+        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 6.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
+        let resp = ui.interact(chip, ui.id().with(("layout-chip", i)), Sense::click());
+        let on = on_layouts.iter().any(|c| c == code);
+        let cursor = st.row == row::LAYOUTS && st.layout_chip == i;
+        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
+        let label = crate::keyboard::LAYOUTS[i].name;
+        ui.painter().text(chip.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), v.text_color());
+        if resp.clicked() {
+            ev = Some(SettingsEvent::LayoutChip(i));
+        }
+    }
+
+    // Packages install on ✕.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::INSTALL, "install");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Install packages on open"), label_font.clone(), v.text_color());
+    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+    if cfg.install_on_open {
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+    }
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::INSTALL));
     }
 
     // How typed passwords show.

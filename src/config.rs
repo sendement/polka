@@ -69,6 +69,11 @@ pub struct Config {
     pub terminal: TermPrefs,
     /// Passwords typed show nothing at all (else an asterisk a character).
     pub password_hidden: bool,
+    /// On-screen keyboard layouts ⇄ goes through (codes; empty: English
+    /// and the interface's own).
+    pub osk_layouts: Vec<String>,
+    /// ✕ on a package installs it (else archives open as folders).
+    pub install_on_open: bool,
 }
 
 /// The terminal page.
@@ -156,6 +161,11 @@ pub const DEFAULT_ACCENT: [u8; 3] = [0x00, 0x5c, 0x80];
 pub const MAX_CUSTOM_COLORS: usize = 12;
 
 impl Config {
+    /// The keyboard layouts in use.
+    pub fn layouts(&self) -> Vec<String> {
+        if self.osk_layouts.is_empty() { crate::keyboard::default_codes(crate::i18n::current()) } else { self.osk_layouts.clone() }
+    }
+
     pub fn accent_rgb(&self) -> [u8; 3] {
         self.accent.unwrap_or(DEFAULT_ACCENT)
     }
@@ -193,6 +203,8 @@ impl Default for Config {
             language: None,
             terminal: TermPrefs::default(),
             password_hidden: false,
+            osk_layouts: Vec::new(),
+            install_on_open: true,
         }
     }
 }

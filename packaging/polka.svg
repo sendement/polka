@@ -11,15 +11,19 @@
   </defs>
   <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
   <!-- folder standing on the shelf ("polka") -->
-  <path d="M22 36h22l6 6h18a4 4 0 0 1 4 4v28H18V40a4 4 0 0 1 4-4z" fill="url(#folder)"/>
-  <rect x="18" y="48" width="54" height="26" rx="3" fill="#ffc94f"/>
-  <!-- gamepad next to it -->
-  <path d="M84 54h20c6 0 9 4 10 10l1 6c0.6 4-3.5 6-6 3.5l-4-3.5H87l-4 3.5c-2.5 2.5-6.6 0.5-6-3.5l1-6c1-6 4-10 10-10z" fill="#e9f1fa"/>
-  <g fill="#235c96">
-    <rect x="86.5" y="58" width="3" height="9" rx="1"/>
-    <rect x="83.5" y="61" width="9" height="3" rx="1"/>
-    <circle cx="104" cy="59.5" r="1.9"/>
-    <circle cx="108" cy="63" r="1.9"/>
+  <g transform="translate(7 0)">
+    <path d="M22 36h22l6 6h18a4 4 0 0 1 4 4v28H18V40a4 4 0 0 1 4-4z" fill="url(#folder)"/>
+    <rect x="18" y="48" width="54" height="26" rx="3" fill="#ffc94f"/>
+  </g>
+  <!-- gamepad leaning on the folder: its d-pad's right arrow at the folder's edge -->
+  <g transform="translate(-14 0)">
+    <path d="M84 54h20c6 0 9 4 10 10l1 6c0.6 4-3.5 6-6 3.5l-4-3.5H87l-4 3.5c-2.5 2.5-6.6 0.5-6-3.5l1-6c1-6 4-10 10-10z" fill="#e9f1fa" stroke="#2c6aa8" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>
+    <g fill="#235c96">
+      <rect x="86.5" y="58" width="3" height="9" rx="1"/>
+      <rect x="83.5" y="61" width="9" height="3" rx="1"/>
+      <circle cx="104" cy="59.5" r="1.9"/>
+      <circle cx="108" cy="63" r="1.9"/>
+    </g>
   </g>
   <!-- shelf -->
   <rect x="14" y="74" width="100" height="7" rx="3.5" fill="#e9f1fa"/>

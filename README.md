@@ -18,9 +18,11 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Top bar icons come from the icon theme (monochrome ones are recoloured to fit the UI)
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
-- The on-screen keyboard is a real keyboard's main block (EN, RU, UK; ⇄ switches), with what
-  Shift gives on every key (`!` on 1, `№` on 3 in Russian…), Caps Lock, and for the terminal Ctrl,
-  Alt, Tab and arrows
+- The on-screen keyboard is a real keyboard's main block with what Shift gives on every key (`!`
+  on 1, `№` on 3 in Russian…), Caps Lock, and for the terminal Ctrl, Alt, Tab and arrows. Layouts:
+  EN, RU, UK, DE (QWERTZ), FR (AZERTY), ES with dead keys for accents, Korean (두벌식, jamo build
+  syllables) and Japanese kana (JIS; ゛ ゜ voice the kana before, Caps writes katakana); which ones ⇄
+  goes through is chosen in the settings. (Chinese would need a dictionary IME.)
 - Pinned folders can use any theme icon (Papirus colour variants included) or your own picture
   (icon picker → △ "Own picture…", then pick an image in the panes); label sizes follow icon sizes
 
@@ -68,8 +70,11 @@ hidden, see Settings) and does it with sudo — `cp` keeps the file's owner and 
 that worked is reused for ten minutes, in memory only. Files out of system folders are deleted
 rather than trashed.
 
+Package files are checked by what's inside (.PKGINFO, debian-binary, the rpm lead, squashfs…)
+and marked with their format on the icon; a fake named like one stays a plain archive. With
+"Install packages on open" (on by default) ✕ installs them; △ still opens them as folders.
 △ on a package offers installing it with the system's own tool, when there is one: pacman
-(`.pkg.tar.*`), flatpak (`.flatpak`, `.flatpakref`; ✕ installs them too), apt / dpkg (`.deb`),
+(`.pkg.tar.*`), flatpak (`.flatpak`, `.flatpakref`), apt / dpkg (`.deb`),
 dnf / zypper / rpm (`.rpm`), snap (`.snap`); on a shell script, running it. It runs in a terminal
 window that shows the command and takes the tool's questions and sudo's password; it closes when
 done, and waits for Enter if something failed. Dropped items can also be linked ("Create link

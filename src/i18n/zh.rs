@@ -1,6 +1,8 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Keyboard layouts", "键盘布局"),
+    ("Install packages on open", "打开时安装软件包"),
     ("Wrong password — administrator password (sudo)", "密码错误 — 管理员密码 (sudo)"),
     ("Hidden", "隐藏"),
     ("Passwords as you type", "输入密码时"),

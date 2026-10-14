@@ -548,6 +548,8 @@ pub enum Cmd {
     DropTransfer { sources: Vec<Location>, dest: Dest, mv: bool },
     /// Symbolic links to these files in a folder.
     DropLink { sources: Vec<PathBuf>, dir: PathBuf },
+    /// The archive under the cursor, browsed as a folder (whatever ✕ does).
+    BrowseArchive,
     /// A command in a terminal window of its own (installing, a script).
     RunInWindow { title: String, dir: PathBuf, cmd: String },
     /// Run a program or launcher with these files.
@@ -695,6 +697,8 @@ pub struct Osk {
     pub caps: bool,
     pub ctrl: bool,
     pub alt: bool,
+    /// The character typed just before (it may combine with the next).
+    pub prev: Option<char>,
 }
 
 pub use crate::keyboard::OskKey;
@@ -728,6 +732,7 @@ impl Osk {
             caps: false,
             ctrl: false,
             alt: false,
+            prev: None,
         }
     }
 
@@ -965,7 +970,7 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 13;
+pub const SETTINGS_ROWS: usize = 15;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
@@ -979,7 +984,9 @@ pub mod row {
     pub const VOLUMES: usize = 9;
     pub const WEB_IMAGES: usize = 10;
     pub const PASSWORDS: usize = 11;
-    pub const CLOSE: usize = 12;
+    pub const LAYOUTS: usize = 12;
+    pub const INSTALL: usize = 13;
+    pub const CLOSE: usize = 14;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1001,6 +1008,8 @@ pub struct Settings {
     pub row: usize,
     /// Cursor among the "open in Polka" kinds.
     pub chip: usize,
+    /// Cursor among the keyboard layouts.
+    pub layout_chip: usize,
     /// Cursor in the colour row: presets, then saved colours, then "+".
     pub swatch: usize,
     pub editor: Option<ColorEditor>,
@@ -1191,6 +1200,7 @@ impl App {
     pub fn new(ctx: egui::Context, start: Option<PathBuf>) -> Self {
         let cfg = Config::load();
         crate::i18n::set(cfg.language.as_deref());
+        crate::keyboard::set_enabled(&cfg.layouts());
         let (pad_tx, pad_rx) = crossbeam_channel::unbounded();
         if std::env::var_os("POLKA_NO_GAMEPAD").is_none() {
             let c = ctx.clone();
@@ -1219,6 +1229,7 @@ impl App {
         apply_accent(&ctx, &cfg);
         crate::fonts::install_with(&ctx, cfg.viewer.font.as_deref());
         crate::locks::set_waker(ctx.clone());
+        crate::packages::set_waker(ctx.clone());
         let mut app = Self {
             cfg,
             tabs: vec![tab],
@@ -1875,51 +1886,93 @@ impl App {
     }
 
     pub fn osk_key(&mut self, key: OskKey) {
+        use crate::terminal::keys::{K, Mods};
         let Some(Overlay::Osk(k)) = self.overlay.as_mut() else { return };
+        // The character typed (Space too), and what it makes with the one
+        // typed just before (an accent, a Hangul syllable, a voiced kana).
+        let typed = match key {
+            OskKey::Char(c) => Some(c),
+            OskKey::Space => Some(' '),
+            _ => None,
+        };
+        let composed = typed.and_then(|c| k.prev.and_then(|p| crate::keyboard::compose(k.layout, p, c)));
         match key {
             OskKey::Shift => k.shift = !k.shift,
             OskKey::Caps => k.caps = !k.caps,
             OskKey::Ctrl => k.ctrl = !k.ctrl,
             OskKey::Alt => k.alt = !k.alt,
             OskKey::Lang => {
-                k.layout = (k.layout + 1) % crate::keyboard::LAYOUTS.len();
+                k.layout = crate::keyboard::next_layout(k.layout);
                 crate::keyboard::set_last_layout(k.layout);
+                k.prev = None;
             }
             // Into the terminal as it's pressed.
             _ if k.live() => {
-                let mods = crate::terminal::keys::Mods { ctrl: k.ctrl, alt: k.alt, shift: false };
-                let t = match key {
-                    OskKey::Char(c) => Some(crate::terminal::keys::K::Char(c)),
-                    OskKey::Space => Some(crate::terminal::keys::K::Char(' ')),
-                    OskKey::Backspace => Some(crate::terminal::keys::K::Backspace),
-                    OskKey::Tab => Some(crate::terminal::keys::K::Tab),
-                    OskKey::Enter => Some(crate::terminal::keys::K::Enter),
-                    OskKey::Left => Some(crate::terminal::keys::K::Left),
-                    OskKey::Right => Some(crate::terminal::keys::K::Right),
-                    OskKey::Up => Some(crate::terminal::keys::K::Up),
-                    OskKey::Down => Some(crate::terminal::keys::K::Down),
-                    _ => None,
-                };
-                if matches!(key, OskKey::Char(_) | OskKey::Space) {
+                let mods = Mods { ctrl: k.ctrl, alt: k.alt, shift: false };
+                let plain = !k.ctrl && !k.alt;
+                if typed.is_some() {
                     (k.shift, k.ctrl, k.alt) = (false, false, false);
                 }
-                match t {
-                    Some(t) => self.term_key(t, mods),
-                    None => self.overlay = None,
+                let t = match key {
+                    OskKey::Char(c) => Some(K::Char(c)),
+                    OskKey::Space => Some(K::Char(' ')),
+                    OskKey::Backspace => Some(K::Backspace),
+                    OskKey::Tab => Some(K::Tab),
+                    OskKey::Enter => Some(K::Enter),
+                    OskKey::Left => Some(K::Left),
+                    OskKey::Right => Some(K::Right),
+                    OskKey::Up => Some(K::Up),
+                    OskKey::Down => Some(K::Down),
+                    _ => None,
+                };
+                match (composed.filter(|_| plain), t) {
+                    // The one before is replaced by what they make together.
+                    (Some(r), _) => {
+                        k.prev = r.chars().last();
+                        self.term_key(K::Backspace, Mods::NONE);
+                        for ch in r.chars() {
+                            self.term_key(K::Char(ch), Mods::NONE);
+                        }
+                    }
+                    (None, Some(t)) => {
+                        k.prev = typed.filter(|_| plain);
+                        self.term_key(t, mods);
+                    }
+                    (None, None) => self.overlay = None,
                 }
             }
-            OskKey::Char(c) => {
-                k.insert(&c.to_string());
+            OskKey::Char(_) | OskKey::Space => {
+                let c = typed.unwrap_or(' ');
+                let before = k.caret.checked_sub(1).and_then(|i| k.text.get(i)).copied();
+                match composed.filter(|_| before == k.prev) {
+                    Some(r) => {
+                        k.backspace();
+                        k.insert(&r);
+                        k.prev = r.chars().last();
+                    }
+                    None => {
+                        k.insert(&c.to_string());
+                        k.prev = Some(c);
+                    }
+                }
                 k.shift = false;
             }
-            OskKey::Space => k.insert(" "),
-            OskKey::Backspace => k.backspace(),
+            OskKey::Backspace => {
+                k.backspace();
+                k.prev = None;
+            }
             OskKey::Tab => {}
             OskKey::Left => k.caret_by(-1),
             OskKey::Right => k.caret_by(1),
             OskKey::Up => k.caret = 0,
             OskKey::Down => k.caret = k.text.len(),
             OskKey::Enter | OskKey::Ok => self.osk_submit(),
+        }
+        // Moving about ends a syllable being built.
+        if matches!(key, OskKey::Left | OskKey::Right | OskKey::Up | OskKey::Down | OskKey::Tab | OskKey::Enter) {
+            if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
+                k.prev = None;
+            }
         }
     }
 
@@ -2138,8 +2191,9 @@ impl App {
             Location::Steam(_) => {}
             Location::Local(_) | Location::Search { .. } => {
                 let path = p.entry_path(&e).expect("local entry");
-                // Packages that aren't archives install on ✕.
-                if let Some(k @ (crate::packages::Kind::Flatpak | crate::packages::Kind::Snap)) = crate::packages::kind(&e.name) {
+                // A package (checked by its content) installs on ✕, as set.
+                let package = e.mtime.and_then(|t| crate::packages::package(&path, &e.name, t));
+                if let (true, Some(k)) = (self.cfg.install_on_open, package) {
                     if let Some((cmd, tool)) = crate::packages::command(k, &path) {
                         let title = format!("{} ({tool})", tr("Install package"));
                         let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| "/".into());
@@ -2367,7 +2421,13 @@ impl App {
         let mut add = |label: &str, cmd: Cmd, enabled: bool| {
             items.push(MenuItem { enabled, ..item(label, cmd) })
         };
-        add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
+        // A package that ✕ installs still opens as a folder from here.
+        let package = targets.first().filter(|e| single && !e.is_dir).and_then(|e| Some(crate::packages::package(&p.entry_path(e)?, &e.name, e.mtime?)?));
+        if one_archive && package.is_some() && self.cfg.install_on_open {
+            add(tr("Open as folder"), Cmd::BrowseArchive, true);
+        } else {
+            add(if one_archive { tr("Open as folder") } else { tr("Open") }, Cmd::Open, single);
+        }
         if let Some(path) = targets.first().filter(|e| single && !e.is_dir).and_then(|e| p.entry_path(e)) {
             let name = targets[0].name.clone();
             if crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
@@ -2377,8 +2437,10 @@ impl App {
             } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
                 add(tr("View as text"), Cmd::OpenInViewer, true);
             }
-            // A package for this system's tool, or a script to run.
-            if let Some((cmd, tool)) = crate::packages::kind(&name).and_then(|k| crate::packages::command(k, &path)) {
+            // A package (as its content shows) for this system's tool, or a
+            // script to run.
+            let k = package.or_else(|| crate::packages::kind(&name).filter(|k| *k == crate::packages::Kind::Script));
+            if let Some((cmd, tool)) = k.and_then(|k| crate::packages::command(k, &path)) {
                 let label = if tool == "sh" { tr("Run in terminal").to_string() } else { format!("{} ({tool})", tr("Install package")) };
                 let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| "/".into());
                 add(&label, Cmd::RunInWindow { title: label.clone(), dir, cmd }, true);
@@ -2630,7 +2692,14 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL => self.settings_step(row, 0.0),
+                    row::LAYOUTS => {
+                        let i = match &self.overlay {
+                            Some(Overlay::Settings(st)) => st.layout_chip,
+                            _ => 0,
+                        };
+                        self.settings_toggle_layout(i);
+                    }
                     row::APPEARANCE | row::LANGUAGE => self.settings_step(row, 1.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
@@ -2795,6 +2864,16 @@ impl App {
                 self.cfg.password_hidden = !self.cfg.password_hidden;
                 self.cfg.save();
             }
+            row::INSTALL => {
+                self.cfg.install_on_open = !self.cfg.install_on_open;
+                self.cfg.save();
+            }
+            row::LAYOUTS => {
+                if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+                    st.layout_chip = (st.layout_chip as isize + d as isize).clamp(0, crate::keyboard::CODES.len() as isize - 1) as usize;
+                }
+                return;
+            }
             row::VOLUMES => {
                 self.cfg.collapse_volumes = !self.cfg.collapse_volumes;
                 self.cfg.save();
@@ -2825,6 +2904,28 @@ impl App {
     }
 
     /// Flip "open in Polka" for kind `i`.
+    /// A keyboard layout on or off (one always stays).
+    pub fn settings_toggle_layout(&mut self, i: usize) {
+        if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+            st.row = row::LAYOUTS;
+            st.layout_chip = i;
+        }
+        let Some(code) = crate::keyboard::CODES.get(i) else { return };
+        let mut v = self.cfg.layouts();
+        if let Some(p) = v.iter().position(|c| c == code) {
+            if v.len() > 1 {
+                v.remove(p);
+            }
+        } else {
+            v.push(code.to_string());
+            // In the keyboard's own order.
+            v.sort_by_key(|c| crate::keyboard::CODES.iter().position(|x| x == c));
+        }
+        crate::keyboard::set_enabled(&v);
+        self.cfg.osk_layouts = v;
+        self.cfg.save();
+    }
+
     pub fn settings_toggle_open(&mut self, i: usize) {
         if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
             st.row = row::OPEN_IN;
@@ -3121,6 +3222,13 @@ impl App {
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
             Cmd::RunInWindow { title, dir, cmd } => self.open_term_window(title, &dir, &cmd),
+            Cmd::BrowseArchive => {
+                let cfg = self.cfg.clone();
+                let p = self.pane();
+                if let Some(path) = p.current().and_then(|e| p.entry_path(e)) {
+                    self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
+                }
+            }
             Cmd::DropLink { sources, dir } => {
                 self.drop_done();
                 self.make_links(sources, dir);
@@ -3322,7 +3430,7 @@ impl App {
             Cmd::Settings => {
                 let sw = swatches(&self.cfg);
                 let swatch = sw.iter().position(|c| *c == self.cfg.accent).unwrap_or(0);
-                self.overlay = Some(Overlay::Settings(Settings { row: 0, chip: 0, swatch, editor: None }));
+                self.overlay = Some(Overlay::Settings(Settings { row: 0, chip: 0, layout_chip: 0, swatch, editor: None }));
             }
             Cmd::IconThemes => {
                 let system = crate::icons::detect_theme().unwrap_or_else(|| "hicolor".into());

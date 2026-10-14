@@ -2446,7 +2446,8 @@ fn terminal(h: &mut Harness<'static, App>) {
     term_wait(h, "echo pad-run ", 1);
     press(h, &[Action::LeftTrigger]);
     if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
-        (k.row, k.col) = (0, 1);
+        // English: Shift+1 is "!".
+        (k.row, k.col, k.layout) = (0, 1, 0);
     }
     press(h, &[Action::Accept]);
     term_wait(h, "echo pad-run!", 1);
@@ -3053,7 +3054,17 @@ fn packages(h: &mut Harness<'static, App>) {
     script("pacman", "#!/bin/sh\necho \"loading $2\"\nprintf ':: Proceed with installation? [Y/n] '\nread a\n[ \"$a\" = y ] && echo installed > \"$(dirname \"$2\")/installed.flag\"\n");
     let path = std::env::var("PATH").unwrap_or_default();
     unsafe { std::env::set_var("PATH", format!("{}:{path}", bin.display())) };
-    std::fs::write(dir.join("tool-1.0-1-x86_64.pkg.tar.zst"), b"").unwrap();
+    // A real-looking package (.PKGINFO inside) and a plain tar named like one.
+    let src = base.join("pkg-src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join(".PKGINFO"), "pkgname = tool\n").unwrap();
+    std::fs::write(src.join("tool"), "x").unwrap();
+    let tar = |out: &str, files: &[&str]| {
+        let ok = std::process::Command::new("tar").arg("--zstd").arg("-cf").arg(dir.join(out)).arg("-C").arg(&src).args(files).status().unwrap();
+        assert!(ok.success());
+    };
+    tar("tool-1.0-1-x86_64.pkg.tar.zst", &[".PKGINFO", "tool"]);
+    tar("fake-1.0-1-x86_64.pkg.tar.zst", &["tool"]);
     std::fs::write(dir.join("broken.sh"), "echo going wrong\nexit 3\n").unwrap();
     let cfg = h.state().cfg.clone();
     h.state_mut().overlay = None;
@@ -3068,13 +3079,44 @@ fn packages(h: &mut Harness<'static, App>) {
         }
         panic!("window never showed {what:?}:\n{}", window_screen(h));
     };
-    // The package: △ offers installing it with pacman.
-    let i = h.state().pane().entries.iter().position(|e| e.name.ends_with(".pkg.tar.zst")).unwrap();
-    h.state_mut().pane_mut().set_cursor(i);
-    press(h, &[Action::Actions]);
+    let at = |h: &Harness<'static, App>, name: &str| h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
     let label = format!("{} (pacman)", tr("Install package"));
+    let labels = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    // Checked by what's inside: the fake gets no badge and no installing.
+    for _ in 0..20 {
+        settle(h);
+    }
+    h.state_mut().cfg.view = crate::config::ViewMode::Grid;
+    settle(h);
+    shot(h, "p0-badges-grid");
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    settle(h);
+    shot(h, "p0-badges-list");
+    let fake = at(h, "fake-1.0-1-x86_64.pkg.tar.zst");
+    h.state_mut().pane_mut().set_cursor(fake);
+    press(h, &[Action::Actions]);
+    assert!(!labels(h).contains(&label), "{:?}", labels(h));
+    press(h, &[Action::Back]);
+    // Not installing on ✕ (a setting): the package opens as a folder.
+    h.state_mut().cfg.install_on_open = false;
+    let real = at(h, "tool-1.0-1-x86_64.pkg.tar.zst");
+    h.state_mut().pane_mut().set_cursor(real);
+    press(h, &[Action::Accept]);
+    assert!(h.state().pane().loc.is_archive(), "not opened as a folder");
+    assert!(h.state().term_window.is_none());
+    press(h, &[Action::Back]);
+    h.state_mut().cfg.install_on_open = true;
+    // △ still has opening as a folder; ✕ installs with pacman.
+    let real = at(h, "tool-1.0-1-x86_64.pkg.tar.zst");
+    h.state_mut().pane_mut().set_cursor(real);
+    press(h, &[Action::Actions]);
+    assert!(labels(h).contains(&label) && labels(h).contains(&tr("Open as folder").to_string()), "{:?}", labels(h));
     shot(h, "p0-menu");
-    menu_pick(h, &label);
+    press(h, &[Action::Back]);
+    press(h, &[Action::Accept]);
     assert!(h.state().term_window.is_some(), "no window");
     wait_for(h, "Proceed with installation?");
     assert!(window_screen(h).contains("sudo pacman -U"), "the command isn't shown");
@@ -3090,6 +3132,7 @@ fn packages(h: &mut Harness<'static, App>) {
     }
     assert!(h.state().term_window.is_none(), "window left open:\n{}", window_screen(h));
     assert!(dir.join("installed.flag").exists());
+    std::fs::remove_file(dir.join("installed.flag")).ok();
     assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains(tr("Done"))));
     // A script that fails: the window waits for Enter (✕ held).
     let cfg = h.state().cfg.clone();
@@ -3127,4 +3170,78 @@ fn package_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     packages(&mut h);
+}
+
+/// Keyboard layouts: chosen in the settings, ⇄ goes through them; Hangul
+/// builds syllables, kana takes ゛ and Caps writes katakana.
+fn layouts(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, OskKey, row};
+    let codes = crate::keyboard::CODES;
+    let cfg = h.state().cfg.clone();
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir), None, &cfg);
+    settle(h);
+    for code in ["KO", "JA"] {
+        let i = codes.iter().position(|c| *c == code).unwrap();
+        if !h.state().cfg.layouts().iter().any(|c| c == code) {
+            h.state_mut().settings_toggle_layout(i);
+        }
+    }
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::LAYOUTS;
+    }
+    h.state_mut().ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
+    settle(h);
+    shot(h, "k0-settings-layouts");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::NewFolder);
+    let to = |h: &mut Harness<'static, App>, name: &str| {
+        for _ in 0..10 {
+            if let Some(Overlay::Osk(k)) = h.state().overlay.as_ref() {
+                if crate::keyboard::LAYOUTS[k.layout].name == name {
+                    return;
+                }
+            }
+            press(h, &[Action::View]);
+        }
+        panic!("no {name} layout");
+    };
+    let text = |h: &Harness<'static, App>| match h.state().overlay.as_ref() {
+        Some(Overlay::Osk(k)) => k.string(),
+        _ => String::new(),
+    };
+    to(h, "한");
+    for c in "ㅎㅏㄴㄱㅡㄹ".chars() {
+        h.state_mut().osk_key(OskKey::Char(c));
+    }
+    settle(h);
+    assert_eq!(text(h), "한글");
+    shot(h, "k1-korean");
+    to(h, "あ");
+    for c in "か゛".chars() {
+        h.state_mut().osk_key(OskKey::Char(c));
+    }
+    assert_eq!(text(h), "한글が");
+    h.state_mut().osk_key(OskKey::Caps);
+    settle(h);
+    shot(h, "k2-katakana");
+    if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        (k.row, k.col) = (1, 5);
+    }
+    press(h, &[Action::Accept]);
+    assert_eq!(text(h), "한글がカ");
+    press(h, &[Action::Back]);
+    crate::keyboard::set_last_layout(0);
+    crate::keyboard::set_enabled(&cfg.layouts());
+}
+
+#[test]
+#[ignore]
+fn layout_screens() {
+    // The keyboard's layouts are process-wide.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    layouts(&mut h);
 }
