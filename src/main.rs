@@ -20,6 +20,7 @@ mod packages;
 mod sandbox;
 mod sidebar;
 mod steam;
+mod steam_add;
 mod terminal;
 mod thumbs;
 mod trashbin;

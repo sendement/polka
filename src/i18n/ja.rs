@@ -1,6 +1,13 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in Steam", "すでに Steam にあります"),
+    ("Add (shows after Steam restarts)", "追加（Steam 再起動後に表示）"),
+    ("Add to Steam", "Steam に追加"),
+    ("Steam is running", "Steam は起動中です"),
+    ("Restarting Steam…", "Steam を再起動中…"),
+    ("Restart Steam and add", "Steam を再起動して追加"),
+    ("Added to Steam", "Steam に追加しました"),
     ("Keyboard layouts", "キーボード配列"),
     ("Install packages on open", "開くとパッケージをインストール"),
     ("Wrong password — administrator password (sudo)", "パスワードが違います — 管理者パスワード (sudo)"),

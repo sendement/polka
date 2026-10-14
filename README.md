@@ -113,7 +113,13 @@ shell runs on the host (`flatpak-spawn` and `script`), with resizes, Ctrl+C and 
 Sidebar → Steam: **Games** lists the installed games of every library (folders without a manifest
 are named from Steam's app cache), **Prefixes** lists the Proton prefixes (`compatdata/<id>`) under
 their games' names — non-Steam shortcuts and uninstalled games included. Going up from a game's
-folder or prefix comes back to the list. Games and prefixes wear the icon of the game's own `.exe`
+folder or prefix comes back to the list.
+
+△ → "Add to Steam" on a Windows program (`.exe`, `.bat`, `.msi`) or a `.desktop` launcher puts it in
+the library as a non-Steam game, with its icon (the exe's own, or the launcher's theme icon) and,
+for Windows programs, Proton Experimental (unless Steam Play is on for every title). Steam keeps the
+list in memory while it runs: Polka offers to restart it, or the game shows after its next start
+(in the Deck's game mode only the latter). Without a Steam install none of this shows. Games and prefixes wear the icon of the game's own `.exe`
 (sharper than Steam's), else Steam's.
 
 ## Disk usage

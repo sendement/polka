@@ -3245,3 +3245,117 @@ fn layout_screens() {
     let mut h = harness(dir);
     layouts(&mut h);
 }
+
+/// "Add to Steam": an .exe (with its icon and Proton) and a launcher into a
+/// fake Steam's library, once; a running Steam asks first; no Steam, no
+/// Steam things at all.
+fn add_to_steam(h: &mut Harness<'static, App>) {
+    use crate::i18n::tr;
+    use crate::vfs::Location;
+    let base = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let root = base.join("fake-steam-add");
+    let _ = std::fs::remove_dir_all(&root);
+    fake_steam(&root);
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(root.join("config/loginusers.vdf"), "\"users\"\n{\n\t\"76561197960265770\"\n\t{\n\t\t\"AccountName\"\t\t\"t\"\n\t\t\"MostRecent\"\t\t\"1\"\n\t}\n}\n").unwrap();
+    std::fs::write(root.join("config/config.vdf"), "\"InstallConfigStore\"\n{\n\t\"Software\"\n\t{\n\t\t\"Valve\"\n\t\t{\n\t\t\t\"Steam\"\n\t\t\t{\n\t\t\t\t\"CompatToolMapping\"\n\t\t\t\t{\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n").unwrap();
+    std::fs::create_dir_all(root.join("steamapps/common/Proton - Experimental")).unwrap();
+    let apps = base.join("apps");
+    let _ = std::fs::remove_dir_all(&apps);
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::copy(std::env::var("HOME").unwrap() + "/Games/sh/Townfall.exe", apps.join("Townfall.exe")).unwrap();
+    std::fs::write(apps.join("tool.desktop"), "[Desktop Entry]\nType=Application\nName=Tool Thing\nExec=/usr/bin/tool --flag %U\nIcon=utilities-terminal\n").unwrap();
+    unsafe {
+        std::env::set_var("POLKA_STEAM_ROOT", &root);
+        std::env::set_var("POLKA_STEAM_RUNNING", "0");
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(apps.clone()), None, &cfg);
+    settle(h);
+    let pick = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Actions]);
+    };
+    let entries = || {
+        let b = std::fs::read(root.join("userdata/42/config/shortcuts.vdf")).unwrap();
+        let tree = crate::steam_add::parse(&b).expect("unreadable shortcuts.vdf");
+        let Some((_, crate::steam_add::Node::Map(list))) = tree.into_iter().next() else { panic!() };
+        list.into_iter()
+            .map(|(_, e)| match e {
+                crate::steam_add::Node::Map(f) => f.into_iter().filter_map(|(k, v)| match v {
+                    crate::steam_add::Node::Str(s) => Some((k, s)),
+                    crate::steam_add::Node::Int(i) => Some((k, i.to_string())),
+                    _ => None,
+                }).collect::<std::collections::HashMap<_, _>>(),
+                _ => Default::default(),
+            })
+            .collect::<Vec<_>>()
+    };
+    pick(h, "Townfall.exe");
+    shot(h, "g0-add-menu");
+    menu_pick(h, tr("Add to Steam"));
+    let list = entries();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[0]["AppName"], "My Game", "the old one kept");
+    let new = &list[1];
+    assert_eq!(new["AppName"], "Townfall");
+    assert_eq!(new["Exe"], format!("\"{}\"", apps.join("Townfall.exe").display()));
+    assert!(std::path::Path::new(&new["icon"]).exists(), "no icon: {}", new["icon"]);
+    let cfgvdf = std::fs::read_to_string(root.join("config/config.vdf")).unwrap();
+    assert!(cfgvdf.contains(&format!("\"{}\"", new["appid"])) && cfgvdf.contains("proton_experimental"), "{cfgvdf}");
+    // Once only.
+    pick(h, "Townfall.exe");
+    menu_pick(h, tr("Add to Steam"));
+    assert_eq!(entries().len(), 2);
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0 == tr("Already in Steam")));
+    // A launcher: its program and arguments, its theme icon.
+    pick(h, "tool.desktop");
+    menu_pick(h, tr("Add to Steam"));
+    let list = entries();
+    let t = &list[2];
+    assert_eq!((t["AppName"].as_str(), t["Exe"].as_str(), t["LaunchOptions"].as_str()), ("Tool Thing", "\"/usr/bin/tool\"", "--flag"));
+    // Steam running: it asks.
+    unsafe { std::env::set_var("POLKA_STEAM_RUNNING", "1") };
+    std::fs::write(apps.join("other.exe"), b"MZ").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    pick(h, "other.exe");
+    menu_pick(h, tr("Add to Steam"));
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    assert_eq!(labels, [tr("Restart Steam and add"), tr("Add (shows after Steam restarts)"), tr("Cancel")]);
+    shot(h, "g1-steam-running");
+    menu_pick(h, tr("Add (shows after Steam restarts)"));
+    assert_eq!(entries().len(), 4);
+    // No Steam: nothing about it.
+    unsafe { std::env::set_var("POLKA_STEAM_ROOT", base.join("no-steam-here")) };
+    h.state_mut().refresh_sidebar();
+    pick(h, "Townfall.exe");
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    assert!(!labels.contains(&tr("Add to Steam").to_string()), "{labels:?}");
+    assert!(!h.state().side_items.iter().any(|it| matches!(it.loc, Location::Steam(_))));
+    press(h, &[Action::Back]);
+    unsafe {
+        std::env::remove_var("POLKA_STEAM_ROOT");
+        std::env::remove_var("POLKA_STEAM_RUNNING");
+    }
+    h.state_mut().refresh_sidebar();
+}
+
+#[test]
+#[ignore]
+fn steam_add_screens() {
+    // Points Steam at a fake one for the whole process.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    add_to_steam(&mut h);
+}

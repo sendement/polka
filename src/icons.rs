@@ -561,7 +561,7 @@ pub fn detect_theme() -> Option<String> {
 }
 
 /// Icon= of a .desktop file: absolute path -> uri, otherwise the bare name.
-fn desktop_icon(path: &Path) -> Option<String> {
+pub fn desktop_icon(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut in_main = false;
     for line in text.lines() {
@@ -584,7 +584,7 @@ fn desktop_icon(path: &Path) -> Option<String> {
 }
 
 /// Extract the largest icon from a PE file into the cache dir, as PNG.
-fn exe_icon(path: &Path) -> Option<PathBuf> {
+pub fn exe_icon(path: &Path) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let meta = std::fs::metadata(path).ok()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();

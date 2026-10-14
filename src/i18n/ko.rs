@@ -1,6 +1,13 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in Steam", "이미 Steam에 있음"),
+    ("Add (shows after Steam restarts)", "추가 (Steam 재시작 후 표시)"),
+    ("Add to Steam", "Steam에 추가"),
+    ("Steam is running", "Steam 실행 중"),
+    ("Restarting Steam…", "Steam 재시작 중…"),
+    ("Restart Steam and add", "Steam 재시작 후 추가"),
+    ("Added to Steam", "Steam에 추가됨"),
     ("Keyboard layouts", "키보드 배열"),
     ("Install packages on open", "열 때 패키지 설치"),
     ("Wrong password — administrator password (sudo)", "잘못된 암호 — 관리자 암호 (sudo)"),

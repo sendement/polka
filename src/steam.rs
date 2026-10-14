@@ -27,7 +27,8 @@ pub struct Item {
 pub fn roots() -> Vec<PathBuf> {
     // Tests bring a Steam of their own.
     if let Some(r) = std::env::var_os("POLKA_STEAM_ROOT") {
-        return vec![PathBuf::from(r)];
+        let r = PathBuf::from(r);
+        return if r.join("steamapps").is_dir() { vec![r] } else { Vec::new() };
     }
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let candidates = [

@@ -550,6 +550,10 @@ pub enum Cmd {
     DropLink { sources: Vec<PathBuf>, dir: PathBuf },
     /// The archive under the cursor, browsed as a folder (whatever ✕ does).
     BrowseArchive,
+    /// A program (.exe, .desktop) as a non-Steam game.
+    SteamAdd(PathBuf),
+    /// The shortcut written: with Steam restarted, or for its next start.
+    SteamAddNow { s: crate::steam_add::Shortcut, restart: bool },
     /// A command in a terminal window of its own (installing, a script).
     RunInWindow { title: String, dir: PathBuf, cmd: String },
     /// Run a program or launcher with these files.
@@ -2437,6 +2441,12 @@ impl App {
             } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
                 add(tr("View as text"), Cmd::OpenInViewer, true);
             }
+            // A Windows program or a launcher into the Steam library (when
+            // there's a Steam).
+            let lower = name.to_lowercase();
+            if [".exe", ".bat", ".msi", ".desktop"].iter().any(|x| lower.ends_with(x)) && crate::steam::root().is_some() {
+                add(tr("Add to Steam"), Cmd::SteamAdd(path.clone()), true);
+            }
             // A package (as its content shows) for this system's tool, or a
             // script to run.
             let k = package.or_else(|| crate::packages::kind(&name).filter(|k| *k == crate::packages::Kind::Script));
@@ -3222,6 +3232,8 @@ impl App {
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
             Cmd::RunInWindow { title, dir, cmd } => self.open_term_window(title, &dir, &cmd),
+            Cmd::SteamAdd(path) => self.steam_add(&path),
+            Cmd::SteamAddNow { s, restart } => self.steam_add_now(s, restart),
             Cmd::BrowseArchive => {
                 let cfg = self.cfg.clone();
                 let p = self.pane();

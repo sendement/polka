@@ -1,6 +1,13 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in Steam", "Уже в Steam"),
+    ("Add (shows after Steam restarts)", "Добавить (появится после перезапуска Steam)"),
+    ("Add to Steam", "Добавить в Steam"),
+    ("Steam is running", "Steam запущен"),
+    ("Restarting Steam…", "Перезапуск Steam…"),
+    ("Restart Steam and add", "Перезапустить Steam и добавить"),
+    ("Added to Steam", "Добавлено в Steam"),
     ("Keyboard layouts", "Раскладки клавиатуры"),
     ("Install packages on open", "Устанавливать пакеты при открытии"),
     ("Wrong password — administrator password (sudo)", "Неверный пароль — пароль администратора (sudo)"),

@@ -1,6 +1,13 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in Steam", "已在 Steam 中"),
+    ("Add (shows after Steam restarts)", "添加（Steam 重启后显示）"),
+    ("Add to Steam", "添加到 Steam"),
+    ("Steam is running", "Steam 正在运行"),
+    ("Restarting Steam…", "正在重启 Steam…"),
+    ("Restart Steam and add", "重启 Steam 并添加"),
+    ("Added to Steam", "已添加到 Steam"),
     ("Keyboard layouts", "键盘布局"),
     ("Install packages on open", "打开时安装软件包"),
     ("Wrong password — administrator password (sudo)", "密码错误 — 管理员密码 (sudo)"),

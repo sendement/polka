@@ -1,6 +1,13 @@
 //! Français.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in Steam", "Déjà dans Steam"),
+    ("Add (shows after Steam restarts)", "Ajouter (visible au redémarrage de Steam)"),
+    ("Add to Steam", "Ajouter à Steam"),
+    ("Steam is running", "Steam est lancé"),
+    ("Restarting Steam…", "Redémarrage de Steam…"),
+    ("Restart Steam and add", "Redémarrer Steam et ajouter"),
+    ("Added to Steam", "Ajouté à Steam"),
     ("Keyboard layouts", "Dispositions du clavier"),
     ("Install packages on open", "Installer les paquets à l’ouverture"),
     ("Wrong password — administrator password (sudo)", "Mot de passe incorrect — mot de passe administrateur (sudo)"),
