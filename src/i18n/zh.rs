@@ -1,6 +1,15 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Wrong password — administrator password (sudo)", "密码错误 — 管理员密码 (sudo)"),
+    ("Hidden", "隐藏"),
+    ("Passwords as you type", "输入密码时"),
+    ("Install package", "安装软件包"),
+    ("Creating links", "正在创建链接"),
+    ("Needs administrator rights — password (sudo)", "需要管理员权限 — 密码 (sudo)"),
+    ("Run in terminal", "在终端中运行"),
+    ("Create link here", "在此创建链接"),
+    ("Failed — Enter closes", "失败 — 按 Enter 关闭"),
     ("Type a command…", "输入命令…"),
     ("Insert", "插入"),
     ("Typing into the terminal", "正在向终端输入"),

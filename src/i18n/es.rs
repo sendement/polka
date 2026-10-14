@@ -1,6 +1,15 @@
 //! Español.
 
 pub const T: &[(&str, &str)] = &[
+    ("Wrong password — administrator password (sudo)", "Contraseña incorrecta — contraseña de administrador (sudo)"),
+    ("Hidden", "Oculta"),
+    ("Passwords as you type", "Contraseñas al escribir"),
+    ("Install package", "Instalar paquete"),
+    ("Creating links", "Creando enlaces"),
+    ("Needs administrator rights — password (sudo)", "Hacen falta permisos de administrador — contraseña (sudo)"),
+    ("Run in terminal", "Ejecutar en el terminal"),
+    ("Create link here", "Crear enlace aquí"),
+    ("Failed — Enter closes", "Error — Intro cierra"),
     ("Type a command…", "Escribir una orden…"),
     ("Insert", "Insertar"),
     ("Typing into the terminal", "Escribiendo en el terminal"),

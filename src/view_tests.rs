@@ -1954,7 +1954,7 @@ fn mouse(h: &mut Harness<'static, App>) {
         _ => (Vec::new(), 0),
     };
     let (labels, cursor) = menu(h);
-    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Cancel")], "{labels:?}");
+    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Create link here"), tr("Cancel")], "{labels:?}");
     assert_eq!(cursor, 0);
     shot(h, "b1c-drop-menu");
     press(h, &[Action::Accept]);
@@ -2824,7 +2824,7 @@ fn other_programs(h: &mut Harness<'static, App>) {
     settle(h);
     let (title, labels) = menu(h);
     assert!(title.ends_with("→ In"), "{title}");
-    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Cancel")]);
+    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Create link here"), tr("Cancel")]);
     shot(h, "d1-drop-menu");
     menu_pick(h, tr("Copy here"));
     wait_jobs(h);
@@ -2890,4 +2890,241 @@ fn dnd_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     other_programs(&mut h);
+}
+
+/// Administrator rights through a fake sudo (password "testpw"; it runs the
+/// command in a user namespace, where "root" may write the locked folder):
+/// saving a locked file, a wrong password asked again, then rename, new
+/// folder, copy, delete and a link with the password kept.
+fn administrator(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, OskPurpose};
+    use crate::vfs::Location;
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let bin = base.join("fake-sudo-bin");
+    let dir = base.join("locked");
+    let _ = std::process::Command::new("chmod").arg("-R").arg("u+w").arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        bin.join("sudo"),
+        "#!/bin/sh\n# test sudo: -S -p '' then -k -v or -- cmd\nread pw\n[ \"$pw\" = testpw ] || { echo 'Sorry, try again.' >&2; exit 1; }\nwhile [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done\n[ $# -eq 0 ] && exit 0\nshift\nexec unshare -r \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("sudo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", format!("{}:{path}", bin.display())) };
+    std::fs::write(dir.join("conf.txt"), "a=1\n").unwrap();
+    std::fs::write(base.join("extra.txt"), "extra\n").unwrap();
+    std::fs::set_permissions(dir.join("conf.txt"), std::fs::Permissions::from_mode(0o444)).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let sudo_asked = |h: &Harness<'static, App>| matches!(&h.state().overlay, Some(Overlay::Osk(k)) if matches!(k.purpose, OskPurpose::Sudo { .. }));
+    // Edit the locked file and save: the password is asked.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "conf.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().view_current();
+    settle(h);
+    let tab = h.state().tab;
+    if let Some(crate::viewer::Content::Text(t)) = h.state_mut().tabs[tab].viewer.as_mut().map(|v| &mut v.content) {
+        t.ed.caret = t.doc.text.len();
+        assert!(t.insert("b=2\n"));
+    } else {
+        panic!("not opened as text");
+    }
+    h.state_mut().run(Cmd::ViewerSave);
+    settle(h);
+    assert!(sudo_asked(h), "no password asked");
+    // Shown as asterisks by default.
+    osk_type(h, "bad");
+    shot(h, "e0-sudo-password");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    settle(h);
+    assert!(sudo_asked(h), "a wrong password isn't asked again");
+    let title = match &h.state().overlay {
+        Some(Overlay::Osk(k)) => k.title.clone(),
+        _ => String::new(),
+    };
+    assert!(title.contains(crate::i18n::tr("Wrong password — administrator password (sudo)")), "{title}");
+    osk_type(h, "testpw");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    settle(h);
+    assert_eq!(std::fs::read_to_string(dir.join("conf.txt")).unwrap(), "a=1\nb=2\n");
+    let mode = std::fs::metadata(dir.join("conf.txt")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o444, "the mode is kept");
+    assert!(matches!(h.state().cur_tab().viewer.as_ref().map(|v| &v.content), Some(crate::viewer::Content::Text(t)) if !t.ed.dirty), "still unsaved");
+    h.state_mut().run(Cmd::CloseViewer);
+    settle(h);
+    // The password is kept a while: no more asking.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "conf.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Rename);
+    osk_type(h, "renamed.txt");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    assert!(dir.join("renamed.txt").exists() && !dir.join("conf.txt").exists(), "not renamed");
+    h.state_mut().run(Cmd::NewFolder);
+    osk_type(h, "made");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    assert!(dir.join("made").is_dir(), "no folder");
+    h.state_mut().request_transfer(vec![Location::Local(base.join("extra.txt"))], crate::vfs::Dest::Dir(dir.clone()), false);
+    wait_jobs(h);
+    settle(h);
+    wait_jobs(h);
+    assert!(dir.join("extra.txt").exists(), "not copied");
+    assert!(!sudo_asked(h));
+    h.state_mut().start(crate::ops::Op::Delete { paths: vec![dir.join("extra.txt")] });
+    wait_jobs(h);
+    settle(h);
+    wait_jobs(h);
+    assert!(!dir.join("extra.txt").exists(), "not deleted");
+    h.state_mut().run(Cmd::DropLink { sources: vec![base.join("extra.txt")], dir: dir.clone() });
+    wait_jobs(h);
+    settle(h);
+    wait_jobs(h);
+    assert!(dir.join("extra.txt").symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()), "no link");
+    // Fully hidden passwords: nothing shows as it's typed.
+    h.state_mut().cfg.password_hidden = true;
+    h.state_mut().sudo_pw = None;
+    h.state_mut().run(Cmd::NewFolder);
+    osk_type(h, "second");
+    press(h, &[Action::Menu]);
+    settle(h);
+    assert!(sudo_asked(h));
+    osk_type(h, "testpw");
+    shot(h, "e1-sudo-hidden");
+    press(h, &[Action::Menu]);
+    wait_jobs(h);
+    assert!(dir.join("second").is_dir());
+    h.state_mut().cfg.password_hidden = false;
+    unsafe { std::env::set_var("PATH", path) };
+    let _ = std::process::Command::new("chmod").arg("-R").arg("u+w").arg(&dir).status();
+}
+
+#[test]
+#[ignore]
+fn admin_screens() {
+    // Puts a fake sudo first in PATH for the whole process.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    administrator(&mut h);
+}
+
+/// What the terminal window shows.
+fn window_screen(h: &Harness<'static, App>) -> String {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point};
+    let Some(t) = h.state().term_window.as_deref() else { return String::new() };
+    let Some(s) = t.cur() else { return String::new() };
+    let term = s.term.lock();
+    let mut out = String::new();
+    for l in 0..term.screen_lines() as i32 {
+        out.extend((0..term.columns()).map(|c| term.grid()[Point::new(Line(l), Column(c))].c));
+        out.push('\n');
+    }
+    out
+}
+
+/// Installing a package (a fake pacman behind a fake sudo) in a terminal
+/// window that closes when done, and a failing script whose window waits.
+fn packages(h: &mut Harness<'static, App>) {
+    use crate::i18n::tr;
+    use crate::vfs::Location;
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let bin = base.join("fake-pkg-bin");
+    let dir = base.join("downloads");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = |name: &str, body: &str| {
+        std::fs::write(bin.join(name), body).unwrap();
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script("sudo", "#!/bin/sh\nexec \"$@\"\n");
+    script("pacman", "#!/bin/sh\necho \"loading $2\"\nprintf ':: Proceed with installation? [Y/n] '\nread a\n[ \"$a\" = y ] && echo installed > \"$(dirname \"$2\")/installed.flag\"\n");
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe { std::env::set_var("PATH", format!("{}:{path}", bin.display())) };
+    std::fs::write(dir.join("tool-1.0-1-x86_64.pkg.tar.zst"), b"").unwrap();
+    std::fs::write(dir.join("broken.sh"), "echo going wrong\nexit 3\n").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let wait_for = |h: &mut Harness<'static, App>, what: &str| {
+        for _ in 0..150 {
+            settle(h);
+            if window_screen(h).contains(what) {
+                return;
+            }
+        }
+        panic!("window never showed {what:?}:\n{}", window_screen(h));
+    };
+    // The package: △ offers installing it with pacman.
+    let i = h.state().pane().entries.iter().position(|e| e.name.ends_with(".pkg.tar.zst")).unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Actions]);
+    let label = format!("{} (pacman)", tr("Install package"));
+    shot(h, "p0-menu");
+    menu_pick(h, &label);
+    assert!(h.state().term_window.is_some(), "no window");
+    wait_for(h, "Proceed with installation?");
+    assert!(window_screen(h).contains("sudo pacman -U"), "the command isn't shown");
+    shot(h, "p1-installing");
+    // Answered from the keyboard; done, the window goes.
+    type_text(h, "y");
+    key(h, egui::Key::Enter, egui::Modifiers::NONE);
+    for _ in 0..100 {
+        settle(h);
+        if h.state().term_window.is_none() {
+            break;
+        }
+    }
+    assert!(h.state().term_window.is_none(), "window left open:\n{}", window_screen(h));
+    assert!(dir.join("installed.flag").exists());
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains(tr("Done"))));
+    // A script that fails: the window waits for Enter (✕ held).
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "broken.sh").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Actions]);
+    menu_pick(h, tr("Run in terminal"));
+    wait_for(h, "(3)");
+    shot(h, "p2-script-failed");
+    settle(h);
+    assert!(h.state().term_window.is_some(), "a failed run closed at once");
+    h.state_mut().handle(Input::Press(Action::Accept));
+    for _ in 0..16 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    h.state_mut().handle(Input::Release(Action::Accept));
+    for _ in 0..60 {
+        settle(h);
+        if h.state().term_window.is_none() {
+            break;
+        }
+    }
+    assert!(h.state().term_window.is_none(), "Enter didn't close it");
+    unsafe { std::env::set_var("PATH", path) };
+}
+
+#[test]
+#[ignore]
+fn package_screens() {
+    // Puts fake tools first in PATH for the whole process.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    packages(&mut h);
 }

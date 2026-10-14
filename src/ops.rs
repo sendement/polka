@@ -153,6 +153,8 @@ pub struct Job {
     pub op: Option<Op>,
     /// Set when the job stopped for an archive password.
     pub need_password: Mutex<Option<(PathBuf, bool)>>,
+    /// It wasn't allowed (administrator rights would do).
+    pub denied: AtomicBool,
     /// Progress counts items, not bytes.
     pub items: std::sync::atomic::AtomicBool,
     /// What is being worked on now.
@@ -175,6 +177,7 @@ impl Job {
             touches: Vec::new(),
             op: None,
             need_password: Mutex::new(None),
+            denied: AtomicBool::new(false),
             items: Default::default(),
             current: Default::default(),
             started: Instant::now(),
@@ -224,8 +227,25 @@ pub enum Conflict {
     Skip,
 }
 
+/// A password, kept out of anything printed.
+#[derive(Clone)]
+pub struct Secret(pub String);
+
+/// What follows an operation done with administrator rights.
+#[derive(Clone)]
+pub enum After {
+    /// A text file saved through a copy: the editor's changes are saved.
+    Saved { path: PathBuf, text: String },
+}
+
+/// The job's error when sudo didn't take the password.
+pub const WRONG_PASSWORD: &str = "polka:wrong-password";
+
 #[derive(Clone)]
 pub enum Op {
+    /// Commands run with sudo (each an argument list), after the password
+    /// is checked.
+    Elevated { steps: Vec<Vec<std::ffi::OsString>>, label: &'static str, touches: Vec<Location>, pw: Secret, after: Option<After> },
     Copy { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Trash { paths: Vec<PathBuf> },
@@ -251,6 +271,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         Op::ArchiveEdit { archive, label, .. } => {
             (*label, vec![Location::Archive { archive: archive.clone(), inner: String::new() }])
         }
+        Op::Elevated { label, touches, .. } => (*label, touches.clone()),
     };
     // Editing an archive changes its folder too (size, and the number of
     // volumes for a split one).
@@ -274,7 +295,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         Op::Extract { dest, .. } => name_of(dest),
         Op::ArchiveEdit { archive, .. } => name_of(archive),
         Op::Trash { .. } => tr("Trash").to_string(),
-        Op::Delete { .. } => String::new(),
+        Op::Delete { .. } | Op::Elevated { .. } => String::new(),
     };
     let job = Arc::new(Job {
         label: label.to_string(),
@@ -290,12 +311,16 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         touches,
         op: Some(op.clone()),
         need_password: Mutex::new(None),
+        denied: AtomicBool::new(false),
     });
     let j = job.clone();
     std::thread::spawn(move || {
         let r = run(op, &j).map_err(|e| {
             if let Some(np) = vfs::need_password(&e) {
                 *j.need_password.lock().unwrap() = Some((np.archive.clone(), np.wrong));
+            }
+            if denied(&e) {
+                j.denied.store(true, Ordering::Relaxed);
             }
             e.to_string()
         });
@@ -338,6 +363,7 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
         }
         Op::Compress { sources, out, opts } => compress(&sources, &out, &opts, job),
         Op::Extract { archive, dest } => extract_all(&archive, &dest, job),
+        Op::Elevated { steps, pw, .. } => run_elevated(&steps, &pw, job),
         Op::ArchiveEdit { archive, plan, .. } => {
             job.total.store(archive_rw::estimate(&archive, &plan), Ordering::Relaxed);
             archive_rw::rewrite(&archive, &plan, |n| {
@@ -345,6 +371,93 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
                 !job.cancel.load(Ordering::Relaxed)
             })
         }
+    }
+}
+
+/// Not allowed: what administrator rights would get past (not a read-only
+/// disk).
+pub fn denied(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1) || {
+        let s = e.to_string();
+        s.contains("os error 13") || s.contains("Permission denied") || s.contains("os error 1)")
+    }
+}
+
+/// sudo with the password on its input; the command's own output is left
+/// out, its errors come back.
+fn sudo(args: &[std::ffi::OsString], pw: &Secret) -> io::Result<(bool, String)> {
+    use std::process::{Command, Stdio};
+    let mut c = Command::new("sudo");
+    c.args(["-S", "-p", ""]).args(args).env("LC_ALL", "C").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = crate::sandbox::host(c)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| io::Error::other(format!("sudo: {e}")))?;
+    if let Some(mut i) = child.stdin.take() {
+        let _ = writeln!(i, "{}", pw.0);
+    }
+    let out = child.wait_with_output()?;
+    Ok((out.status.success(), String::from_utf8_lossy(&out.stderr).trim().to_string()))
+}
+
+fn run_elevated(steps: &[Vec<std::ffi::OsString>], pw: &Secret, job: &Job) -> io::Result<()> {
+    job.items.store(true, Ordering::Relaxed);
+    job.total.store(steps.len() as u64, Ordering::Relaxed);
+    // The password first, on its own: a wrong one is asked again.
+    let (ok, err) = sudo(&["-k".into(), "-v".into()], pw)?;
+    if !ok {
+        let wrong = ["incorrect password", "Sorry, try again", "no password was provided", "Authentication failure"].iter().any(|m| err.contains(m));
+        return Err(io::Error::other(if wrong { WRONG_PASSWORD.to_string() } else { err }));
+    }
+    for (i, s) in steps.iter().enumerate() {
+        if let Some(target) = s.last() {
+            job.now_on(Path::new(target));
+        }
+        let mut args: Vec<std::ffi::OsString> = vec!["--".into()];
+        // Run on the host: paths as the host has them.
+        args.extend(s.iter().map(|a| if a.to_string_lossy().starts_with('/') { crate::sandbox::host_path(Path::new(a)).into_os_string() } else { a.clone() }));
+        let (ok, err) = sudo(&args, pw)?;
+        if !ok {
+            return Err(io::Error::other(err));
+        }
+        job.done.store(i as u64 + 1, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// The same operation as commands for sudo (local files only).
+pub fn elevated_steps(op: &Op) -> Option<(Vec<Vec<std::ffi::OsString>>, &'static str)> {
+    let args = |v: &[&std::ffi::OsStr]| v.iter().map(|s| s.to_os_string()).collect::<Vec<_>>();
+    match op {
+        Op::Copy { sources, dest: Dest::Dir(d), policy } | Op::Move { sources, dest: Dest::Dir(d), policy } => {
+            let mv = matches!(op, Op::Move { .. });
+            let mut steps = Vec::new();
+            for s in sources {
+                let src = s.local_path()?;
+                let name = src.file_name()?.to_string_lossy().into_owned();
+                let (flag, target) = match policy {
+                    Conflict::Overwrite => ("-f", d.join(&name)),
+                    Conflict::Skip => ("-n", d.join(&name)),
+                    Conflict::Rename => ("-n", unique_path(d, &name)),
+                };
+                let cmd: &[&std::ffi::OsStr] = if mv {
+                    &["mv".as_ref(), flag.as_ref(), "--".as_ref(), src.as_os_str(), target.as_os_str()]
+                } else {
+                    &["cp".as_ref(), "-a".as_ref(), flag.as_ref(), "--".as_ref(), src.as_os_str(), target.as_os_str()]
+                };
+                steps.push(args(cmd));
+            }
+            Some((steps, if mv { tr("Moving") } else { tr("Copying") }))
+        }
+        // Out of a system folder there's no trash to go to: deleted.
+        Op::Delete { paths } | Op::Trash { paths } => {
+            let mut v: Vec<std::ffi::OsString> = vec!["rm".into(), "-rf".into(), "--".into()];
+            v.extend(paths.iter().map(|p| p.as_os_str().to_os_string()));
+            Some((vec![v], tr("Deleting")))
+        }
+        _ => None,
     }
 }
 

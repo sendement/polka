@@ -60,6 +60,21 @@ instead: Settings → "Open in Polka"):
 | Full screen | Create / View, double click | F, F11 |
 | Subtitles / audio track | □ / X tap / △ menu | S / A |
 
+## Administrator rights, packages, scripts
+
+Saving a system config, or copying, moving, renaming, deleting, linking or making files where only
+root may: Polka asks for the sudo password (on-screen keyboard; shown as asterisks or fully
+hidden, see Settings) and does it with sudo — `cp` keeps the file's owner and mode. A password
+that worked is reused for ten minutes, in memory only. Files out of system folders are deleted
+rather than trashed.
+
+△ on a package offers installing it with the system's own tool, when there is one: pacman
+(`.pkg.tar.*`), flatpak (`.flatpak`, `.flatpakref`; ✕ installs them too), apt / dpkg (`.deb`),
+dnf / zypper / rpm (`.rpm`), snap (`.snap`); on a shell script, running it. It runs in a terminal
+window that shows the command and takes the tool's questions and sudo's password; it closes when
+done, and waits for Enter if something failed. Dropped items can also be linked ("Create link
+here").
+
 ## Terminal
 
 Sidebar → Terminal (or △ on a folder → "Open in terminal", ≡ → "Open terminal here") opens

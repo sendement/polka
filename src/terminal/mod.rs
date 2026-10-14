@@ -57,6 +57,8 @@ pub struct Session {
     pid_file: Option<PathBuf>,
     /// A resize the host side hasn't heard of yet.
     resize_pending: Option<Instant>,
+    /// How it ended.
+    pub status: Option<i32>,
 }
 
 impl Drop for Session {
@@ -71,8 +73,21 @@ impl Drop for Session {
 /// The program a new shell runs: the chosen one, else the user's own; in a
 /// Flatpak sandbox it runs on the host (through `script` there, so it gets a
 /// terminal of its own with job control).
-fn shell_command(prefs: &TermPrefs, cwd: &Path, pid_file: Option<&Path>, env: &std::collections::HashMap<String, String>) -> tty::Shell {
+fn shell_command(prefs: &TermPrefs, cwd: &Path, pid_file: Option<&Path>, env: &std::collections::HashMap<String, String>, script: Option<&str>) -> tty::Shell {
     let chosen = prefs.shell.clone().filter(|s| !s.is_empty());
+    // A command instead of a shell (installing a package, a script).
+    if let Some(cmd) = script {
+        if !crate::sandbox::flatpak() {
+            return tty::Shell::new("sh".into(), vec!["-c".into(), cmd.into()]);
+        }
+        let note = pid_file.map(|p| format!("echo $$ > '{}'; ", p.display())).unwrap_or_default();
+        let q = crate::packages::quote(cmd);
+        let inner = format!("{note}command -v script >/dev/null && exec script -qfec {q} /dev/null; exec sh -c {q}");
+        let mut args: Vec<String> = vec!["--host".into(), "--watch-bus".into()];
+        args.extend(env.iter().map(|(k, v)| format!("--env={k}={v}")));
+        args.extend([format!("--directory={}", cwd.display()), "sh".into(), "-c".into(), inner]);
+        return tty::Shell::new("flatpak-spawn".into(), args);
+    }
     if crate::sandbox::flatpak() {
         let sh = chosen.unwrap_or_else(|| "\"$(getent passwd \"$(id -un)\" | cut -d: -f7)\"".into());
         // Its host pid goes to a file both sides see (to pass on resizes).
@@ -118,6 +133,11 @@ pub fn term_config(prefs: &TermPrefs) -> TermConfig {
 impl Session {
     /// A shell; `private` keeps what's typed out of its history.
     pub fn spawn(prefs: &TermPrefs, cwd: &Path, ctx: &egui::Context, cols: usize, rows: usize, private: bool) -> std::io::Result<Self> {
+        Self::spawn_with(prefs, cwd, ctx, cols, rows, private, None)
+    }
+
+    /// A shell, or `script` run by sh.
+    pub fn spawn_with(prefs: &TermPrefs, cwd: &Path, ctx: &egui::Context, cols: usize, rows: usize, private: bool, script: Option<&str>) -> std::io::Result<Self> {
         let (tx, events) = crossbeam_channel::unbounded();
         let proxy = Proxy { tx, ctx: ctx.clone() };
         let mut env = std::collections::HashMap::new();
@@ -134,7 +154,7 @@ impl Session {
             let _ = std::fs::create_dir_all(&dir);
             dir.join(format!("term-{}-{}.pid", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
         });
-        let opts = tty::Options { shell: Some(shell_command(prefs, cwd, pid_file.as_deref(), &env)), working_directory: Some(cwd.to_path_buf()), drain_on_exit: true, env, ..Default::default() };
+        let opts = tty::Options { shell: Some(shell_command(prefs, cwd, pid_file.as_deref(), &env, script)), working_directory: Some(cwd.to_path_buf()), drain_on_exit: true, env, ..Default::default() };
         let pty = tty::new(&opts, window_size(cols, rows, (8.0, 16.0)), 0)?;
         let pid = pty.child().id();
         let master = pty.file().as_raw_fd();
@@ -143,7 +163,7 @@ impl Session {
         let lp = EventLoop::new(term.clone(), proxy, pty, true, false)?;
         let tx = lp.channel();
         lp.spawn();
-        Ok(Self { term, tx, events, title: shell_name(prefs), pid, master, exited: false, cols, rows, bell: None, pid_file, resize_pending: None })
+        Ok(Self { term, tx, events, title: shell_name(prefs), pid, master, exited: false, cols, rows, bell: None, pid_file, resize_pending: None, status: None })
     }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
@@ -273,7 +293,11 @@ impl Session {
                 }
                 Event::TextAreaSizeRequest(f) => self.write(f(window_size(self.cols, self.rows, (8.0, 16.0)))),
                 Event::Bell => self.bell = Some(Instant::now()),
-                Event::ChildExit(_) | Event::Exit => self.exited = true,
+                Event::ChildExit(st) => {
+                    self.exited = true;
+                    self.status = st.code();
+                }
+                Event::Exit => self.exited = true,
                 _ => {}
             }
         }
@@ -324,6 +348,16 @@ impl Terminal {
         self.active = self.sessions.len() - 1;
         self.selecting = false;
         Ok(())
+    }
+
+    /// A terminal running one command (its own window).
+    pub fn with_command(prefs: &TermPrefs, cwd: &Path, ctx: &egui::Context, cmd: &str, title: &str) -> std::io::Result<Self> {
+        let mut t = Self::new();
+        t.grid = (100, 28);
+        let mut s = Session::spawn_with(prefs, cwd, ctx, t.grid.0, t.grid.1, false, Some(cmd))?;
+        s.title = title.to_string();
+        t.sessions.push(s);
+        Ok(t)
     }
 
     pub fn close(&mut self, i: usize) {

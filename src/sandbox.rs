@@ -51,6 +51,16 @@ pub fn host(cmd: std::process::Command) -> std::process::Command {
     if let Some(dir) = cmd.get_current_dir() {
         c.arg(format!("--directory={}", dir.display()));
     }
+    // Variables set for the command go along to the host.
+    for (k, v) in cmd.get_envs() {
+        if let Some(v) = v {
+            let mut a = std::ffi::OsString::from("--env=");
+            a.push(k);
+            a.push("=");
+            a.push(v);
+            c.arg(a);
+        }
+    }
     c.arg(cmd.get_program()).args(cmd.get_args());
     c
 }
@@ -58,4 +68,14 @@ pub fn host(cmd: std::process::Command) -> std::process::Command {
 /// The host's file system root (the sandbox's own / is a stage set).
 pub fn root() -> PathBuf {
     if flatpak() && std::path::Path::new("/run/host/root").is_dir() { "/run/host/root".into() } else { "/".into() }
+}
+
+/// A path as the host knows it (the host's root is /run/host/root here).
+pub fn host_path(p: &std::path::Path) -> PathBuf {
+    if flatpak() {
+        if let Ok(rest) = p.strip_prefix("/run/host/root") {
+            return std::path::Path::new("/").join(rest);
+        }
+    }
+    p.to_path_buf()
 }

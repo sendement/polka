@@ -1,6 +1,15 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Wrong password — administrator password (sudo)", "잘못된 암호 — 관리자 암호 (sudo)"),
+    ("Hidden", "숨김"),
+    ("Passwords as you type", "암호 입력 표시"),
+    ("Install package", "패키지 설치"),
+    ("Creating links", "링크 만드는 중"),
+    ("Needs administrator rights — password (sudo)", "관리자 권한 필요 — 암호 (sudo)"),
+    ("Run in terminal", "터미널에서 실행"),
+    ("Create link here", "여기에 링크 만들기"),
+    ("Failed — Enter closes", "실패 — Enter로 닫기"),
     ("Type a command…", "명령 입력…"),
     ("Insert", "삽입"),
     ("Typing into the terminal", "터미널에 입력 중"),

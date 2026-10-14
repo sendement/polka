@@ -50,15 +50,38 @@ impl App {
     /// The page is what the current tab shows.
     pub fn term_shown(&self) -> bool {
         let t = self.cur_tab();
-        t.viewer.is_none() && t.term.as_ref().is_some_and(|u| u.shown)
+        self.term_window.is_some() || (t.viewer.is_none() && t.term.as_ref().is_some_and(|u| u.shown))
     }
 
+    /// The terminal the pad works: a window's, else the page's.
     fn term_mut(&mut self) -> Option<&mut Terminal> {
+        if self.term_window.is_some() {
+            return self.term_window.as_deref_mut();
+        }
         self.tabs[self.tab].term.as_deref_mut()
     }
 
     fn term_ref(&self) -> Option<&Terminal> {
+        if self.term_window.is_some() {
+            return self.term_window.as_deref();
+        }
         self.cur_tab().term.as_deref()
+    }
+
+    /// `cmd` in a terminal window of its own: shown, run, closed when done
+    /// (left open, waiting for Enter, if it failed).
+    pub fn open_term_window(&mut self, title: String, dir: &std::path::Path, cmd: &str) {
+        let script = crate::packages::wrapper(cmd);
+        // The tab says what runs (the program, not the shell).
+        let what = cmd.split_whitespace().find(|w| *w != "sudo" && *w != "sh").unwrap_or(cmd).trim_matches('\'');
+        let what = std::path::Path::new(what).file_name().map_or(what.to_string(), |n| n.to_string_lossy().into_owned());
+        match Terminal::with_command(&self.cfg.terminal, dir, &self.ctx, &script, &what) {
+            Ok(t) => {
+                self.term_window = Some(Box::new(t));
+                self.term_window_title = title;
+            }
+            Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
+        }
     }
 
     fn with_session(&mut self, f: impl FnOnce(&mut super::Session)) {
@@ -100,6 +123,29 @@ impl App {
         let scheme = super::scheme::resolve(&self.cfg.terminal.scheme, dark);
         let mut outs = Vec::new();
         let mut held = None;
+        // The window: its command's end closes it (and the panels catch up).
+        if let Some(w) = self.term_window.as_deref_mut() {
+            for s in &mut w.sessions {
+                let _ = s.poll(&scheme);
+            }
+            if let Some((a, d)) = w.hold {
+                if d.elapsed() >= HOLD {
+                    w.hold = None;
+                    held = Some(a);
+                } else {
+                    self.ctx.request_repaint_after(Duration::from_millis(50));
+                }
+            }
+            if w.sessions.iter().all(|s| s.exited) {
+                let ok = w.sessions.iter().all(|s| s.status == Some(0));
+                self.term_window = None;
+                self.reload_all();
+                self.refresh_sidebar();
+                if ok {
+                    self.toast(tr("Done"), false);
+                }
+            }
+        }
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
             let Some(t) = tab.term.as_deref_mut() else { continue };
             for s in &mut t.sessions {
@@ -146,7 +192,10 @@ impl App {
                 if self.term_ref().is_some_and(|t| t.selecting) {
                     self.end_select();
                 }
-                self.focus_sidebar();
+                // Out of a window there's nowhere to go: it stays.
+                if self.term_window.is_none() {
+                    self.focus_sidebar();
+                }
             }
             Some(Action::Actions) => self.run(Cmd::TermHistoryMenu),
             Some(Action::View) => self.run(Cmd::TermSavedMenu),
@@ -705,11 +754,13 @@ impl App {
                     }
                 }
             }
+            Cmd::TermHide if self.term_window.is_some() => self.term_window = None,
             Cmd::TermHide => {
                 if let Some(t) = self.term_mut() {
                     t.shown = false;
                 }
             }
+            Cmd::TermClose if self.term_window.is_some() => self.term_window = None,
             Cmd::TermClose => self.tabs[self.tab].term = None,
             Cmd::TermRun(c) => {
                 super::remember(&c);

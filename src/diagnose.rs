@@ -122,6 +122,20 @@ fn terminal() {
     pause(&mut s, 300);
     s.input(b"echo after-ok\r".to_vec());
     let intr = wait(&mut s, "after-ok", 2) && !screen(&s).contains("not-interrupted\n");
+    // A command of its own, as a package install runs (its end and code).
+    let mut cmd = crate::terminal::Session::spawn_with(&prefs, &home, &ctx, 80, 24, true, Some("test -t 0 && echo polka-tty; exit 7")).ok();
+    let mut cmd_ok = None;
+    for _ in 0..200 {
+        let Some(c) = cmd.as_mut() else { break };
+        c.poll(&scheme);
+        if c.exited {
+            cmd_ok = Some((screen(c).contains("polka-tty"), c.status));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    drop(cmd);
+    println!("terminal command: {cmd_ok:?} (want: tty true, code 7)");
     s.input(b"cd /tmp\r".to_vec());
     pause(&mut s, 400);
     let cwd = s.cwd();

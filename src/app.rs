@@ -546,6 +546,10 @@ pub enum Cmd {
     EmptyTrashNow,
     /// Items dropped with the mouse: moved or copied (conflicts asked).
     DropTransfer { sources: Vec<Location>, dest: Dest, mv: bool },
+    /// Symbolic links to these files in a folder.
+    DropLink { sources: Vec<PathBuf>, dir: PathBuf },
+    /// A command in a terminal window of its own (installing, a script).
+    RunInWindow { title: String, dir: PathBuf, cmd: String },
     /// Run a program or launcher with these files.
     OpenWith { app: PathBuf, files: Vec<PathBuf> },
     /// Stop every running operation.
@@ -663,6 +667,8 @@ pub enum OskPurpose {
     CompressField { dlg: Box<CompressDlg>, field: CField },
     /// Keys straight into the terminal (nothing kept here).
     TermLive,
+    /// The sudo password for an operation that needs it.
+    Sudo { op: Box<Op> },
     /// A command to keep among the saved ones.
     TermSave,
 }
@@ -959,7 +965,7 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 12;
+pub const SETTINGS_ROWS: usize = 13;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
@@ -972,7 +978,8 @@ pub mod row {
     pub const OPEN_IN: usize = 8;
     pub const VOLUMES: usize = 9;
     pub const WEB_IMAGES: usize = 10;
-    pub const CLOSE: usize = 11;
+    pub const PASSWORDS: usize = 11;
+    pub const CLOSE: usize = 12;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1154,6 +1161,11 @@ pub struct App {
     pub term_hist: Vec<String>,
     /// Top of the pad's keyboard while it types into the terminal.
     pub osk_top: Option<f32>,
+    /// A terminal window running one command (installing, a script).
+    pub term_window: Option<Box<crate::terminal::Terminal>>,
+    pub term_window_title: String,
+    /// The sudo password that last worked, and since when.
+    pub sudo_pw: Option<(crate::ops::Secret, Instant)>,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1235,6 +1247,9 @@ impl App {
             text_clip: None,
             term_hist: Vec::new(),
             osk_top: None,
+            term_window: None,
+            term_window_title: String::new(),
+            sudo_pw: None,
             sys_clip: None,
             dark_applied: None,
             dnd: None,
@@ -1347,6 +1362,7 @@ impl App {
         let mut touched: Vec<Location> = Vec::new();
         let mut report = Vec::new();
         let mut ask = Vec::new();
+        let mut ended = Vec::new();
         self.jobs.retain(|j| {
             let fin = *j.finished_at.lock().unwrap();
             match fin {
@@ -1355,13 +1371,21 @@ impl App {
                     touched.extend(j.touches.iter().cloned());
                     if let (Some((a, wrong)), Some(op)) = (j.need_password.lock().unwrap().take(), j.op.clone()) {
                         ask.push((a, wrong, op));
-                    } else if let Some(Err(e)) = j.result.lock().unwrap().as_ref() {
-                        report.push(format!("{}: {e}", j.label));
+                    } else if let (Some(r), Some(op)) = (j.result.lock().unwrap().clone(), j.op.clone()) {
+                        ended.push((op, r, j.denied.load(std::sync::atomic::Ordering::Relaxed), j.label.clone()));
                     }
                     false
                 }
             }
         });
+        // Not allowed: again as administrator; else errors are reported.
+        for (op, r, denied, label) in ended {
+            if !self.elevated_done(&op, &r, denied) {
+                if let Err(e) = r {
+                    report.push(format!("{label}: {e}"));
+                }
+            }
+        }
         for r in report {
             self.toast(r, true);
         }
@@ -1502,13 +1526,13 @@ impl App {
                     self.audio_select_released();
                 } else if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
                     self.viewer_select_released();
-                } else if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+                } else if self.overlay.is_none() && (self.term_window.is_some() || (self.focus == Focus::Panes && self.term_shown())) {
                     self.terminal_release(Action::Select);
                 }
                 return;
             }
             Input::Release(a) => {
-                if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+                if self.overlay.is_none() && (self.term_window.is_some() || (self.focus == Focus::Panes && self.term_shown())) {
                     self.terminal_release(a);
                 }
                 return;
@@ -1518,6 +1542,10 @@ impl App {
         if self.overlay.is_some() {
             self.handle_overlay(a);
             return;
+        }
+        // A terminal window has the pad to itself.
+        if self.term_window.is_some() {
+            return self.terminal_input(a);
         }
         if self.focus == Focus::Sidebar {
             self.handle_sidebar(a);
@@ -1920,6 +1948,9 @@ impl App {
         if let OskPurpose::CompressField { dlg, field } = k.purpose {
             return self.compress_field(*dlg, field, raw);
         }
+        if let OskPurpose::Sudo { op } = k.purpose {
+            return self.sudo_typed(*op, raw);
+        }
         if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace) {
             return self.viewer_osk(k.purpose, raw);
         }
@@ -1951,6 +1982,11 @@ impl App {
                         if let Some(i) = p.entries.iter().position(|e| e.name == text) {
                             p.set_cursor(i);
                         }
+                    }
+                    Err(e) if crate::ops::denied(&e) => {
+                        self.pending_focus(text);
+                        let dir = old.parent().unwrap_or(Path::new("/")).to_path_buf();
+                        self.elevate_one(&["mv".as_ref(), "-n".as_ref(), "--".as_ref(), old.as_os_str(), new.as_os_str()], &dir, tr("Rename"));
                     }
                     Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
                 }
@@ -2028,6 +2064,14 @@ impl App {
                                 p.set_cursor(i);
                             }
                         }
+                        Err(e) if crate::ops::denied(&e) => {
+                            self.pending_focus(text.clone());
+                            let to = dir.join(&text);
+                            match &template {
+                                Some(t) => self.elevate_one(&["cp".as_ref(), "--".as_ref(), t.as_os_str(), to.as_os_str()], &dir, tr("New document")),
+                                None => self.elevate_one(&["touch".as_ref(), "--".as_ref(), to.as_os_str()], &dir, tr("New document")),
+                            }
+                        }
                         Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
                     },
                     Dest::Archive { archive, inner } => {
@@ -2057,6 +2101,11 @@ impl App {
                             p.set_cursor(i);
                         }
                     }
+                    Err(e) if crate::ops::denied(&e) => {
+                        self.pending_focus(text.clone());
+                        let to = dir.join(&text);
+                        self.elevate_one(&["mkdir".as_ref(), "--".as_ref(), to.as_os_str()], &dir, tr("New folder"));
+                    }
                     Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
                 }
             }
@@ -2070,7 +2119,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } => unreachable!(),
         }
     }
 
@@ -2089,6 +2138,14 @@ impl App {
             Location::Steam(_) => {}
             Location::Local(_) | Location::Search { .. } => {
                 let path = p.entry_path(&e).expect("local entry");
+                // Packages that aren't archives install on ✕.
+                if let Some(k @ (crate::packages::Kind::Flatpak | crate::packages::Kind::Snap)) = crate::packages::kind(&e.name) {
+                    if let Some((cmd, tool)) = crate::packages::command(k, &path) {
+                        let title = format!("{} ({tool})", tr("Install package"));
+                        let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| "/".into());
+                        return self.open_term_window(title, &dir, &cmd);
+                    }
+                }
                 if vfs::is_archive_name(&e.name) {
                     self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
                 } else if crate::viewer::kind_in(&path, &e.name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
@@ -2319,6 +2376,12 @@ impl App {
                 add(tr("Open in Polka"), Cmd::OpenInViewer, true);
             } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
                 add(tr("View as text"), Cmd::OpenInViewer, true);
+            }
+            // A package for this system's tool, or a script to run.
+            if let Some((cmd, tool)) = crate::packages::kind(&name).and_then(|k| crate::packages::command(k, &path)) {
+                let label = if tool == "sh" { tr("Run in terminal").to_string() } else { format!("{} ({tool})", tr("Install package")) };
+                let dir = path.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| "/".into());
+                add(&label, Cmd::RunInWindow { title: label.clone(), dir, cmd }, true);
             }
         }
         add(tr("Copy"), Cmd::Copy, any);
@@ -2567,7 +2630,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS => self.settings_step(row, 0.0),
                     row::APPEARANCE | row::LANGUAGE => self.settings_step(row, 1.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
@@ -2726,6 +2789,10 @@ impl App {
             }
             row::WEB_IMAGES => {
                 self.cfg.viewer.web_images = !self.cfg.viewer.web_images;
+                self.cfg.save();
+            }
+            row::PASSWORDS => {
+                self.cfg.password_hidden = !self.cfg.password_hidden;
                 self.cfg.save();
             }
             row::VOLUMES => {
@@ -3053,6 +3120,11 @@ impl App {
             | Cmd::ViewerSaveThen(_)
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
+            Cmd::RunInWindow { title, dir, cmd } => self.open_term_window(title, &dir, &cmd),
+            Cmd::DropLink { sources, dir } => {
+                self.drop_done();
+                self.make_links(sources, dir);
+            }
             Cmd::DropTransfer { sources, dest, mv } => {
                 self.drop_done();
                 self.request_transfer(sources, dest, mv);

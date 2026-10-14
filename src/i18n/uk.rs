@@ -1,6 +1,15 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("Wrong password — administrator password (sudo)", "Невірний пароль — пароль адміністратора (sudo)"),
+    ("Hidden", "Приховано"),
+    ("Passwords as you type", "Паролі під час введення"),
+    ("Install package", "Встановити пакет"),
+    ("Creating links", "Створення посилань"),
+    ("Needs administrator rights — password (sudo)", "Потрібні права адміністратора — пароль (sudo)"),
+    ("Run in terminal", "Запустити в терміналі"),
+    ("Create link here", "Створити посилання тут"),
+    ("Failed — Enter closes", "Помилка — Enter закриває"),
     ("Type a command…", "Набрати команду…"),
     ("Insert", "Вставити"),
     ("Typing into the terminal", "Введення в термінал"),

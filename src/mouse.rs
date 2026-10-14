@@ -183,6 +183,10 @@ impl App {
             let go = |mv| Cmd::DropTransfer { sources: d.sources.clone(), dest: dest.clone(), mv };
             items.push(item(tr("Move here"), go(true)));
             items.push(item(tr("Copy here"), go(false)));
+            if let (Dest::Dir(dir), true) = (dest, all_local) {
+                let sources = local.iter().map(|p| p.to_path_buf()).collect();
+                items.push(item(tr("Create link here"), Cmd::DropLink { sources, dir: dir.clone() }));
+            }
         }
         if let Some(a) = &app {
             let files: Vec<PathBuf> = local.iter().map(|p| p.to_path_buf()).collect();

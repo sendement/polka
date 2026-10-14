@@ -1,6 +1,15 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Wrong password — administrator password (sudo)", "パスワードが違います — 管理者パスワード (sudo)"),
+    ("Hidden", "非表示"),
+    ("Passwords as you type", "パスワード入力時の表示"),
+    ("Install package", "パッケージをインストール"),
+    ("Creating links", "リンクを作成中"),
+    ("Needs administrator rights — password (sudo)", "管理者権限が必要です — パスワード (sudo)"),
+    ("Run in terminal", "ターミナルで実行"),
+    ("Create link here", "ここにリンクを作成"),
+    ("Failed — Enter closes", "失敗 — Enter で閉じる"),
     ("Type a command…", "コマンドを入力…"),
     ("Insert", "挿入"),
     ("Typing into the terminal", "ターミナルに入力中"),

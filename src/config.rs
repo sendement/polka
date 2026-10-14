@@ -67,6 +67,8 @@ pub struct Config {
     /// Interface language code; None follows the system.
     pub language: Option<String>,
     pub terminal: TermPrefs,
+    /// Passwords typed show nothing at all (else an asterisk a character).
+    pub password_hidden: bool,
 }
 
 /// The terminal page.
@@ -190,6 +192,7 @@ impl Default for Config {
             appearance: 0,
             language: None,
             terminal: TermPrefs::default(),
+            password_hidden: false,
         }
     }
 }

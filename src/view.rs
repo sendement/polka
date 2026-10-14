@@ -81,6 +81,7 @@ impl eframe::App for App {
             self.draw_sidebar(ui);
         }
         self.draw_center(ui);
+        self.draw_term_window(&ctx);
         self.draw_drag(&ctx);
         if !full {
             self.draw_jobs(&ctx);
@@ -133,7 +134,7 @@ impl App {
         if self.overlay.is_none() && self.focus == Focus::Panes && self.video_shown() {
             events = self.video_keyboard(events);
         }
-        if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+        if self.overlay.is_none() && (self.term_window.is_some() || (self.focus == Focus::Panes && self.term_shown())) {
             events = self.terminal_keyboard(events);
         }
         for ev in events {
@@ -152,6 +153,39 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// A command's terminal window over everything but the pad's keyboard
+    /// (above which it ends, so the prompt stays in sight).
+    fn draw_term_window(&mut self, ctx: &egui::Context) {
+        if self.term_window.is_none() {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let typing = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live());
+        let bottom = if typing { self.osk_top.unwrap_or(screen.max.y) - 8.0 } else { screen.max.y - 40.0 };
+        let w = (screen.width() * 0.86).min(1200.0);
+        let rect = Rect::from_min_max(pos2(screen.center().x - w / 2.0, screen.min.y + 30.0), pos2(screen.center().x + w / 2.0, bottom.max(screen.min.y + 220.0)));
+        ctx.layer_painter(egui::LayerId::new(Order::Middle, egui::Id::new("term-window-dim"))).rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+        let dark = ctx.global_style().visuals.dark_mode;
+        let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, dark);
+        let size = self.cfg.terminal.font_size;
+        let title = self.term_window_title.clone();
+        let mut act = None;
+        egui::Area::new("term-window".into()).order(Order::Middle).fixed_pos(rect.min).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(12.0).corner_radius(10.0).show(ui, |ui| {
+                ui.set_min_size(rect.size() - vec2(24.0, 24.0));
+                ui.set_max_size(rect.size() - vec2(24.0, 24.0));
+                ui.label(egui::RichText::new(&title).strong().size(16.0));
+                ui.add_space(4.0);
+                if let Some(t) = self.term_window.as_deref_mut() {
+                    act = crate::terminal::draw::draw(ui, t, &scheme, size, &mut self.icons, !typing);
+                }
+            });
+        });
+        if let Some(a) = act {
+            self.terminal_act(a);
         }
     }
 
@@ -1042,7 +1076,7 @@ impl App {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
-                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k),
+                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
@@ -1680,7 +1714,7 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
     click
 }
 
-fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
+fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool) -> Option<OskKey> {
     use crate::keyboard::{self, Slot};
     let mut pressed = None;
     let unit = 46.0;
@@ -1701,7 +1735,14 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
         ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
         ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
         let font = FontId::proportional(17.0);
-        let shown = |cs: &[char]| -> String { if k.secret { "•".repeat(cs.len()) } else { cs.iter().collect() } };
+        // Passwords: an asterisk a character, or nothing at all.
+    let shown = |cs: &[char]| -> String {
+        match (k.secret, hidden) {
+            (true, true) => String::new(),
+            (true, false) => "*".repeat(cs.len()),
+            _ => cs.iter().collect(),
+        }
+    };
         let text = shown(&k.text);
         let before = shown(&k.text[..k.caret]);
         let pre_w = ui.painter().layout_no_wrap(before, font.clone(), Color32::WHITE).size().x;
@@ -2453,6 +2494,15 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::WEB_IMAGES));
+    }
+
+    // How typed passwords show.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::PASSWORDS, "passwords");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Passwords as you type"), label_font.clone(), v.text_color());
+    let shown = if cfg.password_hidden { tr("Hidden") } else { "* * * *" };
+    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::PASSWORDS));
     }
 
     // Close.

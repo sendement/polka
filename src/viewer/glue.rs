@@ -379,6 +379,11 @@ impl App {
                     self.finish(then);
                 }
             }
+            // A system file: saved with administrator rights.
+            Err(e) if crate::ops::denied(&e) && source.is_none() => {
+                let text = t.doc.text.clone();
+                self.save_elevated(&path, text);
+            }
             Err(e) => self.toast(format!("{}: {e}", tr("Failed")), true),
         }
     }
