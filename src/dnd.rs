@@ -278,6 +278,17 @@ impl State {
         Some((s, buf))
     }
 
+    /// The drag's picture on or off (attached buffer or none).
+    fn show_icon(&self, on: bool) {
+        if let Some((s, b)) = &self.icon {
+            s.attach(on.then_some(b), 0, 0);
+            if on {
+                s.damage(0, 0, i32::MAX, i32::MAX);
+            }
+            s.commit();
+        }
+    }
+
     fn end_own(&mut self) {
         if let Some(s) = self.own.take() {
             s.destroy();
@@ -488,6 +499,10 @@ impl Dispatch<WlDataDevice, ()> for State {
                     return;
                 }
                 st.offer = Some(offer);
+                // Ours back over the window: the window draws its own stack.
+                if st.own.is_some() {
+                    st.show_icon(false);
+                }
                 st.send(Ev::Enter { x, y, files });
             }
             wl_data_device::Event::Motion { x, y, .. } => {
@@ -498,6 +513,9 @@ impl Dispatch<WlDataDevice, ()> for State {
             wl_data_device::Event::Leave => {
                 if let Some(o) = st.offer.take() {
                     o.destroy();
+                    if st.own.is_some() {
+                        st.show_icon(true);
+                    }
                     st.send(Ev::Leave);
                 }
             }
