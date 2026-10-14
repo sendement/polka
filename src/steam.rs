@@ -246,13 +246,13 @@ fn appinfo(root: &Path) -> HashMap<u32, Info> {
 }
 
 /// Non-Steam games added to the library: prefix id → name.
-fn shortcut_names(root: &Path) -> HashMap<u32, String> {
+fn shortcut_names(root: &Path) -> HashMap<u32, (String, Option<PathBuf>)> {
     let mut out = HashMap::new();
     let Ok(users) = std::fs::read_dir(root.join("userdata")) else { return out };
     for u in users.flatten() {
         let Ok(b) = std::fs::read(u.path().join("config/shortcuts.vdf")) else { continue };
         let mut kv = Kv { b: &b, at: 0 };
-        let mut cur: HashMap<String, (Option<u32>, Option<String>)> = HashMap::new();
+        let mut cur: HashMap<String, (Option<u32>, Option<String>, Option<PathBuf>)> = HashMap::new();
         let _ = kv.walk(&mut Vec::new(), None, &mut |path, v| {
             if path.len() < 3 {
                 return;
@@ -261,12 +261,14 @@ fn shortcut_names(root: &Path) -> HashMap<u32, String> {
             match (path[2].to_lowercase().as_str(), v) {
                 ("appid", Value::Int(i)) => e.0 = Some(i),
                 ("appname", Value::Str(s)) => e.1 = Some(s.to_string()),
+                // Quoted, as Steam keeps it.
+                ("exe", Value::Str(s)) => e.2 = Some(PathBuf::from(s.trim_matches('"'))),
                 _ => {}
             }
         });
-        for (id, name) in cur.into_values() {
+        for (id, name, exe) in cur.into_values() {
             if let (Some(id), Some(name)) = (id, name) {
-                out.insert(id, name);
+                out.insert(id, (name, exe.filter(|e| e.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))));
             }
         }
     }
@@ -283,8 +285,9 @@ struct Cache {
     lists: HashMap<View, Vec<Item>>,
     /// Real folder → where it's listed (to go back up there, and its name).
     by_path: HashMap<PathBuf, (View, String)>,
-    /// Game folder or prefix → its icon file.
-    icons: HashMap<PathBuf, PathBuf>,
+    /// Game folder or prefix → the game's exe (its icon is the sharpest)
+    /// and Steam's small icon.
+    icons: HashMap<PathBuf, (Option<PathBuf>, Option<PathBuf>)>,
     built: bool,
 }
 
@@ -313,6 +316,61 @@ fn icon_file(roots: &[PathBuf], appid: u32) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Normalised for comparing names: letters and digits, lower case.
+fn squash(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The game's own exe in its folder: named like the game or its folder,
+/// shallow, big; never an installer, crash reporter or redistributable.
+pub fn main_exe(dir: &Path, name: &str) -> Option<PathBuf> {
+    const SKIP_DIRS: &[&str] = &["_commonredist", "commonredist", "redist", "redistributables", "directx", "vcredist", "dotnet", "support", "installer", "__installer", "easyanticheat", "battleye", "engine"];
+    const SKIP_NAMES: &[&str] = &["unins", "setup", "install", "crash", "redist", "vcredist", "dxsetup", "dotnet", "report", "helper", "eac", "battleye", "updater", "uninstall", "cefprocess", "webhelper", "ue4prereq", "prereq", "quicksfv", "touchup", "cleanup", "dxwebsetup"];
+    let want = [squash(name), squash(&dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())];
+    let mut best: Option<(i64, PathBuf)> = None;
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut seen = 0;
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > 4000 {
+                break;
+            }
+            let p = e.path();
+            let n = e.file_name().to_string_lossy().to_lowercase();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth < 4 && !SKIP_DIRS.contains(&n.as_str()) {
+                    stack.push((p, depth + 1));
+                }
+                continue;
+            }
+            if !n.ends_with(".exe") || SKIP_NAMES.iter().any(|b| n.contains(b)) {
+                continue;
+            }
+            let stem = squash(n.trim_end_matches(".exe").trim_end_matches("-win64-shipping").trim_end_matches("_x64"));
+            let like = want.iter().filter(|w| !w.is_empty()).map(|w| {
+                if stem == *w {
+                    3
+                } else if w.contains(&stem) && stem.len() >= 3 || stem.contains(w.as_str()) {
+                    2
+                } else {
+                    0
+                }
+            });
+            let like = like.max().unwrap_or(0);
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            // Likeness first, then shallow, then big (the game, not a tool).
+            let score = like * 1_000_000_000 - depth as i64 * 100_000_000 + (size / 1024).min(99_999_999) as i64;
+            if best.as_ref().is_none_or(|(b, _)| score > *b) {
+                best = Some((score, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// Names unique within a list (a second "Foo" gets its id).
@@ -394,10 +452,14 @@ fn build() -> Cache {
             names.entry(*k).or_insert_with(|| n.clone());
         }
     }
+    let mut shortcut_exe: HashMap<u32, PathBuf> = HashMap::new();
     if ids.iter().any(|(id, _)| !names.contains_key(id)) {
         for r in &roots {
-            for (k, v) in shortcut_names(r) {
+            for (k, (v, exe)) in shortcut_names(r) {
                 names.entry(k).or_insert(v);
+                if let Some(e) = exe {
+                    shortcut_exe.insert(k, e);
+                }
             }
         }
     }
@@ -412,11 +474,23 @@ fn build() -> Cache {
     unique(&mut games);
     unique(&mut prefixes);
     let mut c = Cache { built: true, ..Default::default() };
+    // A game's exe gives the icon to its folder and its prefix.
+    let mut exe_of: HashMap<u32, PathBuf> = shortcut_exe;
+    for g in &games {
+        if let Some(e) = main_exe(&g.path, &g.name) {
+            if let Some(id) = g.appid {
+                exe_of.insert(id, e.clone());
+            }
+            c.icons.insert(g.path.clone(), (Some(e), None));
+        }
+    }
     for (view, list) in [(View::Games, &games), (View::Prefixes, &prefixes)] {
         for i in list {
             c.by_path.insert(i.path.clone(), (view, i.name.clone()));
-            if let Some(icon) = i.appid.and_then(|a| icon_file(&roots, a)) {
-                c.icons.insert(i.path.clone(), icon);
+            let exe = i.appid.and_then(|a| exe_of.get(&a).cloned());
+            let img = i.appid.and_then(|a| icon_file(&roots, a));
+            if exe.is_some() || img.is_some() {
+                c.icons.insert(i.path.clone(), (exe, img));
             }
         }
     }
@@ -487,8 +561,8 @@ pub fn listed_in(p: &Path) -> Option<(View, String)> {
     c.by_path.get(p).cloned()
 }
 
-/// The game's icon for its folder or prefix.
-pub fn icon(p: &Path) -> Option<PathBuf> {
+/// The game's exe and Steam icon for its folder or prefix.
+pub fn icon(p: &Path) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
     let c = cache().lock().ok()?;
     c.icons.get(p).cloned()
 }

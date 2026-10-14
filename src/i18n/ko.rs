@@ -1,6 +1,12 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · 길게: 나가기"),
+    ("Erase · +arrows: mark", "지우기 · +방향키: 표시"),
+    ("Keys · hold: saved", "키 · 길게: 저장됨"),
+    ("Menu · hold: history", "메뉴 · 길게: 기록"),
+    ("Enter a command…", "명령 입력…"),
+    ("Enter a command", "명령 입력"),
     ("All", "모두"),
     ("Back to files", "파일로 돌아가기"),
     ("Bar", "막대"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "커서"),
     ("Edit and run…", "편집 후 실행…"),
     ("End process", "프로세스 종료"),
-    ("Esc · hold: leave", "Esc · 길게: 나가기"),
     ("Exit", "종료"),
     ("Games", "게임"),
     ("Go to line", "줄로 이동"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "빠른 키"),
     ("Remove from saved", "저장 목록에서 제거"),
     ("Run", "실행"),
-    ("Run command", "명령 실행"),
-    ("Run command…", "명령 실행…"),
     ("Save a command", "명령 저장"),
     ("Save a new command…", "새 명령 저장…"),
     ("Saved commands", "저장된 명령"),

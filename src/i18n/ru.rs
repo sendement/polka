@@ -1,6 +1,12 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · зажать: выйти"),
+    ("Erase · +arrows: mark", "Стереть · +стрелки: выделить"),
+    ("Keys · hold: saved", "Клавиши · зажать: свои"),
+    ("Menu · hold: history", "Меню · зажать: история"),
+    ("Enter a command…", "Ввести команду…"),
+    ("Enter a command", "Ввести команду"),
     ("All", "Всё"),
     ("Back to files", "Вернуться к файлам"),
     ("Bar", "Черта"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "Курсор"),
     ("Edit and run…", "Изменить и запустить…"),
     ("End process", "Завершить процесс"),
-    ("Esc · hold: leave", "Esc · удерживать: выйти"),
     ("Exit", "Выход"),
     ("Games", "Игры"),
     ("Go to line", "К строке"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "Быстрые клавиши"),
     ("Remove from saved", "Убрать из сохранённых"),
     ("Run", "Запустить"),
-    ("Run command", "Выполнить команду"),
-    ("Run command…", "Выполнить команду…"),
     ("Save a command", "Сохранить команду"),
     ("Save a new command…", "Сохранить новую команду…"),
     ("Saved commands", "Сохранённые команды"),

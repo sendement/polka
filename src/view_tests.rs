@@ -2393,8 +2393,24 @@ fn terminal(h: &mut Harness<'static, App>) {
     key(h, Key::Enter, Modifiers::NONE);
     term_wait(h, "hello", 1);
     shot(h, "t0-terminal");
-    // □: run a command typed on the pad's keyboard.
+    // □ erases what's typed: one character, or the part marked with □ held
+    // and the arrows.
+    type_text(h, "echo abcdef");
+    term_wait(h, "abcdef", 1);
     press(h, &[Action::Select]);
+    term_wait(h, "echo abcde ", 1);
+    h.state_mut().handle(Input::Press(Action::Select));
+    press(h, &[Action::Left, Action::Left]);
+    h.state_mut().handle(Input::Release(Action::Select));
+    settle(h);
+    assert!(h.state().cur_tab().term.as_ref().unwrap().cur().unwrap().term.lock().selection.is_some(), "nothing marked");
+    shot(h, "t0b-marked");
+    press(h, &[Action::Select]);
+    press(h, &[Action::Accept]);
+    term_wait(h, "\nabc ", 1);
+    // Enter a command typed on the pad's keyboard (△ menu).
+    press(h, &[Action::Actions]);
+    menu_pick(h, crate::i18n::tr("Enter a command…"));
     assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
     osk_type(h, "printf 'pad%s\\n' -run");
     shot(h, "t1-run-osk");
@@ -2407,15 +2423,27 @@ fn terminal(h: &mut Harness<'static, App>) {
     shot(h, "t2-menu");
     menu_pick(h, crate::i18n::tr("Interrupt (Ctrl+C)"));
     term_wait(h, "$ ", 4);
-    // History: what was run from here comes back.
-    press(h, &[Action::Actions]);
-    menu_pick(h, crate::i18n::tr("Command history"));
+    // History: △ held; what was run from here comes back.
+    let hold = |h: &mut Harness<'static, App>, a: Action| {
+        h.state_mut().handle(Input::Press(a));
+        for _ in 0..16 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        h.state_mut().handle(Input::Release(a));
+        settle(h);
+    };
+    hold(h, Action::Actions);
+    let Some(Overlay::Menu(m)) = h.state().overlay.as_ref() else { panic!("no history") };
+    assert_eq!(m.title, crate::i18n::tr("Command history"));
     shot(h, "t3-history");
     menu_pick(h, "sleep 30");
     menu_pick(h, crate::i18n::tr("Save"));
     assert_eq!(h.state().cfg.terminal.saved, vec!["sleep 30".to_string()]);
-    // Saved commands: a new one from the keyboard, then run.
-    h.state_mut().run(Cmd::TermSavedMenu);
+    // Saved commands (⧉ held): a new one from the keyboard, then run.
+    hold(h, Action::View);
+    let Some(Overlay::Menu(m)) = h.state().overlay.as_ref() else { panic!("no saved commands") };
+    assert_eq!(m.title, crate::i18n::tr("Saved commands"));
     menu_pick(h, crate::i18n::tr("Save a new command…"));
     osk_type(h, "echo saved-one");
     press(h, &[Action::Menu]);
@@ -2612,6 +2640,12 @@ fn steam(h: &mut Harness<'static, App>) {
     let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
     let root = dir.join("fake-steam");
     fake_steam(&root);
+    // A real exe with an icon, named like the game, gives it its icon.
+    let exe = dir.join("Townfall.exe");
+    let game_exe = root.join("steamapps/common/Counter-Strike/Counter-Strike.exe");
+    if exe.exists() {
+        std::fs::copy(&exe, &game_exe).unwrap();
+    }
     unsafe { std::env::set_var("POLKA_STEAM_ROOT", &root) };
     h.state_mut().refresh_sidebar();
     let i = h.state().side_items.iter().position(|it| it.loc == Location::Steam(View::Root)).expect("Steam in the sidebar");
@@ -2626,6 +2660,12 @@ fn steam(h: &mut Harness<'static, App>) {
     press(h, &[Action::Accept]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Games));
     assert_eq!(names(h), vec!["Counter-Strike", "Half-Life 2", "Orphan Folder"]);
+    if exe.exists() {
+        let cs = std::fs::canonicalize(root.join("steamapps/common/Counter-Strike")).unwrap();
+        let (picked, _) = crate::steam::icon(&cs).unwrap();
+        assert_eq!(picked.as_deref(), Some(std::fs::canonicalize(&game_exe).unwrap().as_path()));
+        settle(h);
+    }
     shot(h, "s1-games");
     press(h, &[Action::Down, Action::Accept]);
     let hl2 = std::fs::canonicalize(root.join("library2/steamapps/common/Half-Life 2")).unwrap();

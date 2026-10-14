@@ -32,6 +32,11 @@ pub fn run() {
         let names: Vec<String> = crate::steam::list(v).unwrap_or_default().into_iter().map(|e| e.name).collect();
         println!("steam {}: {}", crate::steam::view_name(v), names.join(" | "));
     }
+    for e in crate::steam::list(crate::steam::View::Games).unwrap_or_default() {
+        let p = crate::steam::resolve(crate::steam::View::Games, &e.name);
+        let exe = p.as_deref().and_then(|p| crate::steam::icon(p)).and_then(|(x, _)| x);
+        println!("steam icon: {} ← {}", e.name, exe.map_or("-".into(), |x| x.strip_prefix(p.unwrap_or_default()).map(|r| r.display().to_string()).unwrap_or_default()));
+    }
     let host = crate::sandbox::host(Command::new("true")).status();
     println!("run on host: {}", match host {
         Ok(s) => s.success().to_string(),

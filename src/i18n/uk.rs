@@ -1,6 +1,12 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · затиснути: вийти"),
+    ("Erase · +arrows: mark", "Стерти · +стрілки: виділити"),
+    ("Keys · hold: saved", "Клавіші · затиснути: свої"),
+    ("Menu · hold: history", "Меню · затиснути: історія"),
+    ("Enter a command…", "Ввести команду…"),
+    ("Enter a command", "Ввести команду"),
     ("All", "Усе"),
     ("Back to files", "Повернутися до файлів"),
     ("Bar", "Риска"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "Курсор"),
     ("Edit and run…", "Змінити й запустити…"),
     ("End process", "Завершити процес"),
-    ("Esc · hold: leave", "Esc · утримувати: вийти"),
     ("Exit", "Вихід"),
     ("Games", "Ігри"),
     ("Go to line", "До рядка"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "Швидкі клавіші"),
     ("Remove from saved", "Прибрати зі збережених"),
     ("Run", "Запустити"),
-    ("Run command", "Виконати команду"),
-    ("Run command…", "Виконати команду…"),
     ("Save a command", "Зберегти команду"),
     ("Save a new command…", "Зберегти нову команду…"),
     ("Saved commands", "Збережені команди"),

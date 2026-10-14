@@ -1,6 +1,12 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · halten: verlassen"),
+    ("Erase · +arrows: mark", "Löschen · +Pfeile: markieren"),
+    ("Keys · hold: saved", "Tasten · halten: eigene"),
+    ("Menu · hold: history", "Menü · halten: Verlauf"),
+    ("Enter a command…", "Befehl eingeben…"),
+    ("Enter a command", "Befehl eingeben"),
     ("All", "Alle"),
     ("Back to files", "Zurück zu den Dateien"),
     ("Bar", "Strich"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "Cursor"),
     ("Edit and run…", "Bearbeiten und ausführen…"),
     ("End process", "Prozess beenden"),
-    ("Esc · hold: leave", "Esc · halten: verlassen"),
     ("Exit", "Beenden"),
     ("Games", "Spiele"),
     ("Go to line", "Zu Zeile"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "Schnelltasten"),
     ("Remove from saved", "Aus Gespeicherten entfernen"),
     ("Run", "Ausführen"),
-    ("Run command", "Befehl ausführen"),
-    ("Run command…", "Befehl ausführen…"),
     ("Save a command", "Befehl speichern"),
     ("Save a new command…", "Neuen Befehl speichern…"),
     ("Saved commands", "Gespeicherte Befehle"),

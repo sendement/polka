@@ -18,8 +18,8 @@ use crate::app::{App, Cmd, Focus, Menu, MenuItem, Osk, OskPurpose, Overlay, SubM
 use crate::i18n::tr;
 use crate::input::Action;
 
-/// How long ○ is held to leave the page (a tap is Esc).
-const HOLD_LEAVE: Duration = Duration::from_millis(500);
+/// Holding ○, △ or ⧉ this long does their second thing.
+const HOLD: Duration = Duration::from_millis(500);
 
 /// The quick keys panel.
 pub struct QuickKeys {
@@ -99,7 +99,7 @@ impl App {
         let dark = self.dark_applied.unwrap_or(true);
         let scheme = super::scheme::resolve(&self.cfg.terminal.scheme, dark);
         let mut outs = Vec::new();
-        let mut leave = false;
+        let mut held = None;
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
             let Some(t) = tab.term.as_deref_mut() else { continue };
             for s in &mut t.sessions {
@@ -124,17 +124,33 @@ impl App {
             if t.sessions.iter().any(|s| s.waiting()) {
                 self.ctx.request_repaint_after(Duration::from_millis(130));
             }
-            if let Some(d) = t.back_down {
-                if d.elapsed() >= HOLD_LEAVE && ti == self.tab {
-                    t.back_down = None;
-                    leave = true;
+            if let Some((a, d)) = t.hold {
+                if d.elapsed() >= HOLD && ti == self.tab {
+                    t.hold = None;
+                    held = Some(a);
                 } else {
                     self.ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
+            // The marked part of the command: from where marking began to the cursor.
+            if let (Some(m), Some(s)) = (t.mark, t.sessions.get(t.active)) {
+                let mut term = s.term.lock();
+                let c = term.grid().cursor.point;
+                let mut sel = Selection::new(SelectionType::Simple, m, Side::Left);
+                sel.update(c, Side::Left);
+                term.selection = (m != c).then_some(sel);
+            }
         }
-        if leave {
-            self.focus_sidebar();
+        match held {
+            Some(Action::Back) => {
+                if self.term_ref().is_some_and(|t| t.selecting) {
+                    self.end_select();
+                }
+                self.focus_sidebar();
+            }
+            Some(Action::Actions) => self.run(Cmd::TermHistoryMenu),
+            Some(Action::View) => self.run(Cmd::TermSavedMenu),
+            _ => {}
         }
         for (ti, o) in outs {
             match o {
@@ -180,6 +196,24 @@ impl App {
         if t.selecting {
             return self.select_input(a);
         }
+        // □ held with arrows marks part of the typed command.
+        if t.erase_down.is_some() && matches!(a, Action::Up | Action::Down | Action::Left | Action::Right) {
+            t.erase_down = Some(true);
+            if t.mark.is_none() {
+                t.mark = t.sessions.get(t.active).map(|s| s.term.lock().grid().cursor.point);
+            }
+            let k = match a {
+                Action::Left => K::Left,
+                Action::Right => K::Right,
+                // Up / down: to the start or end of the line.
+                Action::Up => K::Home,
+                _ => K::End,
+            };
+            return self.term_key(k, Mods::NONE);
+        }
+        if !matches!(a, Action::Select | Action::LeftTrigger | Action::RightTrigger) {
+            self.unmark();
+        }
         match a {
             Action::Up => self.term_key(K::Up, Mods::NONE),
             Action::Down => self.term_key(K::Down, Mods::NONE),
@@ -188,14 +222,16 @@ impl App {
             Action::Home => self.term_key(K::Home, Mods::NONE),
             Action::End => self.term_key(K::End, Mods::NONE),
             Action::Accept => self.term_key(K::Enter, Mods::NONE),
-            Action::Back => {
+            Action::Back | Action::Actions | Action::View => {
                 if let Some(t) = self.term_mut() {
-                    t.back_down = Some(Instant::now());
+                    t.hold = Some((a, Instant::now()));
                 }
             }
-            Action::Select => self.run(Cmd::TermRunAsk),
-            Action::View => self.run(Cmd::TermKeys),
-            Action::Actions => self.terminal_menu(),
+            Action::Select => {
+                if let Some(t) = self.term_mut() {
+                    t.erase_down = Some(false);
+                }
+            }
             Action::Menu => self.open_app_menu(),
             Action::LeftTrigger | Action::RightTrigger => {
                 let up = a == Action::LeftTrigger;
@@ -211,20 +247,59 @@ impl App {
         }
     }
 
-    /// Button let go on the page: a short ○ is Esc.
+    /// A button let go on the page: what a tap does.
     pub fn terminal_release(&mut self, a: Action) {
-        if a != Action::Back {
-            return;
-        }
         let Some(t) = self.term_mut() else { return };
-        if let Some(d) = t.back_down.take() {
-            if d.elapsed() < HOLD_LEAVE {
-                if t.selecting {
-                    self.end_select();
+        if a == Action::Select {
+            // A tap erases: the marked part, else the character before the cursor.
+            if t.erase_down.take() == Some(false) {
+                if t.mark.is_some() {
+                    self.erase_marked();
                 } else {
-                    self.term_key(K::Esc, Mods::NONE);
+                    self.term_key(K::Backspace, Mods::NONE);
                 }
             }
+            return;
+        }
+        let Some((h, d)) = t.hold.take() else { return };
+        if h != a || d.elapsed() >= HOLD {
+            return;
+        }
+        let selecting = t.selecting;
+        match a {
+            Action::Back if selecting => self.end_select(),
+            Action::Back => self.term_key(K::Esc, Mods::NONE),
+            Action::Actions => self.terminal_menu(),
+            Action::View => self.run(Cmd::TermKeys),
+            _ => {}
+        }
+    }
+
+    /// Forget the marked part (it stays typed).
+    fn unmark(&mut self) {
+        let Some(t) = self.term_mut() else { return };
+        if t.mark.take().is_some() {
+            if let Some(s) = t.sessions.get(t.active) {
+                s.term.lock().selection = None;
+            }
+        }
+    }
+
+    /// Erase the marked part of the command: as many Backspaces (cursor
+    /// after the mark) or Deletes (before it) as it is long.
+    fn erase_marked(&mut self) {
+        let Some(t) = self.term_mut() else { return };
+        let Some(m) = t.mark.take() else { return };
+        let Some(s) = t.sessions.get(t.active) else { return };
+        let mut term = s.term.lock();
+        term.selection = None;
+        let c = term.grid().cursor.point;
+        let cols = alacritty_terminal::grid::Dimensions::columns(&*term) as i64;
+        drop(term);
+        let d = (c.line.0 as i64 - m.line.0 as i64) * cols + c.column.0 as i64 - m.column.0 as i64;
+        let k = if d > 0 { K::Backspace } else { K::Delete };
+        for _ in 0..d.unsigned_abs().min(4096) {
+            self.term_key(k, Mods::NONE);
         }
     }
 
@@ -318,7 +393,7 @@ impl App {
             Action::Back => {
                 drop(term);
                 if let Some(t) = self.term_mut() {
-                    t.back_down = Some(Instant::now());
+                    t.hold = Some((Action::Back, Instant::now()));
                 }
                 return;
             }
@@ -340,6 +415,9 @@ impl App {
     pub fn terminal_keyboard(&mut self, events: Vec<egui::Event>) -> Vec<egui::Event> {
         let mut rest = Vec::new();
         let mods = self.ctx.input(|i| i.modifiers);
+        if events.iter().any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Key { pressed: true, .. } | egui::Event::Paste(_))) {
+            self.unmark();
+        }
         for ev in events {
             match ev {
                 egui::Event::Text(t) => {
@@ -515,7 +593,7 @@ impl App {
             i
         };
         let items = vec![
-            en(item(tr("Run command…"), Cmd::TermRunAsk), has),
+            en(item(tr("Enter a command…"), Cmd::TermRunAsk), has),
             en(item(tr("Type text…"), Cmd::TermTypeAsk), has),
             en(item(tr("Command history"), Cmd::Submenu(SubMenu::TermHistory)), has),
             en(item(tr("Saved commands"), Cmd::Submenu(SubMenu::TermSaved)), has),
@@ -641,8 +719,8 @@ impl App {
                 self.with_session(|s| s.input(format!("{c}\r").into_bytes()));
             }
             Cmd::TermType(c) => self.with_session(|s| s.input(c.into_bytes())),
-            Cmd::TermEdit(c) => self.overlay = Some(Overlay::Osk(Osk::new(tr("Run command"), &c, OskPurpose::TermRun))),
-            Cmd::TermRunAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Run command"), "", OskPurpose::TermRun))),
+            Cmd::TermEdit(c) => self.overlay = Some(Overlay::Osk(Osk::new(tr("Enter a command"), &c, OskPurpose::TermRun))),
+            Cmd::TermRunAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Enter a command"), "", OskPurpose::TermRun))),
             Cmd::TermTypeAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Type text"), "", OskPurpose::TermType))),
             Cmd::TermSaveAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Save a command"), "", OskPurpose::TermSave))),
             Cmd::TermSave(c) => {
@@ -845,10 +923,9 @@ impl App {
         vec![
             (Action::Accept, "Enter"),
             (Action::Back, tr("Esc · hold: leave")),
-            (Action::Select, tr("Run command")),
-            (Action::View, tr("Quick keys")),
-            (Action::LeftTrigger, tr("Scroll")),
-            (Action::Actions, tr("Actions")),
+            (Action::Select, tr("Erase · +arrows: mark")),
+            (Action::View, tr("Keys · hold: saved")),
+            (Action::Actions, tr("Menu · hold: history")),
         ]
     }
 }

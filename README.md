@@ -68,12 +68,15 @@ scrollback, start folder.
 | Terminal | Gamepad | Keyboard |
 |---|---|---|
 | Arrows / Enter | D-pad / ✕ / A | as usual |
+| Erase a character | □ / X tap | Backspace |
+| Mark part of the command, then erase it | □ / X held + ← → (↑ ↓: to the line's start / end), then □ / X tap | — |
 | Esc | ○ / B tap | Esc |
 | Leave for the sidebar (shells keep running) | ○ / B held | mouse |
-| Run a command (on-screen keyboard, `#&` = symbols) | □ / X | type it |
-| Quick keys for what's running (vim, nano, htop, mc, less, lazygit, tmux…) | Create / View | Ctrl+Shift+K |
+| Menu: enter a command (on-screen keyboard, `#&` = symbols), interrupt, copy, paste, launch htop/btop/… | △ / Y tap | Ctrl+C, Ctrl+Shift+C / V |
+| Command history | △ / Y held | Ctrl+Shift+H |
+| Quick keys for what's running (vim, nano, htop, mc, less, lazygit, tmux…) | Create / View tap | Ctrl+Shift+K |
+| Saved commands | Create / View held | — |
 | Scroll back / page | L2 / R2 | Shift+PgUp / PgDn |
-| Interrupt, copy, paste, history, saved commands, launch htop/btop/… | △ / Y menu | Ctrl+C, Ctrl+Shift+C / V, Ctrl+Shift+H |
 | Choose text to copy | △ → "Choose text to copy": move, □ start, ✕ copy | drag, Ctrl+Shift+Space |
 | Terminal tabs | tab strip, △ → Terminal tabs | Ctrl+Shift+T / W, Ctrl+PgUp / PgDn |
 
@@ -85,7 +88,8 @@ shell runs on the host (`flatpak-spawn` and `script`), with resizes, Ctrl+C and 
 Sidebar → Steam: **Games** lists the installed games of every library (folders without a manifest
 are named from Steam's app cache), **Prefixes** lists the Proton prefixes (`compatdata/<id>`) under
 their games' names — non-Steam shortcuts and uninstalled games included. Going up from a game's
-folder or prefix comes back to the list; games show their Steam icon.
+folder or prefix comes back to the list. Games and prefixes wear the icon of the game's own `.exe`
+(sharper than Steam's), else Steam's.
 
 ## Disk usage
 

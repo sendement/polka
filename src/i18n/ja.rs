@@ -1,6 +1,12 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · 長押し: 離れる"),
+    ("Erase · +arrows: mark", "削除 · +矢印: 範囲"),
+    ("Keys · hold: saved", "キー · 長押し: 保存済み"),
+    ("Menu · hold: history", "メニュー · 長押し: 履歴"),
+    ("Enter a command…", "コマンドを入力…"),
+    ("Enter a command", "コマンドを入力"),
     ("All", "すべて"),
     ("Back to files", "ファイルに戻る"),
     ("Bar", "バー"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "カーソル"),
     ("Edit and run…", "編集して実行…"),
     ("End process", "プロセスを終了"),
-    ("Esc · hold: leave", "Esc · 長押し: 離れる"),
     ("Exit", "終了"),
     ("Games", "ゲーム"),
     ("Go to line", "行へ移動"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "クイックキー"),
     ("Remove from saved", "保存から削除"),
     ("Run", "実行"),
-    ("Run command", "コマンドを実行"),
-    ("Run command…", "コマンドを実行…"),
     ("Save a command", "コマンドを保存"),
     ("Save a new command…", "新しいコマンドを保存…"),
     ("Saved commands", "保存したコマンド"),

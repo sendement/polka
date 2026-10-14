@@ -1483,6 +1483,8 @@ impl App {
                     self.audio_select_released();
                 } else if self.overlay.is_none() && self.cur_tab().viewer.is_some() {
                     self.viewer_select_released();
+                } else if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+                    self.terminal_release(Action::Select);
                 }
                 return;
             }

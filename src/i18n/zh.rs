@@ -1,6 +1,12 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Esc · hold: leave", "Esc · 长按：离开"),
+    ("Erase · +arrows: mark", "删除 · +方向键：标记"),
+    ("Keys · hold: saved", "按键 · 长按：已保存"),
+    ("Menu · hold: history", "菜单 · 长按：历史"),
+    ("Enter a command…", "输入命令…"),
+    ("Enter a command", "输入命令"),
     ("All", "全部"),
     ("Back to files", "返回文件"),
     ("Bar", "竖线"),
@@ -19,7 +25,6 @@ pub const T: &[(&str, &str)] = &[
     ("Cursor", "光标"),
     ("Edit and run…", "编辑后运行…"),
     ("End process", "结束进程"),
-    ("Esc · hold: leave", "Esc · 长按：离开"),
     ("Exit", "退出"),
     ("Games", "游戏"),
     ("Go to line", "跳到行"),
@@ -41,8 +46,6 @@ pub const T: &[(&str, &str)] = &[
     ("Quick keys", "快捷键"),
     ("Remove from saved", "从已保存中移除"),
     ("Run", "运行"),
-    ("Run command", "运行命令"),
-    ("Run command…", "运行命令…"),
     ("Save a command", "保存命令"),
     ("Save a new command…", "保存新命令…"),
     ("Saved commands", "已保存的命令"),

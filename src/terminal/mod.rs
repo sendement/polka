@@ -294,8 +294,12 @@ pub struct Terminal {
     pub active: usize,
     /// Choosing text to copy with the pad (alacritty's vi mode).
     pub selecting: bool,
-    /// ○ is down since (held: leave the page; tapped: Esc).
-    pub back_down: Option<Instant>,
+    /// ○, △ or ⧉ down since: a tap does one thing, holding another.
+    pub hold: Option<(crate::input::Action, Instant)>,
+    /// □ is down: a tap erases, with arrows it marks what to erase.
+    pub erase_down: Option<bool>,
+    /// Where marking the typed command began (the other end is the cursor).
+    pub mark: Option<alacritty_terminal::index::Point>,
     /// Cell size and grid of the last frame.
     pub cell: (f32, f32),
     pub grid: (usize, usize),
@@ -303,7 +307,7 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new() -> Self {
-        Self { shown: true, sessions: Vec::new(), active: 0, selecting: false, back_down: None, cell: (8.0, 16.0), grid: (80, 24) }
+        Self { shown: true, sessions: Vec::new(), active: 0, selecting: false, hold: None, erase_down: None, mark: None, cell: (8.0, 16.0), grid: (80, 24) }
     }
 
     pub fn cur(&self) -> Option<&Session> {

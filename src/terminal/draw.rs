@@ -230,7 +230,7 @@ pub fn draw(ui: &mut Ui, t: &mut Terminal, scheme: &Scheme, size: f32, icons: &m
     let cursor = content.cursor;
     let offset = content.display_offset as i32;
     let accent = vis.selection.bg_fill;
-    let sel_bg = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 120);
+    let sel_bg = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 190);
     struct Run {
         x: f32,
         text: String,
