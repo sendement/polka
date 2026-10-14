@@ -17,7 +17,7 @@
   </g>
   <!-- gamepad leaning on the folder: its d-pad's right arrow at the folder's edge -->
   <g transform="translate(-14 0)">
-    <path d="M84 54h20c6 0 9 4 10 10l1 6c0.6 4-3.5 6-6 3.5l-4-3.5H87l-4 3.5c-2.5 2.5-6.6 0.5-6-3.5l1-6c1-6 4-10 10-10z" fill="#e9f1fa" stroke="#2c6aa8" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>
+    <path d="M84 54h20c6 0 9 4 10 10l1 6c0.6 4-3.5 6-6 3.5l-4-3.5H87l-4 3.5c-2.5 2.5-6.6 0.5-6-3.5l1-6c1-6 4-10 10-10z" fill="#e9f1fa"/>
     <g fill="#235c96">
       <rect x="86.5" y="58" width="3" height="9" rx="1"/>
       <rect x="83.5" y="61" width="9" height="3" rx="1"/>
