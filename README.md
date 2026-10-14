@@ -57,6 +57,36 @@ instead: Settings → "Open in Polka"):
 | Full screen | Create / View, double click | F, F11 |
 | Subtitles / audio track | □ / X tap / △ menu | S / A |
 
+## Terminal
+
+Sidebar → Terminal (or △ on a folder → "Open in terminal", ≡ → "Open terminal here") opens
+shells in their own tabs inside the page. Built on alacritty's terminal core: colours, full-screen
+programs (htop, btop, mc, vim, less…), mouse, scrollback; box drawing, blocks and braille are drawn
+to the cell so tables and graphs join up. Settings: colour scheme, font, size, shell, cursor,
+scrollback, start folder.
+
+| Terminal | Gamepad | Keyboard |
+|---|---|---|
+| Arrows / Enter | D-pad / ✕ / A | as usual |
+| Esc | ○ / B tap | Esc |
+| Leave for the sidebar (shells keep running) | ○ / B held | mouse |
+| Run a command (on-screen keyboard, `#&` = symbols) | □ / X | type it |
+| Quick keys for what's running (vim, nano, htop, mc, less, lazygit, tmux…) | Create / View | Ctrl+Shift+K |
+| Scroll back / page | L2 / R2 | Shift+PgUp / PgDn |
+| Interrupt, copy, paste, history, saved commands, launch htop/btop/… | △ / Y menu | Ctrl+C, Ctrl+Shift+C / V, Ctrl+Shift+H |
+| Choose text to copy | △ → "Choose text to copy": move, □ start, ✕ copy | drag, Ctrl+Shift+Space |
+| Terminal tabs | tab strip, △ → Terminal tabs | Ctrl+Shift+T / W, Ctrl+PgUp / PgDn |
+
+History merges the shell's own (fish, zsh, bash) with what was run from here. In the Flatpak the
+shell runs on the host (`flatpak-spawn` and `script`), with resizes, Ctrl+C and the current folder.
+
+## Steam
+
+Sidebar → Steam: **Games** lists the installed games of every library (folders without a manifest
+are named from Steam's app cache), **Prefixes** lists the Proton prefixes (`compatdata/<id>`) under
+their games' names — non-Steam shortcuts and uninstalled games included. Going up from a game's
+folder or prefix comes back to the list; games show their Steam icon.
+
 ## Disk usage
 
 **Tools → Disk usage** in the sidebar (or △ on a folder) measures home, the current folder or a

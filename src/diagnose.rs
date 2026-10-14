@@ -25,6 +25,13 @@ pub fn run() {
     for d in crate::drives::list() {
         println!("drive: {} {:?} {} at {:?} removable={} udisks={}", d.dev, d.label, d.fstype, d.mount, d.removable, d.udisks.is_some());
     }
+    for r in crate::steam::roots() {
+        println!("steam: {}", r.display());
+    }
+    for v in [crate::steam::View::Games, crate::steam::View::Prefixes] {
+        let names: Vec<String> = crate::steam::list(v).unwrap_or_default().into_iter().map(|e| e.name).collect();
+        println!("steam {}: {}", crate::steam::view_name(v), names.join(" | "));
+    }
     let host = crate::sandbox::host(Command::new("true")).status();
     println!("run on host: {}", match host {
         Ok(s) => s.success().to_string(),
@@ -34,6 +41,7 @@ pub fn run() {
         let ok = Command::new(tool).arg("--help").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok();
         println!("tool {tool}: {}", if ok { "yes" } else { "missing" });
     }
+    terminal();
     match gilrs::Gilrs::new() {
         Ok(mut g) => {
             // Devices come in as events: give them a moment.
@@ -45,5 +53,72 @@ pub fn run() {
             println!("gamepads: {}", if pads.is_empty() { "-".into() } else { pads.join(", ") });
         }
         Err(e) => println!("gamepads: unavailable ({e})"),
+    }
+}
+
+/// A real shell through the terminal page's own code: output, size after a
+/// resize, and Ctrl+C.
+fn terminal() {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point};
+    let prefs = crate::config::Config::load().terminal;
+    let ctx = egui::Context::default();
+    let home = dirs::home_dir().unwrap_or_else(|| "/".into());
+    let mut s = match crate::terminal::Session::spawn(&prefs, &home, &ctx, 80, 24, true) {
+        Ok(s) => s,
+        Err(e) => return println!("terminal: failed to start ({e})"),
+    };
+    let screen = |s: &crate::terminal::Session| {
+        let t = s.term.lock();
+        let mut out = String::new();
+        for l in 0..t.screen_lines() as i32 {
+            out.extend((0..t.columns()).map(|c| t.grid()[Point::new(Line(l), Column(c))].c));
+            out.push('\n');
+        }
+        out
+    };
+    let scheme = crate::terminal::scheme::resolve(&prefs.scheme, true);
+    // The app answers the shell's questions (fish asks the terminal what it
+    // can do before reading anything) every frame; here, while waiting.
+    let pause = |s: &mut crate::terminal::Session, ms: u64| {
+        for _ in 0..ms / 25 {
+            s.poll(&scheme);
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    };
+    // Typed commands show once as typed, then their output.
+    let wait = |s: &mut crate::terminal::Session, what: &str, n: usize| {
+        for _ in 0..200 {
+            s.poll(&scheme);
+            if screen(s).matches(what).count() >= n {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    };
+    pause(&mut s, 800);
+    s.input(b"echo polka-term-ok\r".to_vec());
+    let out = wait(&mut s, "polka-term-ok", 2);
+    s.resize(100, 30, (8.0, 16.0));
+    pause(&mut s, 300);
+    s.input(b"stty size\r".to_vec());
+    let size = wait(&mut s, "30 100", 1);
+    s.input(b"sleep 30; echo not-interrupted\r".to_vec());
+    pause(&mut s, 500);
+    s.input(vec![3]);
+    pause(&mut s, 300);
+    s.input(b"echo after-ok\r".to_vec());
+    let intr = wait(&mut s, "after-ok", 2) && !screen(&s).contains("not-interrupted\n");
+    s.input(b"cd /tmp\r".to_vec());
+    pause(&mut s, 400);
+    let cwd = s.cwd();
+    s.input(b"sleep 3\r".to_vec());
+    pause(&mut s, 400);
+    let fg = s.foreground();
+    s.input(vec![3]);
+    println!("terminal: output {out}, resize {size}, ctrl+c {intr}, folder {cwd:?}, running {fg:?} (shell {})", s.title);
+    if !(out && size && intr) {
+        println!("{}", screen(&s).lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n"));
     }
 }

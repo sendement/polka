@@ -420,12 +420,39 @@ pub struct Tab {
     pub viewer: Option<Box<Viewer>>,
     /// The disk usage page (kept while hidden).
     pub usage: Option<Box<crate::usage::Usage>>,
+    /// The terminal page (its shells keep running while hidden).
+    pub term: Option<Box<crate::terminal::Terminal>>,
 }
 
 // ---------------------------------------------------------------- overlays
 
 #[derive(Clone, Debug)]
 pub enum Cmd {
+    /// The terminal page (a new shell in this folder, if given).
+    TermOpen(Option<PathBuf>),
+    TermNew,
+    TermCloseTab(usize),
+    TermSwitch(usize),
+    TermHide,
+    TermClose,
+    TermRun(String),
+    TermType(String),
+    TermEdit(String),
+    TermRunAsk,
+    TermTypeAsk,
+    TermSaveAsk,
+    TermSave(String),
+    TermForget(usize),
+    TermInterrupt,
+    TermClear,
+    TermSelect,
+    TermCopy,
+    TermPaste,
+    TermShowFolder,
+    TermKeys,
+    TermHistoryMenu,
+    TermSavedMenu,
+    TermSettings,
     Open,
     Copy,
     Cut,
@@ -545,6 +572,12 @@ pub enum SubMenu {
     Sort,
     /// A folder of templates (index into `App::templates`).
     Templates(usize),
+    TermHistory,
+    TermSaved,
+    TermLaunch,
+    TermTabs,
+    /// A command: saved (index into the saved list) or from the history.
+    TermEntry(bool, usize),
 }
 
 pub struct MenuItem {
@@ -564,11 +597,13 @@ pub struct Menu {
     pub kind: Option<SubMenu>,
     /// Open nested menu, shown to the right.
     pub sub: Option<Box<Menu>>,
+    /// The item last scrolled into view (long menus scroll).
+    pub shown: Option<usize>,
 }
 
 impl Menu {
     pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
-        Self { title: title.into(), items, cursor: 0, kind: None, sub: None }
+        Self { title: title.into(), items, cursor: 0, kind: None, sub: None, shown: None }
     }
 
     pub fn depth(&self) -> usize {
@@ -627,6 +662,10 @@ pub enum OskPurpose {
     ViewerReplace,
     /// A text field of the archive dialog, which comes back afterwards.
     CompressField { dlg: Box<CompressDlg>, field: CField },
+    /// A command for the terminal: run it, type it, or keep it.
+    TermRun,
+    TermType,
+    TermSave,
 }
 
 /// What to do again once an archive password is entered.
@@ -661,9 +700,11 @@ pub enum OskKey {
     Ok,
 }
 
-pub const OSK_LAYOUTS: [(&str, [&str; 4]); 2] = [
+pub const OSK_LAYOUTS: [(&str, [&str; 4]); 3] = [
     ("EN", ["1234567890-", "qwertyuiop_", "asdfghjkl.,", "zxcvbnm()[]"]),
     ("RU", ["1234567890-", "йцукенгшщзх", "фывапролджэ", "ячсмитьбюъё"]),
+    // Symbols, for shell commands above all.
+    ("#&", ["1234567890=", "!@#$%^&*~`+", "|\\/:;\"'<>?-", "{}[]()_.,§€"]),
 ];
 pub const OSK_SPECIAL: [OskKey; 6] =
     [OskKey::Shift, OskKey::Layout, OskKey::Space, OskKey::Backspace, OskKey::Left, OskKey::Ok];
@@ -762,6 +803,8 @@ pub enum Overlay {
     IconPicker(IconPicker),
     Compress(Box<CompressDlg>),
     ViewerSettings(ViewerSettings),
+    TermKeys(crate::terminal::app::QuickKeys),
+    TermSettings(crate::terminal::app::TermSettings),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1029,6 +1072,8 @@ pub struct SideItem {
     pub section: &'static str,
     /// Opens the disk usage page instead of a place.
     pub usage: bool,
+    /// Opens the terminal page.
+    pub term: bool,
     /// A drive (maybe not mounted: then `loc` is no real place).
     pub drive: Option<crate::drives::Drive>,
 }
@@ -1107,6 +1152,8 @@ pub struct App {
     pub edit_hold: Option<bool>,
     /// Text copied in the viewer (when the system clipboard can't be read).
     pub text_clip: Option<String>,
+    /// Shell history behind the terminal's history menu.
+    pub term_hist: Vec<String>,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1144,7 +1191,7 @@ impl App {
                 first.set_cursor(i);
             }
         }
-        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None, usage: None };
+        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None, usage: None, term: None };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         ctx.set_zoom_factor(cfg.zoom);
         apply_accent(&ctx, &cfg);
@@ -1176,6 +1223,7 @@ impl App {
             divider_x: None,
             edit_hold: None,
             text_clip: None,
+            term_hist: Vec::new(),
             sys_clip: None,
             dark_applied: None,
             drag: None,
@@ -1225,6 +1273,7 @@ impl App {
         self.apply_appearance();
         self.tick_audio();
         self.tick_usage();
+        self.tick_terminal();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -1341,6 +1390,7 @@ impl App {
             pinned: false,
             section,
             usage: false,
+            term: false,
             drive: None,
         };
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
@@ -1364,6 +1414,24 @@ impl App {
             let icon: &'static [&'static str] = if crate::trashbin::count() > 0 { &["user-trash-full", "user-trash"] } else { &["user-trash", "user-trash-full"] };
             v.push(place(tr("Trash").into(), icon, t, "Places", &self.cfg));
         }
+        v.push(SideItem {
+            label: tr("Terminal").into(),
+            icon: &["utilities-terminal", "terminal", "org.gnome.Terminal", "konsole", "xterm"],
+            custom_icon: icon_for(&self.cfg, "polka:terminal"),
+            loc: Location::Local("/".into()),
+            pinned: false,
+            section: "Places",
+            usage: false,
+            term: true,
+            drive: None,
+        });
+        if let Some(root) = crate::steam::root() {
+            v.push(SideItem { custom_icon: icon_for(&self.cfg, "polka:steam"), ..place("Steam".into(), &["steam", "com.valvesoftware.Steam", "applications-games"], PathBuf::new(), "Places", &self.cfg) });
+            if let Some(last) = v.last_mut() {
+                last.loc = Location::Steam(crate::steam::View::Root);
+                let _ = root;
+            }
+        }
         for p in &self.cfg.pinned {
             let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
             v.push(SideItem { pinned: true, ..place(label, &["folder-bookmark", "bookmark-new", "folder"], p.clone(), "Pinned", &self.cfg) });
@@ -1374,7 +1442,7 @@ impl App {
         for d in &drives {
             let label = d.label.clone().unwrap_or_else(|| format!("{} {}", tr("Drive"), human_size(d.size)));
             let loc = Location::Local(d.mount.clone().unwrap_or_else(|| PathBuf::from(d.key())));
-            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, drive: Some(d.clone()) });
+            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()) });
         }
         for (dev, mnt) in mounts() {
             if drives.iter().any(|d| d.mount.as_ref() == Some(&mnt)) {
@@ -1391,6 +1459,7 @@ impl App {
             pinned: false,
             section: "Tools",
             usage: true,
+            term: false,
             drive: None,
         });
         self.side_items = v;
@@ -1417,7 +1486,12 @@ impl App {
                 }
                 return;
             }
-            Input::Release(_) => return,
+            Input::Release(a) => {
+                if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+                    self.terminal_release(a);
+                }
+                return;
+            }
             Input::Press(a) => a,
         };
         if self.overlay.is_some() {
@@ -1432,7 +1506,7 @@ impl App {
             return self.viewer_input(a);
         }
         // A hidden cursor comes back first instead of acting unseen.
-        if self.pane().cursor_hidden && !self.usage_shown() {
+        if self.pane().cursor_hidden && !self.usage_shown() && !self.term_shown() {
             self.pane_mut().cursor_hidden = false;
             if matches!(a, Action::Up | Action::Down | Action::Left | Action::Right | Action::Accept | Action::Select | Action::Actions | Action::Home | Action::End) {
                 return;
@@ -1440,6 +1514,9 @@ impl App {
         }
         if self.usage_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.usage_input(a);
+        }
+        if self.term_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
+            return self.terminal_input(a);
         }
         let cfg = self.cfg.clone();
         let grid = cfg.view == ViewMode::Grid;
@@ -1594,6 +1671,9 @@ impl App {
                     if it.usage {
                         return self.open_usage(None);
                     }
+                    if it.term {
+                        return self.open_terminal(None);
+                    }
                     // A drive not mounted yet: mount it, then open it.
                     if let Some(d) = it.drive.as_ref().filter(|d| d.mount.is_none()) {
                         return self.drive_op(d.clone(), crate::drives::Op::Mount);
@@ -1602,6 +1682,9 @@ impl App {
                     // A place replaces the disk usage page (kept for later).
                     if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
                         u.shown = false;
+                    }
+                    if let Some(t) = self.tabs[self.tab].term.as_deref_mut() {
+                        t.shown = false;
                     }
                     self.pane_mut().navigate(it.loc, None, &cfg);
                     self.focus = Focus::Panes;
@@ -1672,6 +1755,8 @@ impl App {
             },
             Overlay::Settings(_) => self.settings_input(a),
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
+            Overlay::TermKeys(_) => self.term_keys_input(a),
+            Overlay::TermSettings(_) => self.term_settings_input(a),
             Overlay::Compress(d) => match a {
                 Action::Up => d.move_row(-1),
                 Action::Down => d.move_row(1),
@@ -1778,6 +1863,9 @@ impl App {
         }
         if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace) {
             return self.viewer_osk(k.purpose, raw);
+        }
+        if matches!(k.purpose, OskPurpose::TermRun | OskPurpose::TermType | OskPurpose::TermSave) {
+            return self.term_osk(k.purpose, raw);
         }
         if text.is_empty() {
             return;
@@ -1923,7 +2011,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermRun | OskPurpose::TermType | OskPurpose::TermSave => unreachable!(),
         }
     }
 
@@ -1939,6 +2027,7 @@ impl App {
             return;
         }
         match &p.loc {
+            Location::Steam(_) => {}
             Location::Local(_) | Location::Search { .. } => {
                 let path = p.entry_path(&e).expect("local entry");
                 if vfs::is_archive_name(&e.name) {
@@ -2200,6 +2289,7 @@ impl App {
         if one_dir_local {
             let path = p.entry_path(&targets[0]).unwrap();
             add(tr("Disk usage"), Cmd::UsageOpen(Some(path.clone())), true);
+            add(tr("Open in terminal"), Cmd::TermOpen(Some(path.clone())), true);
             if pinned {
                 add(tr("Unpin from sidebar"), Cmd::Unpin(path), true);
             } else {
@@ -2294,6 +2384,7 @@ impl App {
             MenuItem { enabled: self.clip.is_some() && writable, ..item(tr("Paste"), Cmd::Paste) },
             item(tr("Filter…"), Cmd::Filter),
             MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
+            MenuItem { enabled: local, ..item(tr("Open terminal here"), Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
             item(tr("Go to path…"), Cmd::GoTo),
             item(tr("Select all"), Cmd::SelectAll),
             item(tr("View"), Cmd::Submenu(SubMenu::View)),
@@ -2308,6 +2399,7 @@ impl App {
     fn build_submenu(&self, kind: SubMenu) -> Menu {
         let c = &self.cfg;
         let (title, items) = match kind {
+            SubMenu::TermHistory | SubMenu::TermSaved | SubMenu::TermLaunch | SubMenu::TermTabs | SubMenu::TermEntry(..) => return self.term_submenu(kind),
             SubMenu::View => (
                 tr("View").to_string(),
                 vec![
@@ -2926,6 +3018,30 @@ impl App {
             | Cmd::UsageRescan
             | Cmd::UsageStart
             | Cmd::UsageClose => self.usage_cmd(cmd),
+            Cmd::TermOpen(_)
+            | Cmd::TermNew
+            | Cmd::TermCloseTab(_)
+            | Cmd::TermSwitch(_)
+            | Cmd::TermHide
+            | Cmd::TermClose
+            | Cmd::TermRun(_)
+            | Cmd::TermType(_)
+            | Cmd::TermEdit(_)
+            | Cmd::TermRunAsk
+            | Cmd::TermTypeAsk
+            | Cmd::TermSaveAsk
+            | Cmd::TermSave(_)
+            | Cmd::TermForget(_)
+            | Cmd::TermInterrupt
+            | Cmd::TermClear
+            | Cmd::TermSelect
+            | Cmd::TermCopy
+            | Cmd::TermPaste
+            | Cmd::TermShowFolder
+            | Cmd::TermKeys
+            | Cmd::TermHistoryMenu
+            | Cmd::TermSavedMenu
+            | Cmd::TermSettings => self.terminal_cmd(cmd),
             Cmd::AudioToggle | Cmd::AudioNext | Cmd::AudioPrev | Cmd::AudioPlay(_) | Cmd::AudioRepeat | Cmd::AudioVolume(_) | Cmd::AudioSeek(_) => {
                 self.audio_cmd(cmd);
             }
@@ -2987,7 +3103,7 @@ impl App {
             }
             Cmd::OpenInNewTab(loc) => {
                 let other = loc.clone();
-                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None, usage: None });
+                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None, usage: None, term: None });
                 self.tab = self.tabs.len() - 1;
                 self.focus = Focus::Panes;
             }

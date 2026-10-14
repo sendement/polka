@@ -20,6 +20,8 @@ pub enum Location {
     /// Recursive name search under `root`. Entry names are paths relative
     /// to `root`.
     Search { root: PathBuf, query: String, hidden: bool },
+    /// Steam's games or Proton prefixes, by game name.
+    Steam(crate::steam::View),
 }
 
 /// Somewhere files can be put.
@@ -47,6 +49,10 @@ impl Location {
             }
             Location::Archive { archive, inner } => format!("{}/{}", archive.display(), inner),
             Location::Search { root, query, .. } => format!("{} — \u{1F50D} {query}", root.display()),
+            Location::Steam(v) => match v {
+                crate::steam::View::Root => "Steam".to_string(),
+                v => format!("Steam/{}", crate::steam::view_name(*v)),
+            },
         }
     }
 
@@ -62,7 +68,14 @@ impl Location {
                 _ => archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             },
             Location::Search { query, .. } => format!("\u{1F50D} {query}"),
+            Location::Steam(v) => crate::steam::view_name(*v).to_string(),
         };
+        // A game's folder or prefix goes by the game's name.
+        if let Location::Local(p) = self {
+            if let Some((_, name)) = crate::steam::listed_in(p) {
+                return name;
+            }
+        }
         if let (Location::Local(p), Some(home)) = (self, dirs::home_dir()) {
             if *p == home {
                 return "~".into();
@@ -87,6 +100,9 @@ impl Location {
     pub fn parent(&self) -> Option<(Location, String)> {
         match self {
             Location::Local(p) => {
+                if let Some(up) = crate::steam::parent_of(p) {
+                    return Some(up);
+                }
                 let name = p.file_name()?.to_string_lossy().into_owned();
                 Some((Location::Local(p.parent()?.to_path_buf()), name))
             }
@@ -102,6 +118,8 @@ impl Location {
                 Some((Location::Archive { archive: archive.clone(), inner: parent }, name))
             }
             Location::Search { root, .. } => Some((Location::Local(root.clone()), String::new())),
+            Location::Steam(crate::steam::View::Root) => None,
+            Location::Steam(v) => Some((Location::Steam(crate::steam::View::Root), crate::steam::view_name(*v).to_string())),
         }
     }
 
@@ -113,6 +131,8 @@ impl Location {
                 inner: if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") },
             },
             Location::Search { root, .. } => Location::Local(root.join(name)),
+            Location::Steam(crate::steam::View::Root) => Location::Steam(crate::steam::root_child(name).unwrap_or(crate::steam::View::Root)),
+            Location::Steam(v) => Location::Local(crate::steam::resolve(*v, name).unwrap_or_default()),
         }
     }
 
@@ -130,6 +150,8 @@ impl Location {
             Location::Local(p) => Some(p.join(name)),
             Location::Search { root, .. } => Some(root.join(name)),
             Location::Archive { .. } => None,
+            Location::Steam(crate::steam::View::Root) => None,
+            Location::Steam(v) => crate::steam::resolve(*v, name),
         }
     }
 
@@ -143,7 +165,7 @@ impl Location {
                 (crate::archive_rw::writable_name(&name) && !archive.starts_with(temp_root()))
                     .then(|| Dest::Archive { archive: archive.clone(), inner: inner.clone() })
             }
-            Location::Search { .. } => None,
+            Location::Search { .. } | Location::Steam(_) => None,
         }
     }
 
@@ -224,6 +246,7 @@ pub fn list(loc: &Location) -> std::io::Result<Vec<Entry>> {
             Ok(idx.dirs.get(inner).cloned().unwrap_or_default())
         }
         Location::Search { root, query, hidden } => Ok(search(root, query, *hidden)),
+        Location::Steam(v) => crate::steam::list(*v),
     }
 }
 

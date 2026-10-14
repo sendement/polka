@@ -427,7 +427,7 @@ fn transfer(sources: &[Location], dest: &Dest, mv: bool, policy: Conflict, job: 
         total += match s {
             Location::Local(p) => tree_size(p),
             Location::Archive { archive, inner } => archive_subtree_size(archive, inner),
-            Location::Search { .. } => 0,
+            Location::Search { .. } | Location::Steam(_) => 0,
         };
     }
     job.total.store(total, Ordering::Relaxed);
@@ -475,7 +475,7 @@ fn transfer_to_dir(sources: &[Location], dest: &Path, mv: bool, policy: Conflict
                     moved_out.entry(archive.clone()).or_default().push(inner.clone());
                 }
             }
-            Location::Search { .. } => {}
+            Location::Search { .. } | Location::Steam(_) => {}
         }
     }
     for (archive, remove) in moved_out {
@@ -524,7 +524,7 @@ fn transfer_to_archive(
                 Location::Archive { archive: a, inner } => {
                     vfs::archive_index(a)?.dirs.contains_key(&vfs::normalize_inner(inner))
                 }
-                Location::Search { .. } => false,
+                Location::Search { .. } | Location::Steam(_) => false,
             };
             // Replacing a folder with a file (or back) drops the old subtree.
             if existing.get(&target).is_some_and(|d| *d != src_is_dir) {
@@ -557,7 +557,7 @@ fn transfer_to_archive(
                         local_moves.push(p.clone());
                     }
                 }
-                Location::Search { .. } => {}
+                Location::Search { .. } | Location::Steam(_) => {}
             }
         }
         job.total.store(archive_rw::estimate(archive, &plan), Ordering::Relaxed);

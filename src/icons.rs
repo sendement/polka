@@ -155,6 +155,10 @@ impl Icons {
     /// enables per-file icons.
     pub fn for_entry(&mut self, e: &Entry, path: Option<&Path>, size: u16) -> Option<String> {
         if e.is_dir {
+            // A Steam game or prefix wears the game's icon.
+            if let Some(img) = path.and_then(crate::steam::icon) {
+                return Some(uri(&img));
+            }
             let special = path.and_then(special_folder_icon);
             let mut c: Vec<&str> = special.into_iter().collect();
             c.extend(["folder", "inode-directory"]);

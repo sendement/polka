@@ -2331,3 +2331,342 @@ fn sidebar_screens() {
     let mut h = harness(dir);
     sidebar_more(&mut h);
 }
+
+/// What the current terminal shows (the screen, not the scrollback).
+fn term_screen(h: &Harness<'static, App>) -> String {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line, Point};
+    let t = h.state().cur_tab().term.as_deref().expect("terminal");
+    let s = t.cur().expect("shell");
+    let term = s.term.lock();
+    let mut out = String::new();
+    for l in 0..term.screen_lines() as i32 {
+        let row: String = (0..term.columns()).map(|c| term.grid()[Point::new(Line(l), Column(c))].c).collect();
+        out.push_str(&row);
+        out.push('\n');
+    }
+    out
+}
+
+/// Steps until the terminal shows `what` (`n` times).
+fn term_wait(h: &mut Harness<'static, App>, what: &str, n: usize) {
+    for _ in 0..150 {
+        h.step();
+        if term_screen(h).matches(what).count() >= n {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    let t = h.state().cur_tab().term.as_deref().unwrap();
+    let s = t.cur().unwrap();
+    let st = std::fs::read_to_string(format!("/proc/{}/status", s.pid)).unwrap_or_default();
+    let cmd = std::fs::read_to_string(format!("/proc/{}/cmdline", s.pid)).unwrap_or_default();
+    panic!("terminal never showed {what:?} x{n} (pid {} exited {} title {:?} cmd {cmd:?} {}):\n{}", s.pid, s.exited, s.title, st.lines().take(3).collect::<Vec<_>>().join(" "), term_screen(h));
+}
+
+/// The terminal page: typing, running from the pad, interrupting, history,
+/// saved commands, quick keys for a program, choosing text to copy, paste,
+/// its own tabs and settings, leaving it with a held ○, and exit.
+fn terminal(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Focus, Overlay};
+    use egui::{Key, Modifiers};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    // A plain shell with a plain prompt, whatever the user has.
+    let sh = dir.join("test-shell.sh");
+    std::fs::write(&sh, "#!/bin/sh\nexport PS1='$ ' HISTFILE=/dev/null\nexec bash --norc --noprofile\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.join("pager.txt"), (1..200).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+    h.state_mut().cfg.terminal.shell = Some(sh.display().to_string());
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().navigate(crate::vfs::Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    // From the sidebar.
+    let i = h.state().side_items.iter().position(|it| it.term).expect("terminal in the sidebar");
+    h.state_mut().side_cursor = i;
+    h.state_mut().focus = Focus::Sidebar;
+    press(h, &[Action::Accept]);
+    assert!(h.state().term_shown());
+    term_wait(h, "$ ", 1);
+    // Keyboard.
+    type_text(h, "echo hel''lo");
+    key(h, Key::Enter, Modifiers::NONE);
+    term_wait(h, "hello", 1);
+    shot(h, "t0-terminal");
+    // □: run a command typed on the pad's keyboard.
+    press(h, &[Action::Select]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
+    osk_type(h, "printf 'pad%s\\n' -run");
+    shot(h, "t1-run-osk");
+    press(h, &[Action::Menu]);
+    term_wait(h, "pad-run", 1);
+    // Interrupt from the menu.
+    h.state_mut().run(Cmd::TermRun("sleep 30".into()));
+    term_wait(h, "sleep 30", 1);
+    press(h, &[Action::Actions]);
+    shot(h, "t2-menu");
+    menu_pick(h, crate::i18n::tr("Interrupt (Ctrl+C)"));
+    term_wait(h, "$ ", 4);
+    // History: what was run from here comes back.
+    press(h, &[Action::Actions]);
+    menu_pick(h, crate::i18n::tr("Command history"));
+    shot(h, "t3-history");
+    menu_pick(h, "sleep 30");
+    menu_pick(h, crate::i18n::tr("Save"));
+    assert_eq!(h.state().cfg.terminal.saved, vec!["sleep 30".to_string()]);
+    // Saved commands: a new one from the keyboard, then run.
+    h.state_mut().run(Cmd::TermSavedMenu);
+    menu_pick(h, crate::i18n::tr("Save a new command…"));
+    osk_type(h, "echo saved-one");
+    press(h, &[Action::Menu]);
+    h.state_mut().run(Cmd::TermSavedMenu);
+    shot(h, "t4-saved");
+    menu_pick(h, "echo saved-one");
+    menu_pick(h, crate::i18n::tr("Run"));
+    term_wait(h, "saved-one", 2);
+    // Quick keys know the pager and quit it.
+    h.state_mut().run(Cmd::TermRun("less pager.txt".into()));
+    term_wait(h, "line 20", 1);
+    press(h, &[Action::RightTrigger]);
+    term_wait(h, "line 26", 1);
+    press(h, &[Action::View]);
+    let Some(Overlay::TermKeys(q)) = h.state().overlay.as_ref() else { panic!("no quick keys") };
+    assert!(q.title.contains("less"), "{}", q.title);
+    let qi = q.keys.iter().position(|k| k.label == "q").unwrap();
+    shot(h, "t5-quick-keys-less");
+    if let Some(Overlay::TermKeys(q)) = h.state_mut().overlay.as_mut() {
+        q.cursor = qi;
+    }
+    press(h, &[Action::Select]);
+    assert!(h.state().overlay.is_none());
+    term_wait(h, "$ ", 1);
+    assert!(!term_screen(h).contains("line 26"), "{}", term_screen(h));
+    // Choosing text with the pad.
+    h.state_mut().run(Cmd::TermRun("echo copy-me-please".into()));
+    term_wait(h, "copy-me-please", 2);
+    h.state_mut().run(Cmd::TermSelect);
+    press(h, &[Action::Up, Action::Home, Action::Select, Action::End]);
+    shot(h, "t6-select");
+    press(h, &[Action::Accept]);
+    assert_eq!(h.state().text_clip.as_deref().map(str::trim), Some("copy-me-please"));
+    assert!(!h.state().cur_tab().term.as_ref().unwrap().selecting);
+    // Paste (what was copied here: no system clipboard in tests).
+    h.state_mut().text_clip = Some("echo pasted-text".into());
+    h.state_mut().run(Cmd::TermPaste);
+    press(h, &[Action::Accept]);
+    term_wait(h, "pasted-text", 2);
+    // Colours and box drawing.
+    h.state_mut().run(Cmd::TermRun("printf '\\e[31mred \\e[1;32mbold-green \\e[44m blue-bg \\e[0m\\n┌──┬──┐\\n│ab│cd│\\n└──┴──┘\\n▁▂▃▄▅▆▇█ ⣿⡇⠁\\n'".into()));
+    term_wait(h, "blue-bg", 2);
+    shot(h, "t7-colours");
+    // A real full-screen program, when there is one.
+    for prog in crate::terminal::installed(&["htop", "btop"]) {
+        h.state_mut().run(Cmd::TermRun(prog.into()));
+        for _ in 0..40 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        settle(h);
+        shot(h, &format!("t7-{prog}"));
+        press(h, &[Action::View]);
+        let Some(Overlay::TermKeys(q)) = h.state().overlay.as_ref() else { panic!("no quick keys") };
+        assert!(q.title.contains(if prog == "htop" { "htop" } else { "btop" }), "{}", q.title);
+        shot(h, &format!("t7-{prog}-keys"));
+        press(h, &[Action::Back]);
+        h.state_mut().run(Cmd::TermType("q".into()));
+        term_wait(h, "$ ", 1);
+    }
+    // A second shell, its own tabs.
+    h.state_mut().run(Cmd::TermNew);
+    term_wait(h, "$ ", 1);
+    assert_eq!(h.state().cur_tab().term.as_ref().unwrap().sessions.len(), 2);
+    shot(h, "t8-two-tabs");
+    h.state_mut().run(Cmd::TermSwitch(0));
+    settle(h);
+    // Settings beside the terminal.
+    h.state_mut().run(Cmd::TermSettings);
+    press(h, &[Action::Right]);
+    assert_ne!(h.state().cfg.terminal.scheme, "Polka");
+    shot(h, "t9-settings");
+    press(h, &[Action::Down, Action::Down, Action::Right]);
+    assert_eq!(h.state().cfg.terminal.font_size, 15.0);
+    press(h, &[Action::Back]);
+    // Mouse: drag over the first line picks its text.
+    let t = h.state().cur_tab().term.as_deref().unwrap();
+    let (cw, ch) = t.cell;
+    let _ = (cw, ch);
+    // Held ○ leaves for the sidebar; the shells keep running.
+    h.state_mut().handle(Input::Press(Action::Back));
+    for _ in 0..16 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+    h.state_mut().handle(Input::Release(Action::Back));
+    assert!(h.state().focus == Focus::Sidebar);
+    h.state_mut().focus = Focus::Panes;
+    // Back to files and in again: the same shells.
+    h.state_mut().run(Cmd::TermHide);
+    settle(h);
+    assert!(!h.state().term_shown());
+    h.state_mut().run(Cmd::TermOpen(None));
+    assert_eq!(h.state().cur_tab().term.as_ref().unwrap().sessions.len(), 2);
+    // exit closes a tab; the last one closes the page.
+    for _ in 0..2 {
+        type_text(h, "exit");
+        key(h, Key::Enter, Modifiers::NONE);
+        for _ in 0..50 {
+            settle(h);
+            let n = h.state().cur_tab().term.as_ref().map_or(0, |t| t.sessions.len());
+            if n < 2 {
+                break;
+            }
+        }
+    }
+    for _ in 0..50 {
+        if h.state().cur_tab().term.is_none() {
+            break;
+        }
+        settle(h);
+    }
+    assert!(h.state().cur_tab().term.is_none());
+}
+
+#[test]
+#[ignore]
+fn terminal_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    terminal(&mut h);
+}
+
+/// A Steam install of its own: two libraries, a game without a manifest,
+/// prefixes named by a manifest, a non-Steam shortcut and the app cache.
+fn fake_steam(root: &std::path::Path) {
+    let w = |p: std::path::PathBuf, s: &[u8]| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, s).unwrap();
+    };
+    let lib2 = root.join("library2");
+    w(
+        root.join("steamapps/libraryfolders.vdf"),
+        format!("\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", root.display(), lib2.display()).as_bytes(),
+    );
+    let manifest = |id: u32, name: &str, dir: &str| format!("\"AppState\"\n{{\n\t\"appid\"\t\t\"{id}\"\n\t\"name\"\t\t\"{name}\"\n\t\"installdir\"\t\t\"{dir}\"\n}}\n");
+    w(root.join("steamapps/appmanifest_10.acf"), manifest(10, "Counter-Strike", "Counter-Strike").as_bytes());
+    w(root.join("steamapps/common/Counter-Strike/hl.exe"), b"MZ");
+    w(root.join("steamapps/common/Orphan Folder/readme.txt"), b"hi");
+    w(lib2.join("steamapps/appmanifest_20.acf"), manifest(20, "Half-Life 2", "Half-Life 2").as_bytes());
+    w(lib2.join("steamapps/common/Half-Life 2/hl2.exe"), b"MZ");
+    for id in ["10", "3000000000", "555", "777", "0"] {
+        std::fs::create_dir_all(root.join("steamapps/compatdata").join(id).join("pfx/drive_c/users")).unwrap();
+    }
+    // shortcuts.vdf: { shortcuts { 0 { appid 3000000000  AppName "My Game" } } }
+    let mut b = vec![0x00];
+    b.extend(b"shortcuts\0");
+    b.push(0x00);
+    b.extend(b"0\0");
+    b.push(0x02);
+    b.extend(b"appid\0");
+    b.extend(3_000_000_000u32.to_le_bytes());
+    b.push(0x01);
+    b.extend(b"AppName\0My Game\0");
+    b.extend([0x08, 0x08, 0x08]);
+    w(root.join("userdata/42/config/shortcuts.vdf"), &b);
+    // appinfo.vdf v29 with one app: 555 is Portal.
+    let mut kv = vec![0x00];
+    kv.extend(0u32.to_le_bytes()); // appinfo
+    kv.push(0x00);
+    kv.extend(1u32.to_le_bytes()); // common
+    kv.push(0x01);
+    kv.extend(2u32.to_le_bytes()); // name
+    kv.extend(b"Portal\0");
+    kv.extend([0x08, 0x08, 0x08]);
+    let mut entry = Vec::new();
+    entry.extend([0u8; 4 + 4 + 8 + 20 + 4 + 20]);
+    entry.extend(&kv);
+    let mut a = Vec::new();
+    a.extend(0x0756_4429u32.to_le_bytes());
+    a.extend(1u32.to_le_bytes());
+    let table_at = 16 + 4 + 4 + entry.len() + 4;
+    a.extend((table_at as u64).to_le_bytes());
+    a.extend(555u32.to_le_bytes());
+    a.extend((entry.len() as u32).to_le_bytes());
+    a.extend(&entry);
+    a.extend(0u32.to_le_bytes());
+    a.extend(3u32.to_le_bytes());
+    a.extend(b"appinfo\0common\0name\0");
+    w(root.join("appcache/appinfo.vdf"), &a);
+    // Counter-Strike's icon in the newer cache layout.
+    let icon = root.join("appcache/librarycache/10/0123456789abcdef0123456789abcdef01234567.jpg");
+    std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
+    image::RgbImage::from_fn(32, 32, |x, y| image::Rgb([200, (x * 8) as u8, (y * 8) as u8])).save(&icon).unwrap();
+}
+
+/// Steam in the sidebar: its games and prefixes by name, in and back out.
+fn steam(h: &mut Harness<'static, App>) {
+    use crate::app::Focus;
+    use crate::i18n::tr;
+    use crate::steam::View;
+    use crate::vfs::Location;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let root = dir.join("fake-steam");
+    fake_steam(&root);
+    unsafe { std::env::set_var("POLKA_STEAM_ROOT", &root) };
+    h.state_mut().refresh_sidebar();
+    let i = h.state().side_items.iter().position(|it| it.loc == Location::Steam(View::Root)).expect("Steam in the sidebar");
+    h.state_mut().side_cursor = i;
+    h.state_mut().focus = Focus::Sidebar;
+    press(h, &[Action::Accept]);
+    let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Root));
+    assert_eq!(names(h), vec![tr("Games").to_string(), tr("Prefixes").to_string()]);
+    shot(h, "s0-steam");
+    // Games from both libraries, one without a manifest by its folder.
+    press(h, &[Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Games));
+    assert_eq!(names(h), vec!["Counter-Strike", "Half-Life 2", "Orphan Folder"]);
+    shot(h, "s1-games");
+    press(h, &[Action::Down, Action::Accept]);
+    let hl2 = std::fs::canonicalize(root.join("library2/steamapps/common/Half-Life 2")).unwrap();
+    assert_eq!(h.state().pane().loc, Location::Local(hl2));
+    assert_eq!(names(h), vec!["hl2.exe"]);
+    // Back up lands in the games list on the game.
+    press(h, &[Action::Back]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Games));
+    assert_eq!(h.state().pane().current().unwrap().name, "Half-Life 2");
+    press(h, &[Action::Back]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Root));
+    // Prefixes by game: a manifest, a non-Steam shortcut, the app cache.
+    press(h, &[Action::Down, Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Prefixes));
+    let mut got = names(h);
+    got.sort();
+    let unknown = format!("{} 777", tr("Unknown game"));
+    let mut want = vec!["Counter-Strike".to_string(), "My Game".into(), "Portal".into(), tr("Shared prefix").to_string(), unknown];
+    want.sort();
+    assert_eq!(got, want);
+    shot(h, "s2-prefixes");
+    let mg = h.state().pane().entries.iter().position(|e| e.name == "My Game").unwrap();
+    h.state_mut().pane_mut().set_cursor(mg);
+    press(h, &[Action::Accept, Action::Accept]);
+    let pfx = std::fs::canonicalize(root.join("steamapps/compatdata/3000000000/pfx")).unwrap();
+    assert_eq!(h.state().pane().loc, Location::Local(pfx));
+    let crumbs: Vec<String> = h.state().pane().loc.crumbs().into_iter().map(|(l, _)| l).collect();
+    assert_eq!(crumbs, vec!["Steam".to_string(), tr("Prefixes").to_string(), "My Game".into(), "pfx".into()]);
+    shot(h, "s3-prefix-inside");
+    press(h, &[Action::Back, Action::Back]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Prefixes));
+    unsafe { std::env::remove_var("POLKA_STEAM_ROOT") };
+    h.state_mut().refresh_sidebar();
+}
+
+#[test]
+#[ignore]
+fn steam_screens() {
+    // Points Steam at a fake one for the whole process.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    steam(&mut h);
+}

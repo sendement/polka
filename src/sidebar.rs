@@ -13,7 +13,10 @@ impl App {
     pub fn side_menu(&mut self, it: SideItem) {
         let i = self.side_cursor;
         let mut items: Vec<MenuItem> = Vec::new();
-        let real = it.drive.as_ref().is_none_or(|d| d.mount.is_some());
+        let real = it.drive.as_ref().is_none_or(|d| d.mount.is_some()) && !it.term;
+        if it.term {
+            items.push(item(tr("New terminal tab"), Cmd::TermNew));
+        }
         if let Some(d) = &it.drive {
             if d.mount.is_none() {
                 items.push(item(tr("Mount"), Cmd::DriveMount(i)));
@@ -34,9 +37,11 @@ impl App {
             items.push(MenuItem { enabled: crate::trashbin::count() > 0, ..item(tr("Empty trash…"), Cmd::EmptyTrashAsk) });
         }
         // Any entry can wear its own icon; drives keep theirs by UUID.
-        let key = match &it.drive {
-            Some(d) => Some(PathBuf::from(d.key())),
-            None => it.loc.local_path().map(|p| p.to_path_buf()),
+        let key = match (&it.drive, &it.loc) {
+            (Some(d), _) => Some(PathBuf::from(d.key())),
+            (None, _) if it.term => Some(PathBuf::from("polka:terminal")),
+            (None, Location::Steam(_)) => Some(PathBuf::from("polka:steam")),
+            (None, loc) => loc.local_path().map(|p| p.to_path_buf()),
         };
         if let Some(k) = key {
             items.push(item(tr("Choose icon…"), Cmd::ChooseIcon(k)));

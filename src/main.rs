@@ -14,6 +14,8 @@ mod mouse;
 mod ops;
 mod sandbox;
 mod sidebar;
+mod steam;
+mod terminal;
 mod thumbs;
 mod trashbin;
 mod usage;

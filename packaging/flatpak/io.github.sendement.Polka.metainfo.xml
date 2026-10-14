@@ -19,6 +19,8 @@
       <li>Built-in viewer and editor for text with syntax highlighting, Markdown, pictures, music and video</li>
       <li>Disk usage as rings, tiles or a list</li>
       <li>Drives: mount, unmount and eject from the sidebar</li>
+      <li>A terminal with its own tabs, quick keys for terminal programs, command history and saved commands — all from the pad</li>
+      <li>Steam games and Proton prefixes listed by game name</li>
       <li>Icon themes, accent colors, light and dark looks, nine languages</li>
     </ul>
   </description>
@@ -36,6 +38,7 @@
   </supports>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.19.0" date="2026-10-14"/>
     <release version="0.18.0" date="2026-10-14"/>
   </releases>
 </component>

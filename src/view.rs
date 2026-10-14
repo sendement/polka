@@ -118,6 +118,9 @@ impl App {
         if self.overlay.is_none() && self.focus == Focus::Panes && self.video_shown() {
             events = self.video_keyboard(events);
         }
+        if self.overlay.is_none() && self.focus == Focus::Panes && self.term_shown() {
+            events = self.terminal_keyboard(events);
+        }
         for ev in events {
             match ev {
                 egui::Event::Text(t) if osk => {
@@ -392,7 +395,11 @@ impl App {
             .map(|t| {
                 let p = &t.panes[if dual { t.active } else { 0 }];
                 let usage = t.usage.as_ref().is_some_and(|u| u.shown);
-                let title = t.viewer.as_ref().map_or_else(|| if usage { tr("Disk usage").to_string() } else { p.loc.title() }, |v| v.name.clone());
+                let term = t.term.as_ref().is_some_and(|u| u.shown);
+                let title = t.viewer.as_ref().map_or_else(
+                    || if term { tr("Terminal").to_string() } else if usage { tr("Disk usage").to_string() } else { p.loc.title() },
+                    |v| v.name.clone(),
+                );
                 elided(ui, &title, FontId::proportional(14.0), v.text_color(), 180.0, 1)
             })
             .collect();
@@ -661,6 +668,7 @@ impl App {
                 (Action::Back, tr("Close")),
             ],
             None if self.usage_shown() && self.focus == Focus::Panes => self.usage_hints(),
+            None if self.term_shown() && self.focus == Focus::Panes => self.terminal_hints(),
             None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -682,6 +690,7 @@ impl App {
         let focused = self.focus == Focus::Sidebar && self.overlay.is_none();
         let cur_loc = self.pane().loc.clone();
         let usage_here = self.usage_shown();
+        let term_here = self.term_shown();
         let dragging = self.drag.is_some();
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let released = ui.input(|i| i.pointer.primary_released());
@@ -709,15 +718,21 @@ impl App {
                         }
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
                         let is_cursor = focused && i == self.side_cursor;
-                        let here = if it.usage { usage_here } else { it.loc == cur_loc && !usage_here };
+                        let here = if it.usage {
+                            usage_here
+                        } else if it.term {
+                            term_here
+                        } else {
+                            it.loc == cur_loc && !usage_here && !term_here
+                        };
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
-                        if dragging && !it.usage && pointer.is_some_and(|p| rect.contains(p)) {
+                        if dragging && !it.usage && !it.term && pointer.is_some_and(|p| rect.contains(p)) {
                             ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
                             if released {
                                 dropped = Some(i);
                             }
                         }
-                        let under = dragging && !it.usage && pointer.is_some_and(|p| rect.contains(p));
+                        let under = dragging && !it.usage && !it.term && pointer.is_some_and(|p| rect.contains(p));
                         let grow = 1.0 + 0.15 * ui.ctx().animate_bool_with_time(ui.id().with(("side-grow", i)), under, 0.12);
                         let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon * grow));
                         let px = lookup_px(ui, side_icon);
@@ -774,6 +789,7 @@ impl App {
         let mut tab_act = None;
         let mut viewer_act = None;
         let mut usage_act = None;
+        let mut term_act = None;
         let full = self.video_full();
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -788,6 +804,11 @@ impl App {
             }
             if let Some(u) = self.tabs[tab].usage.as_deref_mut().filter(|u| u.shown) {
                 usage_act = crate::usage::draw::draw(ui, u, &mut self.icons);
+                return;
+            }
+            if let Some(t) = self.tabs[tab].term.as_deref_mut().filter(|t| t.shown) {
+                let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, ui.visuals().dark_mode);
+                term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused);
                 return;
             }
             let dragging = self.drag.is_some();
@@ -837,7 +858,10 @@ impl App {
         if let Some(a) = usage_act {
             self.usage_act(a);
         }
-        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown);
+        if let Some(a) = term_act {
+            self.terminal_act(a);
+        }
+        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].term.as_ref().is_some_and(|u| u.shown);
         let divider = if self.tabs[tab].viewer.is_some() || usage { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
@@ -940,7 +964,8 @@ impl App {
         let screen = ctx.content_rect();
         let mut close = false;
         // Viewer settings sit beside the file so changes show live.
-        let side = matches!(self.overlay, Some(Overlay::ViewerSettings(_)));
+        let side = matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
+        let bottom = matches!(self.overlay, Some(Overlay::TermKeys(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side { 0 } else { 140 }));
@@ -958,8 +983,17 @@ impl App {
         let mut settings_ev: Option<SettingsEvent> = None;
         let mut compress_ev: Option<(usize, isize)> = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
+        let mut term_set_ev: Option<(usize, isize)> = None;
+        let mut qkey_ev: Option<(usize, bool)> = None;
+        let dark = ctx.global_style().visuals.dark_mode;
         let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
-        let (anchor, offset) = if side { (Align2::RIGHT_TOP, vec2(-16.0, 110.0)) } else { (Align2::CENTER_CENTER, vec2(0.0, 0.0)) };
+        let (anchor, offset) = if bottom {
+            (Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
+        } else if side {
+            (Align2::RIGHT_TOP, vec2(-16.0, 110.0))
+        } else {
+            (Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        };
         let vprefs = self.cfg.viewer.clone();
         // One area per kind of overlay: an area keeps its last size, and a
         // small menu's would squeeze the settings' scroll area after it.
@@ -982,6 +1016,8 @@ impl App {
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
                     Some(Overlay::ViewerSettings(st)) => viewer_ev = crate::viewer::draw::draw_settings(ui, st, &vprefs),
+                    Some(Overlay::TermKeys(q)) => qkey_ev = crate::terminal::draw::draw_keys(ui, q, pad),
+                    Some(Overlay::TermSettings(st)) => term_set_ev = crate::terminal::draw::draw_settings(ui, st, &cfg.terminal, vprefs.font.as_deref(), dark),
                     None => {}
                 });
             });
@@ -1003,6 +1039,12 @@ impl App {
         }
         if let Some((row, d)) = viewer_ev {
             self.viewer_step(row, d);
+        }
+        if let Some((row, d)) = term_set_ev {
+            self.term_settings_step(row, d);
+        }
+        if let Some((i, close)) = qkey_ev {
+            self.quick_key(i, close);
         }
         if let Some((row, d)) = compress_ev {
             if d == 0 {
@@ -1545,44 +1587,57 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
     ui.set_min_width(300.0);
     ui.label(egui::RichText::new(&m.title).strong().size(16.0));
     ui.add_space(6.0);
-    ui.spacing_mut().item_spacing.y = 2.0;
-    // Line labels up when some items have checkboxes and others don't.
-    let has_checks = m.items.iter().any(|i| i.checked.is_some());
-    for (i, it) in m.items.iter().enumerate() {
-        let (rect, r) = ui.allocate_exact_size(vec2(300.0, 34.0), if it.enabled { Sense::click() } else { Sense::hover() });
-        if r.hovered() && it.enabled && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
-            m.cursor = i;
-        }
-        let cur = i == m.cursor;
-        if cur {
-            let a = ui.visuals().selection.bg_fill;
-            if focused {
-                ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.55));
-                ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, a), StrokeKind::Inside);
-            } else {
-                ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.3));
+    // Long lists (shell history) scroll, following the cursor.
+    let max_h = (ui.ctx().content_rect().height() - 140.0).max(200.0);
+    let follow = m.shown != Some(m.cursor);
+    m.shown = Some(m.cursor);
+    egui::ScrollArea::vertical().id_salt(("menu-scroll", m.title.clone())).max_height(max_h).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        // Line labels up when some items have checkboxes and others don't.
+        let has_checks = m.items.iter().any(|i| i.checked.is_some());
+        for (i, it) in m.items.iter().enumerate() {
+            let (rect, r) = ui.allocate_exact_size(vec2(300.0, 34.0), if it.enabled { Sense::click() } else { Sense::hover() });
+            if r.hovered() && it.enabled && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
+                m.cursor = i;
+                m.shown = Some(i);
+            }
+            let cur = i == m.cursor;
+            if cur && follow {
+                ui.scroll_to_rect(rect, None);
+            }
+            if cur {
+                let a = ui.visuals().selection.bg_fill;
+                if focused {
+                    ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.55));
+                    ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, a), StrokeKind::Inside);
+                } else {
+                    ui.painter().rect_filled(rect, 6.0, a.gamma_multiply(0.3));
+                }
+            }
+            let color = if it.enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color().gamma_multiply(0.6) };
+            let mut x = rect.min.x + 12.0;
+            if let Some(on) = it.checked {
+                let b = Rect::from_center_size(pos2(x + 7.0, rect.center().y), Vec2::splat(14.0));
+                ui.painter().rect_stroke(b, 3.0, Stroke::new(1.5, color), StrokeKind::Inside);
+                if on {
+                    ui.painter().rect_filled(b.shrink(3.5), 2.0, ui.visuals().selection.bg_fill.gamma_multiply(1.6));
+                }
+            }
+            if has_checks {
+                x += 24.0;
+            }
+            let sub = matches!(it.cmd, Cmd::Submenu(_));
+            // Long labels (commands) are cut short.
+            let g = elided_text(ui, &it.label, FontId::proportional(15.0), color, rect.max.x - x - if sub { 28.0 } else { 10.0 });
+            ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+            if sub {
+                ui.painter().text(pos2(rect.max.x - 12.0, rect.center().y), Align2::RIGHT_CENTER, "›", FontId::proportional(18.0), color);
+            }
+            if r.clicked() && it.enabled {
+                click = Some(i);
             }
         }
-        let color = if it.enabled { ui.visuals().text_color() } else { ui.visuals().weak_text_color().gamma_multiply(0.6) };
-        let mut x = rect.min.x + 12.0;
-        if let Some(on) = it.checked {
-            let b = Rect::from_center_size(pos2(x + 7.0, rect.center().y), Vec2::splat(14.0));
-            ui.painter().rect_stroke(b, 3.0, Stroke::new(1.5, color), StrokeKind::Inside);
-            if on {
-                ui.painter().rect_filled(b.shrink(3.5), 2.0, ui.visuals().selection.bg_fill.gamma_multiply(1.6));
-            }
-        }
-        if has_checks {
-            x += 24.0;
-        }
-        ui.painter().text(pos2(x, rect.center().y), Align2::LEFT_CENTER, &it.label, FontId::proportional(15.0), color);
-        if matches!(it.cmd, Cmd::Submenu(_)) {
-            ui.painter().text(pos2(rect.max.x - 12.0, rect.center().y), Align2::RIGHT_CENTER, "›", FontId::proportional(18.0), color);
-        }
-        if r.clicked() && it.enabled {
-            click = Some(i);
-        }
-    }
+    });
     click
 }
 
@@ -1939,7 +1994,7 @@ pub(crate) fn lookup_px(ui: &Ui, pt: f32) -> u16 {
 }
 
 /// Square toolbar button with a themed icon (text fallback).
-fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&str], fallback: &str, tip: &str, on: bool) -> egui::Response {
+pub(crate) fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&str], fallback: &str, tip: &str, on: bool) -> egui::Response {
     let id = ui.id().with(("tool", names.first().copied().unwrap_or(fallback)));
     let r = ui.interact(rect, id, Sense::click());
     let v = ui.visuals();

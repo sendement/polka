@@ -66,6 +66,34 @@ pub struct Config {
     pub appearance: u8,
     /// Interface language code; None follows the system.
     pub language: Option<String>,
+    pub terminal: TermPrefs,
+}
+
+/// The terminal page.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TermPrefs {
+    /// Colour scheme name ("Polka" follows the app's light or dark).
+    pub scheme: String,
+    pub font_size: f32,
+    /// Full path; None = the user's login shell.
+    pub shell: Option<String>,
+    pub scrollback: usize,
+    /// 0 block, 1 bar, 2 underline.
+    pub cursor: u8,
+    /// Start in the folder shown in the panel (else home).
+    pub here: bool,
+    /// Commands kept for running again.
+    pub saved: Vec<String>,
+}
+
+pub const TERM_FONT: (f32, f32, f32) = (8.0, 32.0, 1.0);
+pub const SCROLLBACK: [usize; 4] = [1000, 5000, 10000, 50000];
+
+impl Default for TermPrefs {
+    fn default() -> Self {
+        Self { scheme: "Polka".into(), font_size: 14.0, shell: None, scrollback: 10000, cursor: 0, here: true, saved: Vec::new() }
+    }
 }
 
 /// Text viewer look.
@@ -161,6 +189,7 @@ impl Default for Config {
             usage_mode: 0,
             appearance: 0,
             language: None,
+            terminal: TermPrefs::default(),
         }
     }
 }
