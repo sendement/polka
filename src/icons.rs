@@ -379,7 +379,8 @@ fn collect_places(dir: &Path, depth: usize, in_places: bool, out: &mut std::coll
             if depth < 3 {
                 collect_places(&p, depth + 1, in_places || name == "places", out);
             }
-        } else if in_places {
+        } else if in_places && p.exists() {
+            // (exists() follows links: a theme's broken ones show nothing.)
             if let Some(stem) = name.strip_suffix(".svg").or_else(|| name.strip_suffix(".png")) {
                 if !stem.ends_with("-symbolic") && !stem.contains("-open") && !stem.contains("drag-accept") {
                     out.insert(stem.to_string());
@@ -631,6 +632,28 @@ mod tests {
             let img = super::extract_pe_icon(std::path::Path::new(p));
             let img = img.unwrap_or_else(|| panic!("no icon in {p}"));
             eprintln!("{p}: {}x{}", img.width(), img.height());
+        }
+    }
+}
+
+#[cfg(test)]
+mod picker_probe {
+    /// `cargo test picker_probe -- --ignored --nocapture`: names the icon
+    /// picker would show blank, per installed theme.
+    #[test]
+    #[ignore]
+    fn blanks() {
+        for t in super::installed_themes() {
+            let mut icons = super::Icons::new(Some(t.id.clone()), || {});
+            let groups = icons.place_icons();
+            let all: Vec<String> = groups.iter().flat_map(|g| g.names.clone()).collect();
+            let missing: Vec<&String> = all.iter().filter(|n| {
+                match icons.named(&[n.as_str()], 64) {
+                    None => true,
+                    Some(u) => !std::path::Path::new(u.trim_start_matches("file://")).exists(),
+                }
+            }).collect();
+            println!("{:<28} {:>5} names, {:>4} blank  {:?}", t.id, all.len(), missing.len(), missing.iter().take(4).collect::<Vec<_>>());
         }
     }
 }

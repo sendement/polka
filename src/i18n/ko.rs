@@ -345,4 +345,9 @@ pub const T: &[(&str, &str)] = &[
     ("of", "/"),
     ("some volumes are missing", "볼륨이 부족합니다"),
     ("install 7zip to create 7z archives", "7z를 만들려면 7zip을 설치하세요"),
+    ("Move here", "여기로 이동"),
+    ("Copy here", "여기로 복사"),
+    ("Open with", "다음으로 열기:"),
+    ("left", "남음"),
+    ("Cancel operations", "작업 취소"),
 ];

@@ -110,6 +110,32 @@ impl Pane {
         self.loc.entry_path(&e.name)
     }
 
+    /// Select or deselect an entry; a folded volume set goes as a whole.
+    pub fn mark(&mut self, name: &str, on: bool) {
+        let mut names = vec![name.to_string()];
+        if let Some((_, _, members)) = self.collapsed.get(name) {
+            names.extend(members.iter().cloned());
+        }
+        for n in names {
+            if on {
+                self.selected.insert(n);
+            } else {
+                self.selected.remove(&n);
+            }
+        }
+    }
+
+    /// A folded volume set is selected whole or not at all: any of its
+    /// volumes selected (picked while it was open, say) selects them all.
+    pub fn sync_sets(&mut self) {
+        for (rep, (_, _, members)) in &self.collapsed {
+            if self.selected.contains(rep) || members.iter().any(|m| self.selected.contains(m)) {
+                self.selected.insert(rep.clone());
+                self.selected.extend(members.iter().cloned());
+            }
+        }
+    }
+
     /// Selection if any, else the entry under the cursor.
     pub fn targets(&self) -> Vec<Entry> {
         let picked: Vec<Entry> = if self.selected.is_empty() {
@@ -492,6 +518,12 @@ pub enum Cmd {
     OpenTemplates,
     EmptyTrashAsk,
     EmptyTrashNow,
+    /// Items dropped with the mouse: moved or copied (conflicts asked).
+    DropTransfer { sources: Vec<Location>, dest: Dest, mv: bool },
+    /// Run a program or launcher with these files.
+    OpenWith { app: PathBuf, files: Vec<PathBuf> },
+    /// Stop every running operation.
+    CancelJobs,
     /// Sidebar drive commands (index into the sidebar's items).
     DriveMount(usize),
     DriveUnmount(usize),
@@ -1537,11 +1569,11 @@ impl App {
         let (anchor, on, base) = (r.anchor, r.on, r.base.clone());
         let p = self.pane_mut();
         let (lo, hi) = (anchor.min(p.cursor), anchor.max(p.cursor).min(p.entries.len().saturating_sub(1)));
-        let mut sel = base;
-        for e in p.entries.get(lo..=hi).unwrap_or(&[]) {
-            if on { sel.insert(e.name.clone()) } else { sel.remove(&e.name) };
+        let names: Vec<String> = p.entries.get(lo..=hi).unwrap_or(&[]).iter().map(|e| e.name.clone()).collect();
+        p.selected = base;
+        for n in names {
+            p.mark(&n, on);
         }
-        p.selected = sel;
     }
 
     fn switch_tab(&mut self, d: isize) {
@@ -2249,7 +2281,12 @@ impl App {
         self.scan_templates();
         let local = self.pane().loc.local_path().is_some();
         let writable = self.pane().loc.dest().is_some();
-        let items = vec![
+        let mut items = vec![];
+        // Running copies and the like can be stopped from the pad too.
+        if self.jobs.iter().any(|j| j.result.lock().map(|r| r.is_none()).unwrap_or(false)) {
+            items.push(item(tr("Cancel operations"), Cmd::CancelJobs));
+        }
+        items.extend([
             item(tr("New tab"), Cmd::NewTab),
             MenuItem { enabled: self.tabs.len() > 1, ..item(tr("Close tab"), Cmd::CloseTab) },
             MenuItem { enabled: writable, ..item(tr("New folder"), Cmd::NewFolder) },
@@ -2264,7 +2301,7 @@ impl App {
             item(tr("Settings…"), Cmd::Settings),
             item(tr("Controls"), Cmd::Help),
             item(tr("Quit"), Cmd::Quit),
-        ];
+        ]);
         self.overlay = Some(Overlay::Menu(Menu::new("Polka", items)));
     }
 
@@ -2865,6 +2902,21 @@ impl App {
             | Cmd::ViewerSaveThen(_)
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
+            Cmd::DropTransfer { sources, dest, mv } => {
+                self.drop_done();
+                self.request_transfer(sources, dest, mv);
+            }
+            Cmd::OpenWith { app, files } => {
+                self.drop_done();
+                if let Err(e) = crate::launch::open_with(&app, &files) {
+                    self.toast(format!("{}: {e}", tr("Failed")), true);
+                }
+            }
+            Cmd::CancelJobs => {
+                for j in &self.jobs {
+                    j.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             Cmd::EmptyTrashAsk | Cmd::EmptyTrashNow | Cmd::DriveMount(_) | Cmd::DriveUnmount(_) | Cmd::DriveEject(_) => self.side_cmd(cmd),
             Cmd::UsageOpen(_)
             | Cmd::UsageReveal
@@ -2972,7 +3024,13 @@ impl App {
                 self.reload_all();
             }
             Cmd::ChooseIcon(path) => {
-                let groups = self.icons.place_icons();
+                // Only names the picker can really draw: no blank cells.
+                let mut groups = self.icons.place_icons();
+                for g in &mut groups {
+                    let names = std::mem::take(&mut g.names);
+                    g.names = names.into_iter().filter(|n| self.icons.named(&[n.as_str()], 64).is_some()).collect();
+                }
+                groups.retain(|g| !g.names.is_empty());
                 if groups.iter().all(|g| g.names.is_empty()) {
                     return self.toast(format!("{}: {}", tr("Failed"), tr("no icons in this theme")), true);
                 }

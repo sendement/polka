@@ -1698,6 +1698,32 @@ fn disk_usage(h: &mut Harness<'static, App>) {
     shot(h, "93-usage-rings-zoomed");
     press(h, &[Action::Back]);
     assert_eq!(sel(h), (String::new(), "Games".into()));
+    // The mouse: a click picks a piece, a double click opens it.
+    {
+        let (c, r0, wr): (egui::Pos2, f32, f32) = h.ctx.data(|d| d.get_temp(egui::Id::new("usage-rings-geometry"))).expect("rings not drawn");
+        // The middle of Music (the second biggest), on the first ring.
+        let (f0, f1) = {
+            let r = h.state().cur_tab().usage.as_ref().unwrap().ready().unwrap();
+            crate::usage::frac_of(r.center_node(), &[1])
+        };
+        let a = ((f0 + f1) / 2.0) as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let at = c + egui::vec2(a.cos(), a.sin()) * (r0 + wr / 2.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        settle(h);
+        assert_eq!(sel(h), (String::new(), "Music".into()), "one click only picks");
+        for pressed in [true, false, true, false] {
+            h.input_mut().events.push(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.step();
+        settle(h);
+        assert_eq!(sel(h).0, "Music", "a double click opens");
+        press(h, &[Action::Back]);
+        h.hover_at(egui::pos2(5.0, 600.0));
+        press(h, &[Action::Left]);
+        assert_eq!(sel(h), (String::new(), "Games".into()));
+    }
     // □: tiles, then the list.
     press(h, &[Action::Select]);
     assert_eq!(h.state().cur_tab().usage.as_ref().unwrap().mode, Mode::Tiles);
@@ -1830,6 +1856,7 @@ fn light_screens() {
 /// the other pane.
 fn mouse(h: &mut Harness<'static, App>) {
     use crate::app::Cmd;
+    use crate::i18n::tr;
     use crate::vfs::Location;
     use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
     let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("mouse");
@@ -1917,6 +1944,16 @@ fn mouse(h: &mut Harness<'static, App>) {
     move_to(h, ra.center());
     shot(h, "b1b-drag-settled");
     press_at(h, ra.center(), false, Modifiers::NONE);
+    // Let go: what to do? Moving comes first on the same disk.
+    let menu = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => (m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(), m.cursor),
+        _ => (Vec::new(), 0),
+    };
+    let (labels, cursor) = menu(h);
+    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Cancel")], "{labels:?}");
+    assert_eq!(cursor, 0);
+    shot(h, "b1c-drop-menu");
+    press(h, &[Action::Accept]);
     wait_jobs(h);
     assert!(dir.join("A/f1.txt").exists() && !dir.join("f1.txt").exists(), "not moved");
     assert!(h.state().drag.is_none());
@@ -1972,6 +2009,8 @@ fn mouse(h: &mut Harness<'static, App>) {
     move_to(h, right);
     shot(h, "b3-drag-to-other-pane");
     press_at(h, right, false, Modifiers::NONE);
+    assert_eq!(menu(h).0.first().map(String::as_str), Some(tr("Move here")));
+    press(h, &[Action::Accept]);
     wait_jobs(h);
     assert!(dir.join("B/f6.txt").exists() && !dir.join("f6.txt").exists(), "not moved to the other pane");
     h.state_mut().run(Cmd::ToggleDual);
@@ -2031,6 +2070,86 @@ fn mouse(h: &mut Harness<'static, App>) {
     assert_eq!(h.state().pane().selected.len(), n, "the band covers everything from the first item to after the last");
     h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
     settle(h);
+    h.state_mut().pane_mut().selected.clear();
+
+    // Dropped on a script: it can run with the files.
+    std::fs::write(dir.join("run.sh"), "#!/bin/sh\necho \"$@\"\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    let (_, hot2) = rect_of(h, "f2.txt");
+    let (rs, _) = rect_of(h, "run.sh");
+    press_at(h, hot2.center(), true, Modifiers::NONE);
+    move_to(h, hot2.center() + vec2(8.0, 8.0));
+    move_to(h, rs.center());
+    move_to(h, rs.center());
+    press_at(h, rs.center(), false, Modifiers::NONE);
+    let (labels, _) = menu(h);
+    let run = labels.iter().position(|l| l.starts_with(tr("Open with")) && l.ends_with("run.sh")).unwrap_or_else(|| panic!("{labels:?}"));
+    shot(h, "b5-drop-on-script");
+    for _ in 0..run {
+        press(h, &[Action::Down]);
+    }
+    crate::launch::LAUNCHED.with(|l| l.borrow_mut().clear());
+    press(h, &[Action::Accept]);
+    let launched = crate::launch::LAUNCHED.with(|l| l.borrow().clone());
+    assert!(launched.iter().any(|c| c.contains("run.sh") && c.contains("f2.txt")), "{launched:?}");
+    assert!(dir.join("f2.txt").exists(), "running doesn't move anything");
+
+    // Volume sets: folded, a rectangle takes them whole.
+    for i in 1..=3 {
+        std::fs::write(dir.join(format!("vol.zip.{i:03}")), vec![1u8; 100]).unwrap();
+    }
+    h.state_mut().cfg.collapse_volumes = true;
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().refilter_with(None, &cfg);
+    h.state_mut().pane_mut().reload(&cfg);
+    settle(h);
+    let folded = h.state().pane().entries.iter().filter(|e| e.name.starts_with("vol.zip")).count();
+    assert_eq!(folded, 1, "the set is shown as one");
+    let rep = h.state().pane().entries.iter().find(|e| e.name.starts_with("vol.zip")).unwrap().name.clone();
+    let (rv, _) = rect_of(h, &rep);
+    // From the row above, across the folded set (under the pointer a set
+    // unfolds, but not while a rectangle is drawn).
+    h.hover_at(pos2(1000.0, 620.0));
+    settle(h);
+    let from = pos2(rv.max.x - 40.0, rv.min.y - 10.0);
+    press_at(h, from, true, Modifiers::NONE);
+    move_to(h, from + vec2(-10.0, 10.0));
+    move_to(h, pos2(rv.max.x - 60.0, rv.max.y - 3.0));
+    move_to(h, pos2(rv.max.x - 60.0, rv.max.y - 3.0));
+    press_at(h, pos2(rv.max.x - 60.0, rv.max.y - 3.0), false, Modifiers::NONE);
+    settle(h);
+    for i in 1..=3 {
+        assert!(h.state().pane().selected.contains(&format!("vol.zip.{i:03}")), "{:?}", h.state().pane().selected);
+    }
+    // Opened, only what the rectangle covers; and it stays open.
+    h.state_mut().pane_mut().selected.clear();
+    let key = h.state().pane().volumes.get(&rep).unwrap().key.clone();
+    h.state_mut().pane_mut().set_expanded(vec![key]);
+    settle(h);
+    let (r1, _) = rect_of(h, "vol.zip.001");
+    let (r2, _) = rect_of(h, "vol.zip.002");
+    let from = pos2(r1.max.x - 40.0, r1.min.y + 3.0);
+    let to = pos2(r2.max.x - 60.0, r2.center().y);
+    press_at(h, from, true, Modifiers::NONE);
+    move_to(h, from + vec2(-10.0, 10.0));
+    move_to(h, to);
+    move_to(h, to);
+    press_at(h, to, false, Modifiers::NONE);
+    h.hover_at(pos2(1000.0, 620.0));
+    h.state_mut().pane_mut().set_cursor(0);
+    settle(h);
+    let mut sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+    sel.sort();
+    assert_eq!(sel, ["vol.zip.001", "vol.zip.002"]);
+    assert_eq!(h.state().pane().entries.iter().filter(|e| e.name.starts_with("vol.zip")).count(), 3, "a partly selected set stays open");
+    shot(h, "b6-volume-set-part");
+    h.state_mut().pane_mut().selected.clear();
 }
 
 #[test]
@@ -2151,6 +2270,13 @@ fn sidebar_more(h: &mut Harness<'static, App>) {
     assert_eq!(std::fs::read_dir(trash.join("info")).unwrap().count(), 0);
     settle(h);
     assert_eq!(h.state().side_items[find(h, tr("Trash"))].icon[0], "user-trash");
+
+    // Operations under way show their progress.
+    h.state_mut().jobs.push(std::sync::Arc::new(crate::ops::Job::shown(tr("Copying"), "Music", 1_400_000_000, 3_600_000_000, "album/03 - Track.flac", 20)));
+    h.state_mut().jobs.push(std::sync::Arc::new(crate::ops::Job::shown(tr("Deleting"), "", 0, 0, "", 2)));
+    settle(h);
+    shot(h, "c7-progress");
+    h.state_mut().jobs.clear();
 
     // Languages: from the settings, live.
     let before = h.state().cfg.language.clone();

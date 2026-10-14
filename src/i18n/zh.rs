@@ -345,4 +345,9 @@ pub const T: &[(&str, &str)] = &[
     ("of", "/"),
     ("some volumes are missing", "缺少分卷"),
     ("install 7zip to create 7z archives", "创建 7z 需要安装 7zip"),
+    ("Move here", "移动到这里"),
+    ("Copy here", "复制到这里"),
+    ("Open with", "打开方式："),
+    ("left", "剩余"),
+    ("Cancel operations", "取消操作"),
 ];

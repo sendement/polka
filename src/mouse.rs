@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use egui::{Order, Vec2, pos2, vec2};
 
-use crate::app::{App, Cmd, Focus};
+use crate::app::{App, Cmd, Focus, Menu, MenuItem, Overlay, item};
 use crate::i18n::{tr, trn};
 use crate::vfs::{Dest, Location};
 
@@ -43,7 +43,7 @@ pub struct Band {
 /// Can items be dropped onto this entry? Folders, and archives Polka can
 /// write into.
 pub fn drop_target(e: &crate::vfs::Entry, local: bool) -> bool {
-    e.is_dir || (local && crate::archive_rw::writable_name(&e.name))
+    e.is_dir || (local && (crate::archive_rw::writable_name(&e.name) || e.name.ends_with(".desktop") || e.mode & 0o111 != 0))
 }
 
 impl App {
@@ -76,18 +76,22 @@ impl App {
     pub fn drop_on_pane(&mut self, pane: usize, entry: Option<usize>) {
         let p = &self.tabs[self.tab].panes[pane];
         let local = p.loc.local_path().is_some();
-        let dest = match entry.and_then(|i| p.entries.get(i)).filter(|e| drop_target(e, local)) {
-            Some(e) if e.is_dir => p.entry_loc(e).dest(),
-            Some(e) => p.entry_path(e).and_then(|a| Location::Archive { archive: a, inner: String::new() }.dest()),
-            None => p.loc.dest(),
+        let target = entry.and_then(|i| p.entries.get(i)).filter(|e| drop_target(e, local));
+        // A program, script or launcher takes the files as they are; the
+        // folder it lies in still offers moving and copying.
+        let app = target.and_then(|e| p.entry_path(e)).filter(|a| !a.is_dir() && crate::launch::runs(a));
+        let (dest, name) = match target {
+            Some(e) if e.is_dir => (p.entry_loc(e).dest(), e.name.clone()),
+            Some(e) if app.is_none() => (p.entry_path(e).and_then(|a| Location::Archive { archive: a, inner: String::new() }.dest()), e.name.clone()),
+            _ => (p.loc.dest(), p.loc.title()),
         };
         self.tabs[self.tab].active = pane;
-        match dest {
-            Some(d) => self.drop_to(d),
-            None => {
+        match (dest, app) {
+            (None, None) => {
                 self.drag = None;
                 self.toast(tr("Can't put anything here"), true);
             }
+            (dest, app) => self.drop_to(dest, app, name),
         }
     }
 
@@ -106,42 +110,66 @@ impl App {
             }
             return;
         }
-        match it.loc.dest().filter(|_| !it.usage) {
-            Some(d) => self.drop_to(d),
+        match it.loc.dest().filter(|_| !it.usage && it.drive.as_ref().is_none_or(|d| d.mount.is_some())) {
+            Some(d) => self.drop_to(Some(d), None, it.label.clone()),
             None => self.drag = None,
         }
     }
 
-    fn drop_to(&mut self, dest: Dest) {
+    /// Let go over a place: ask what to do (move, copy, or run the program
+    /// dropped on), unless Ctrl (copy) or Shift (move) already says.
+    fn drop_to(&mut self, dest: Option<Dest>, app: Option<PathBuf>, name: String) {
         let Some(d) = self.drag.take() else { return };
-        let Dest::Dir(dir) = &dest else {
-            // Into an archive: always a copy.
-            self.drop_done();
-            return self.request_transfer(d.sources, dest, false);
-        };
         let local: Vec<&std::path::Path> = d.sources.iter().filter_map(|l| l.local_path()).collect();
         let all_local = local.len() == d.sources.len();
-        // Dropped back where it lies: nothing to do.
-        if all_local && local.iter().all(|s| s.parent() == Some(dir.as_path())) {
+        let mut dest = dest;
+        if let Some(Dest::Dir(dir)) = &dest {
+            // Back where they lie: nothing to move or copy there.
+            if all_local && local.iter().all(|s| s.parent() == Some(dir.as_path())) {
+                dest = None;
+            } else if local.iter().any(|s| dir.starts_with(s)) {
+                if app.is_none() {
+                    return self.toast(tr("A folder can't go inside itself"), true);
+                }
+                dest = None;
+            }
+        }
+        if dest.is_none() && app.is_none() {
             return;
         }
-        if local.iter().any(|s| dir.starts_with(s)) {
-            return self.toast(tr("A folder can't go inside itself"), true);
-        }
-        // Ctrl copies, Shift moves; otherwise a move within one disk.
         let m = self.ctx.input(|i| i.modifiers);
-        let same_disk = || {
-            let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
-            local.first().and_then(|s| dev(s)).is_some_and(|a| dev(dir) == Some(a))
+        if let Some(dest) = dest.clone().filter(|_| m.command || m.shift) {
+            self.drop_done();
+            return self.request_transfer(d.sources, dest, m.shift);
+        }
+        // The usual choice comes first: a move within one disk, else a copy.
+        let same_disk = match &dest {
+            Some(Dest::Dir(dir)) => {
+                let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+                all_local && local.first().and_then(|s| dev(s)).is_some_and(|a| dev(dir) == Some(a))
+            }
+            _ => false,
         };
-        let mv = !m.command && all_local && (m.shift || same_disk());
-        self.drop_done();
-        self.request_transfer(d.sources, dest, mv);
+        let mut items = Vec::new();
+        if let Some(dest) = &dest {
+            let go = |mv| Cmd::DropTransfer { sources: d.sources.clone(), dest: dest.clone(), mv };
+            items.push(item(tr("Move here"), go(true)));
+            items.push(item(tr("Copy here"), go(false)));
+        }
+        if let Some(a) = &app {
+            let files: Vec<PathBuf> = local.iter().map(|p| p.to_path_buf()).collect();
+            let label = format!("{} {}", tr("Open with"), crate::launch::app_name(a));
+            items.push(MenuItem { enabled: all_local, ..item(&label, Cmd::OpenWith { app: a.clone(), files }) });
+        }
+        items.push(item(tr("Cancel"), Cmd::Nothing));
+        let mut menu = Menu::new(format!("{} → {name}", d.label), items);
+        menu.cursor = if dest.is_some() && !same_disk { 1 } else { 0 };
+        self.overlay = Some(Overlay::Menu(menu));
     }
 
     /// Dropped: the selection is done with, and the cursor stays hidden
     /// instead of jumping to the top of the list in the items' place.
-    fn drop_done(&mut self) {
+    pub(crate) fn drop_done(&mut self) {
         for p in &mut self.tabs[self.tab].panes {
             p.selected.clear();
             p.cursor_hidden = true;

@@ -345,4 +345,9 @@ pub const T: &[(&str, &str)] = &[
     ("of", "sur"),
     ("some volumes are missing", "des volumes manquent"),
     ("install 7zip to create 7z archives", "installez 7zip pour créer des archives 7z"),
+    ("Move here", "Déplacer ici"),
+    ("Copy here", "Copier ici"),
+    ("Open with", "Ouvrir avec"),
+    ("left", "reste"),
+    ("Cancel operations", "Annuler les opérations"),
 ];

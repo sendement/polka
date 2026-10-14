@@ -296,6 +296,8 @@ fn draw_rings(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
     let r0 = big * 0.24;
     let wr = (big - r0) / RINGS as f32;
     let segs = ring_segs(center, RINGS, MIN_FRAC);
+    // Where the rings are, for tests that click them.
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("usage-rings-geometry"), (c, r0, wr)));
     let resp = ui.interact(rect, ui.id().with("usage-rings"), Sense::click());
     let hover = resp.hover_pos();
     // What the pointer is over: the middle, a piece, or nothing.
@@ -370,13 +372,16 @@ fn draw_rings(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
         p.extend_from_slice(rel);
         p
     };
+    // A click picks, a double click opens a folder; the middle goes up
+    // (once, even for a double click).
     if resp.clicked() {
         if over_middle {
-            return Some(Act::ZoomOut);
+            return (!resp.double_clicked()).then_some(Act::ZoomOut);
         }
         if let Some(i) = hit {
             let path = full(&segs[i].path);
-            return Some(if center.at(&segs[i].path).is_dir() { Act::Zoom(path) } else { Act::Pick(path) });
+            let open = resp.double_clicked() && center.at(&segs[i].path).is_dir();
+            return Some(if open { Act::Zoom(path) } else { Act::Pick(path) });
         }
     }
     if resp.secondary_clicked() {
@@ -475,7 +480,7 @@ fn draw_tiles(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
         resp.clone().on_hover_text_at_pointer(tip(n, center));
         if resp.clicked() {
             let path = full(&out[i].path);
-            return Some(if n.is_dir() { Act::Zoom(path) } else { Act::Pick(path) });
+            return Some(if resp.double_clicked() && n.is_dir() { Act::Zoom(path) } else { Act::Pick(path) });
         }
         if resp.secondary_clicked() {
             return Some(Act::Context(full(&out[i].path)));

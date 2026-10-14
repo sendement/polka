@@ -72,6 +72,9 @@ impl eframe::App for App {
         }
         self.draw_center(ui);
         self.draw_drag(&ctx);
+        if !full {
+            self.draw_jobs(&ctx);
+        }
         self.draw_overlay(&ctx);
 
         // Closing the window with unsaved text asks first.
@@ -471,7 +474,6 @@ impl App {
     // ------------------------------------------------------------ bottom
 
     fn draw_bottom(&mut self, ui: &mut Ui) {
-        let mut cancel = None;
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
@@ -489,14 +491,6 @@ impl App {
                         ui.label(egui::RichText::new(tr("some volumes are missing")).color(ui.visuals().error_fg_color));
                     }
                 }
-                for (i, j) in self.jobs.iter().enumerate() {
-                    ui.separator();
-                    ui.label(&j.label);
-                    ui.add(egui::ProgressBar::new(j.fraction()).desired_width(140.0).show_percentage());
-                    if ui.small_button("✖").clicked() {
-                        cancel = Some(i);
-                    }
-                }
                 if let Some((t, err, _)) = &self.toast {
                     ui.separator();
                     let c = if *err { ui.visuals().error_fg_color } else { ui.visuals().strong_text_color() };
@@ -512,9 +506,78 @@ impl App {
             });
             ui.add_space(3.0);
         });
+    }
+
+    /// Running operations as cards over the bottom right corner: what goes
+    /// where, the item now, how much, how fast, how long still.
+    fn draw_jobs(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        // Quick ones (a rename, a move on one disk) don't flash a card.
+        let shown: Vec<usize> = (0..self.jobs.len())
+            .filter(|&i| {
+                let j = &self.jobs[i];
+                j.result.lock().map(|r| r.is_none()).unwrap_or(false) && j.started.elapsed() > std::time::Duration::from_millis(350)
+            })
+            .collect();
+        if shown.is_empty() {
+            return;
+        }
+        let mut cancel = None;
+        egui::Area::new("jobs".into()).order(Order::Foreground).anchor(Align2::RIGHT_BOTTOM, vec2(-14.0, -40.0)).show(ctx, |ui| {
+            for &i in &shown {
+                let j = &self.jobs[i];
+                egui::Frame::popup(ui.style()).inner_margin(12.0).corner_radius(10.0).show(ui, |ui| {
+                    ui.set_width(380.0);
+                    let v = ui.visuals().clone();
+                    let (done, total) = (j.done.load(Ordering::Relaxed), j.total.load(Ordering::Relaxed));
+                    let items = j.items.load(Ordering::Relaxed);
+                    ui.horizontal(|ui| {
+                        let title = if j.target.is_empty() { j.label.clone() } else { format!("{} → {}", j.label, j.target) };
+                        ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("✖").on_hover_text(tr("Cancel")).clicked() {
+                                cancel = Some(i);
+                            }
+                            if total > 0 {
+                                ui.label(format!("{:.0}%", j.fraction() * 100.0));
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    let bar = egui::ProgressBar::new(j.fraction()).desired_height(8.0).fill(v.selection.bg_fill);
+                    // Not knowing the total yet: an animated bar.
+                    ui.add(if total == 0 { bar.animate(true) } else { bar });
+                    ui.add_space(4.0);
+                    let cur = j.current.lock().map(|c| c.clone()).unwrap_or_default();
+                    if !cur.is_empty() {
+                        ui.add(egui::Label::new(egui::RichText::new(cur).weak()).truncate());
+                    }
+                    // Amounts, speed and time left from the average so far.
+                    let secs = j.started.elapsed().as_secs_f64().max(0.001);
+                    let mut line = if items {
+                        format!("{done} / {total}")
+                    } else {
+                        format!("{} / {}", human_size(done), human_size(total))
+                    };
+                    if !items && done > 0 && secs > 0.5 {
+                        line += &format!(" · {}/{}", human_size((done as f64 / secs) as u64), tr("sec"));
+                    }
+                    if total > done && done > 0 && secs > 1.0 {
+                        let left = ((total - done) as f64 * secs / done as f64) as u64;
+                        line += &format!(" · {} {}", tr("left"), if left >= 3600 { format!("{}:{:02}:{:02}", left / 3600, left / 60 % 60, left % 60) } else { format!("{}:{:02}", left / 60, left % 60) });
+                    }
+                    // Nothing counted yet: no "0 B / 0 B".
+                    if total > 0 {
+                        ui.label(egui::RichText::new(line).size(12.5).weak());
+                    }
+                });
+                ui.add_space(6.0);
+            }
+        });
         if let Some(i) = cancel {
             self.jobs[i].cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     fn hints(&self) -> Vec<(Action, &'static str)> {
@@ -799,9 +862,8 @@ impl App {
                     p.cursor = i;
                     if toggle && !range {
                         if let Some(n) = p.entries.get(i).map(|e| e.name.clone()) {
-                            if !p.selected.remove(&n) {
-                                p.selected.insert(n);
-                            }
+                            let on = !p.selected.contains(&n);
+                            p.mark(&n, on);
                         }
                     }
                 }
@@ -1218,6 +1280,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                         };
                         if item.intersects(area) {
                             picked.insert(e.name.clone());
+                            // A folded volume set: all of its volumes.
+                            if let Some((_, _, members)) = pane.collapsed.get(&e.name) {
+                                picked.extend(members.iter().cloned());
+                            }
                         }
                     }
                     pane.selected = picked;
@@ -1244,8 +1310,24 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
             events.push(PaneEvent::Drop(drop_entry));
         }
     }
-    // Sets under the mouse or the cursor unfold (from the next frame).
-    let mut open: Vec<String> = hover_set.iter().cloned().collect();
+    // Sets under the mouse or the cursor unfold (from the next frame) — not
+    // while a rectangle is drawn, so it takes folded sets whole.
+    let mut open: Vec<String> = hover_set.iter().filter(|_| pane.band.is_none()).cloned().collect();
+    pane.sync_sets();
+    // Sets partly selected stay open: folded, they'd hide which volumes.
+    let mut counts: std::collections::HashMap<&str, (usize, usize)> = Default::default();
+    for (n, m) in &pane.volumes {
+        let c = counts.entry(m.key.as_str()).or_default();
+        c.1 += 1;
+        if pane.selected.contains(n) {
+            c.0 += 1;
+        }
+    }
+    for (k, (sel, all)) in counts {
+        if sel > 0 && sel < all && !open.iter().any(|o| o == k) {
+            open.push(k.to_string());
+        }
+    }
     if focused {
         if let Some(k) = pane.current().and_then(|e| pane.volumes.get(&e.name)).map(|m| m.key.clone()) {
             if !open.contains(&k) {

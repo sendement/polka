@@ -345,4 +345,9 @@ pub const T: &[(&str, &str)] = &[
     ("of", "/"),
     ("some volumes are missing", "ボリュームが足りません"),
     ("install 7zip to create 7z archives", "7z の作成には 7zip をインストールしてください"),
+    ("Move here", "ここに移動"),
+    ("Copy here", "ここにコピー"),
+    ("Open with", "開くアプリ："),
+    ("left", "残り"),
+    ("Cancel operations", "操作をキャンセル"),
 ];

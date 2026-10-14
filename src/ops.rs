@@ -153,6 +153,13 @@ pub struct Job {
     pub op: Option<Op>,
     /// Set when the job stopped for an archive password.
     pub need_password: Mutex<Option<(PathBuf, bool)>>,
+    /// Progress counts items, not bytes.
+    pub items: std::sync::atomic::AtomicBool,
+    /// What is being worked on now.
+    pub current: Mutex<String>,
+    pub started: Instant,
+    /// Where it goes, for the progress panel ("→ Music").
+    pub target: String,
 }
 
 impl Job {
@@ -168,6 +175,28 @@ impl Job {
             touches: Vec::new(),
             op: None,
             need_password: Mutex::new(None),
+            items: Default::default(),
+            current: Default::default(),
+            started: Instant::now(),
+            target: String::new(),
+        }
+    }
+
+    /// A job that only shows (tests of the progress panel).
+    #[cfg(test)]
+    pub fn shown(label: &str, target: &str, done: u64, total: u64, current: &str, secs: u64) -> Self {
+        let j = Job { label: label.into(), target: target.into(), started: Instant::now() - std::time::Duration::from_secs(secs), ..Job::detached() };
+        j.done.store(done, Ordering::Relaxed);
+        j.total.store(total, Ordering::Relaxed);
+        *j.current.lock().unwrap() = current.into();
+        j
+    }
+
+    /// Note the item being worked on (its name).
+    pub fn now_on(&self, p: &Path) {
+        if let Ok(mut c) = self.current.try_lock() {
+            c.clear();
+            c.push_str(&p.file_name().map_or_else(|| p.to_string_lossy(), |n| n.to_string_lossy()));
         }
     }
 
@@ -234,8 +263,25 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         })
         .collect();
     touches.extend(folders);
+    // "→ folder" (or the archive) for the progress panel.
+    let name_of = |p: &Path| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let target = match &op {
+        Op::Copy { dest, .. } | Op::Move { dest, .. } => match dest {
+            Dest::Dir(d) => name_of(d),
+            Dest::Archive { archive, .. } => name_of(archive),
+        },
+        Op::Compress { out, .. } => name_of(out),
+        Op::Extract { dest, .. } => name_of(dest),
+        Op::ArchiveEdit { archive, .. } => name_of(archive),
+        Op::Trash { .. } => tr("Trash").to_string(),
+        Op::Delete { .. } => String::new(),
+    };
     let job = Arc::new(Job {
         label: label.to_string(),
+        items: Default::default(),
+        current: Default::default(),
+        started: Instant::now(),
+        target,
         done: AtomicU64::new(0),
         total: AtomicU64::new(0),
         cancel: AtomicBool::new(false),
@@ -274,14 +320,17 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
         Op::Copy { sources, dest, policy } => transfer(&sources, &dest, false, policy, job),
         Op::Move { sources, dest, policy } => transfer(&sources, &dest, true, policy, job),
         Op::Trash { paths } => {
+            job.items.store(true, Ordering::Relaxed);
             job.total.store(paths.len() as u64, Ordering::Relaxed);
             trash::delete_all(&paths).map_err(|e| io::Error::other(e.to_string()))?;
             job.done.store(paths.len() as u64, Ordering::Relaxed);
             Ok(())
         }
         Op::Delete { paths } => {
+            job.items.store(true, Ordering::Relaxed);
             job.total.store(paths.len() as u64, Ordering::Relaxed);
             for p in paths {
+                job.now_on(&p);
                 remove_any(&p)?;
                 job.tick(1)?;
             }
@@ -611,6 +660,7 @@ fn copy_tree(src: &Path, dst: &Path, job: &Job) -> io::Result<()> {
         }
         let _ = std::fs::set_permissions(dst, m.permissions());
     } else {
+        job.now_on(src);
         let mut r = File::open(src)?;
         let mut w = File::create(dst)?;
         let mut buf = vec![0u8; 1 << 20];
@@ -840,6 +890,7 @@ fn write_tar<W: Write>(w: W, items: &[(PathBuf, String)], job: &Job) -> io::Resu
     let mut b = tar::Builder::new(w);
     b.follow_symlinks(false);
     for (abs, rel) in items {
+        job.now_on(&abs);
         let m = abs.symlink_metadata()?;
         if m.is_file() {
             let mut h = tar::Header::new_gnu();
@@ -866,6 +917,7 @@ fn write_zip(file: File, items: &[(PathBuf, String)], opts: &CompressOpts, job: 
         (l, _) => (M::Deflated, Some(match l { Level::Fast => 1, Level::Max => 9, _ => 6 })),
     };
     for (abs, rel) in items {
+        job.now_on(&abs);
         let m = abs.symlink_metadata()?;
         let mut o = SimpleFileOptions::default()
             .unix_permissions(m.permissions().mode() & 0o777)

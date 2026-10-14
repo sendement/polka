@@ -103,8 +103,11 @@ Gamepad input is ignored while Polka is not the focused window.
 click opens a folder in a new tab, the side buttons go back / forward. Drag from empty space
 (right of the names in the list, between icons in the grid) for a selection rectangle; Ctrl
 adds to the selection. Drag items by their icon or name onto a folder, the other pane or a
-sidebar place: a move on the same disk, otherwise a copy (Ctrl copies, Shift moves). Onto a
-writable archive they're added to it; onto the trash they're trashed.
+sidebar place, then pick Move here / Copy here (the usual one is preselected: a move on the
+same disk, else a copy; Ctrl or Shift held skips the question). Dropped on a program, script or
+launcher they can also be opened with it. Onto the trash they're trashed. A folded multi-volume
+set is selected whole; an unfolded one volume by volume. Running operations show a progress card
+(item, amount, speed, time left, cancel; also App menu → Cancel operations).
 
 **Sidebar.** Places, pinned folders, **drives** (every partition that isn't the system's, mounted
 or not: ✕ mounts and opens one, △ has Mount / Unmount / Eject through udisks, which asks polkit for
