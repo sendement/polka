@@ -15,6 +15,19 @@ fn fc_match(pattern: &str) -> Option<Vec<u8>> {
     std::fs::read(path.trim()).ok()
 }
 
+/// A font for `pattern` that may live in a collection (.ttc): bytes and
+/// the face's index in it.
+fn fc_match_face(pattern: &str) -> Option<(Vec<u8>, u32)> {
+    let out = std::process::Command::new("fc-match").args(["-f", "%{file}\t%{index}", pattern]).output().ok()?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let (path, index) = text.split_once('\t')?;
+    let lower = path.to_lowercase();
+    if !(lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc") || lower.ends_with(".otc")) {
+        return None;
+    }
+    Some((std::fs::read(path.trim()).ok()?, index.trim().parse().unwrap_or(0)))
+}
+
 /// Installed monospace families with a usable file (TTF/OTF), sorted.
 pub fn mono_families() -> &'static [(String, std::path::PathBuf)] {
     static F: std::sync::OnceLock<Vec<(String, std::path::PathBuf)>> = std::sync::OnceLock::new();
@@ -67,6 +80,20 @@ pub fn install_with(ctx: &egui::Context, viewer: Option<&str>) {
     add("system-mono", "monospace", egui::FontFamily::Monospace, 0);
     // Bold for Markdown: the bold face of the UI font, then the usual chain.
     add("system-sans-bold", "sans-serif:bold", egui::FontFamily::Name("bold".into()), 0);
+    // Chinese, Japanese and Korean (the interface, and file names in any
+    // language) from the system's CJK font, as the last fallback.
+    let cjk = match crate::i18n::current() {
+        "ja" => "sans-serif:lang=ja",
+        "ko" => "sans-serif:lang=ko",
+        _ => "sans-serif:lang=zh-cn",
+    };
+    if let Some((bytes, index)) = fc_match_face(cjk) {
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        fonts.font_data.insert("system-cjk".into(), Arc::new(data));
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().push("system-cjk".into());
+        fonts.families.entry(egui::FontFamily::Monospace).or_default().push("system-cjk".into());
+    }
     let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
     fonts.families.entry(egui::FontFamily::Name("bold".into())).or_default().extend(prop);
     // The viewer's family: the chosen font, then the usual monospace chain.

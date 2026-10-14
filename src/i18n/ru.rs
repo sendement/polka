@@ -1,11 +1,6 @@
-//! Tiny i18n: English source strings, translated through an embedded table.
+//! Русский.
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
-static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-
-const RU: &[(&str, &str)] = &[
+pub const T: &[(&str, &str)] = &[
     ("Replace (Ctrl+H)", "Замена (Ctrl+H)"),
     ("Replace with…", "Заменить на…"),
     ("Replace with", "Заменить на"),
@@ -55,7 +50,6 @@ const RU: &[(&str, &str)] = &[
     ("kbit/s", "кбит/с"),
     ("Places", "Места"),
     ("Pinned", "Закреплённые"),
-    ("Devices", "Устройства"),
     ("Home", "Домашняя"),
     ("Desktop", "Рабочий стол"),
     ("Documents", "Документы"),
@@ -235,6 +229,26 @@ const RU: &[(&str, &str)] = &[
     ("Passwords don't match", "Пароли не совпадают"),
     ("Create", "Создать"),
     ("Volume", "Том"),
+    ("1 volume", "1 том"),
+    ("%n volumes", "Томов: %n"),
+    ("Language", "Язык"),
+    ("Drives", "Диски"),
+    ("Drive", "Диск"),
+    ("Mount", "Подключить"),
+    ("Unmount", "Отключить"),
+    ("Eject", "Извлечь"),
+    ("Mounting…", "Подключаю…"),
+    ("Unmounting…", "Отключаю…"),
+    ("Ejecting…", "Извлекаю…"),
+    ("Unmounted", "Отключено"),
+    ("The drive can be removed now", "Теперь диск можно вынуть"),
+    ("Empty trash…", "Очистить корзину…"),
+    ("Empty trash", "Очистить корзину"),
+    ("The trash is empty", "Корзина пуста"),
+    ("Delete %n items in the trash for good?", "Удалить навсегда всё из корзины (%n)?"),
+    ("Trash emptied: %n", "Корзина очищена: %n"),
+    ("Some items stayed in the trash: %n", "Часть не удалилась из корзины: %n"),
+    ("As the system", "Как в системе"),
     ("New document", "Создать документ"),
     ("Empty file", "Пустой файл"),
     ("New file", "Новый файл"),
@@ -332,43 +346,3 @@ const RU: &[(&str, &str)] = &[
     ("some volumes are missing", "не хватает томов"),
     ("install 7zip to create 7z archives", "для создания 7z установите 7zip"),
 ];
-
-fn table() -> &'static HashMap<&'static str, &'static str> {
-    TABLE.get_or_init(|| {
-        let lang = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .filter_map(|k| std::env::var(k).ok())
-            .find(|v| !v.is_empty())
-            .unwrap_or_default();
-        if lang.starts_with("ru") {
-            RU.iter().copied().collect()
-        } else {
-            HashMap::new()
-        }
-    })
-}
-
-pub fn tr(s: &'static str) -> &'static str {
-    table().get(s).copied().unwrap_or(s)
-}
-
-/// "4 volumes" with the language's plural form.
-pub fn volumes(n: usize) -> String {
-    if tr("Volume") == "Том" {
-        let word = match (n % 10, n % 100) {
-            (1, x) if x != 11 => "том",
-            (2..=4, x) if !(12..=14).contains(&x) => "тома",
-            _ => "томов",
-        };
-        format!("{n} {word}")
-    } else if n == 1 {
-        "1 volume".into()
-    } else {
-        format!("{n} volumes")
-    }
-}
-
-/// `tr` with `%n` replaced by a number.
-pub fn trn(s: &'static str, n: usize) -> String {
-    tr(s).replace("%n", &n.to_string())
-}

@@ -64,6 +64,8 @@ pub struct Config {
     pub usage_mode: u8,
     /// Light or dark: 0 as the desktop, 1 dark, 2 light.
     pub appearance: u8,
+    /// Interface language code; None follows the system.
+    pub language: Option<String>,
 }
 
 /// Text viewer look.
@@ -158,6 +160,7 @@ impl Default for Config {
             collapse_volumes: true,
             usage_mode: 0,
             appearance: 0,
+            language: None,
         }
     }
 }

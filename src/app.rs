@@ -490,6 +490,12 @@ pub enum Cmd {
     /// New file from a template (None = empty).
     NewFile(Option<PathBuf>),
     OpenTemplates,
+    EmptyTrashAsk,
+    EmptyTrashNow,
+    /// Sidebar drive commands (index into the sidebar's items).
+    DriveMount(usize),
+    DriveUnmount(usize),
+    DriveEject(usize),
     /// The disk usage page; with a folder, measured right away.
     UsageOpen(Option<PathBuf>),
     UsageReveal,
@@ -880,19 +886,20 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 11;
+pub const SETTINGS_ROWS: usize = 12;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
-    pub const SIDE_ICON: usize = 2;
-    pub const LIST_ICON: usize = 3;
-    pub const GRID_ICON: usize = 4;
-    pub const ZOOM: usize = 5;
-    pub const THEME: usize = 6;
-    pub const OPEN_IN: usize = 7;
-    pub const VOLUMES: usize = 8;
-    pub const WEB_IMAGES: usize = 9;
-    pub const CLOSE: usize = 10;
+    pub const LANGUAGE: usize = 2;
+    pub const SIDE_ICON: usize = 3;
+    pub const LIST_ICON: usize = 4;
+    pub const GRID_ICON: usize = 5;
+    pub const ZOOM: usize = 6;
+    pub const THEME: usize = 7;
+    pub const OPEN_IN: usize = 8;
+    pub const VOLUMES: usize = 9;
+    pub const WEB_IMAGES: usize = 10;
+    pub const CLOSE: usize = 11;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -990,6 +997,8 @@ pub struct SideItem {
     pub section: &'static str,
     /// Opens the disk usage page instead of a place.
     pub usage: bool,
+    /// A drive (maybe not mounted: then `loc` is no real place).
+    pub drive: Option<crate::drives::Drive>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1023,6 +1032,10 @@ pub struct Clip {
 
 pub enum Msg {
     Toast(String, bool),
+    /// A drive operation finished.
+    Drive(Result<crate::drives::Done, String>),
+    /// The trash was emptied: (items, failures).
+    TrashEmptied(usize, usize),
     NeedPassword(PathBuf, bool, Retry),
     /// A file from an archive was extracted for the viewer.
     View { tab: usize, path: PathBuf, name: String, origin: usize, source: Option<(PathBuf, String)> },
@@ -1076,6 +1089,7 @@ pub struct App {
 impl App {
     pub fn new(ctx: egui::Context, start: Option<PathBuf>) -> Self {
         let cfg = Config::load();
+        crate::i18n::set(cfg.language.as_deref());
         let (pad_tx, pad_rx) = crossbeam_channel::unbounded();
         if std::env::var_os("POLKA_NO_GAMEPAD").is_none() {
             let c = ctx.clone();
@@ -1188,6 +1202,16 @@ impl App {
         while let Ok(m) = self.msg_rx.try_recv() {
             match m {
                 Msg::Toast(s, e) => self.toast(s, e),
+                Msg::Drive(r) => self.drive_done(r),
+                Msg::TrashEmptied(n, failed) => {
+                    self.refresh_sidebar();
+                    self.reload_all();
+                    if failed > 0 {
+                        self.toast(trn("Some items stayed in the trash: %n", failed), true);
+                    } else {
+                        self.toast(trn("Trash emptied: %n", n), false);
+                    }
+                }
                 Msg::NeedPassword(a, wrong, retry) => self.ask_password(a, wrong, retry),
                 Msg::View { tab, path, name, origin, source } => {
                     if tab < self.tabs.len() {
@@ -1276,6 +1300,17 @@ impl App {
     pub fn refresh_sidebar(&mut self) {
         self.side_refreshed = Instant::now();
         let mut v = Vec::new();
+        let icon_for = |cfg: &Config, key: &str| cfg.pinned_icons.get(key).cloned();
+        let place = |label: String, icon: &'static [&'static str], p: PathBuf, section: &'static str, cfg: &Config| SideItem {
+            custom_icon: icon_for(cfg, &p.to_string_lossy()),
+            label,
+            icon,
+            loc: Location::Local(p),
+            pinned: false,
+            section,
+            usage: false,
+            drive: None,
+        };
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
         let places: [(&str, Option<PathBuf>, &'static [&'static str]); 7] = [
             ("Home", Some(home.clone()), &["user-home", "folder-home", "folder"]),
@@ -1288,36 +1323,33 @@ impl App {
         ];
         for (label, p, icon) in places {
             if let Some(p) = p.filter(|p| p.is_dir() && (label == "Home" || *p != home)) {
-                v.push(SideItem { label: tr(label).into(), icon, custom_icon: None, loc: Location::Local(p), pinned: false, section: "Places", usage: false });
+                v.push(place(tr(label).into(), icon, p, "Places", &self.cfg));
             }
         }
-        v.push(SideItem {
-            custom_icon: None,
-            label: tr("File system").into(),
-            icon: &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"],
-            loc: Location::Local("/".into()),
-            pinned: false,
-            section: "Places",
-            usage: false,
-        });
-        let trash = dirs::data_dir().map(|d| d.join("Trash/files"));
-        if let Some(t) = trash.filter(|t| t.is_dir()) {
-            v.push(SideItem { label: tr("Trash").into(), custom_icon: None, icon: &["user-trash", "user-trash-full"], loc: Location::Local(t), pinned: false, section: "Places", usage: false });
+        v.push(place(tr("File system").into(), &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"], "/".into(), "Places", &self.cfg));
+        if let Some(t) = trash_files().filter(|t| t.is_dir()) {
+            // A full bin looks full.
+            let icon: &'static [&'static str] = if crate::trashbin::count() > 0 { &["user-trash-full", "user-trash"] } else { &["user-trash", "user-trash-full"] };
+            v.push(place(tr("Trash").into(), icon, t, "Places", &self.cfg));
         }
         for p in &self.cfg.pinned {
-            v.push(SideItem {
-                label: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
-                icon: &["folder-bookmark", "bookmark-new", "folder"],
-                custom_icon: self.cfg.pinned_icons.get(&p.to_string_lossy().into_owned()).cloned(),
-                loc: Location::Local(p.clone()),
-                pinned: true,
-                section: "Pinned",
-                usage: false,
-            });
+            let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+            v.push(SideItem { pinned: true, ..place(label, &["folder-bookmark", "bookmark-new", "folder"], p.clone(), "Pinned", &self.cfg) });
+        }
+        // Drives, mounted or not; then other things mounted for the user
+        // (network shares, FUSE) that aren't block devices.
+        let drives = crate::drives::list();
+        for d in &drives {
+            let label = d.label.clone().unwrap_or_else(|| format!("{} {}", tr("Drive"), human_size(d.size)));
+            let loc = Location::Local(d.mount.clone().unwrap_or_else(|| PathBuf::from(d.key())));
+            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, drive: Some(d.clone()) });
         }
         for (dev, mnt) in mounts() {
+            if drives.iter().any(|d| d.mount.as_ref() == Some(&mnt)) {
+                continue;
+            }
             let label = mnt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dev);
-            v.push(SideItem { label, custom_icon: None, icon: &["drive-removable-media", "drive-harddisk", "media-flash"], loc: Location::Local(mnt), pinned: false, section: "Devices", usage: false });
+            v.push(place(label, &["drive-removable-media", "drive-harddisk", "media-flash"], mnt, "Drives", &self.cfg));
         }
         v.push(SideItem {
             label: tr("Disk usage").into(),
@@ -1327,6 +1359,7 @@ impl App {
             pinned: false,
             section: "Tools",
             usage: true,
+            drive: None,
         });
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
@@ -1529,6 +1562,10 @@ impl App {
                     if it.usage {
                         return self.open_usage(None);
                     }
+                    // A drive not mounted yet: mount it, then open it.
+                    if let Some(d) = it.drive.as_ref().filter(|d| d.mount.is_none()) {
+                        return self.drive_op(d.clone(), crate::drives::Op::Mount);
+                    }
                     let cfg = self.cfg.clone();
                     // A place replaces the disk usage page (kept for later).
                     if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
@@ -1540,12 +1577,7 @@ impl App {
             }
             Action::Actions => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned().filter(|it| !it.usage) {
-                    let mut items = vec![item(tr("New tab"), Cmd::OpenInNewTab(it.loc.clone()))];
-                    if let (true, Some(p)) = (it.pinned, it.loc.local_path()) {
-                        items.push(item(tr("Choose icon…"), Cmd::ChooseIcon(p.to_path_buf())));
-                        items.push(item(tr("Unpin from sidebar"), Cmd::Unpin(p.to_path_buf())));
-                    }
-                    self.overlay = Some(Overlay::Menu(Menu::new(it.label, items)));
+                    self.side_menu(it);
                 }
             }
             Action::Menu => self.open_app_menu(),
@@ -2124,6 +2156,9 @@ impl App {
         }
         add(tr("Delete permanently"), Cmd::DeleteAsk, any && editable);
         add(tr("Compress…"), Cmd::CompressAsk, any && local);
+        if p.loc.local_path().is_some() && p.loc.local_path() == trash_files().as_deref() {
+            add(tr("Empty trash…"), Cmd::EmptyTrashAsk, !p.entries.is_empty());
+        }
         if one_archive {
             add(tr("Extract here"), Cmd::ExtractHere, local);
             if dual {
@@ -2345,7 +2380,7 @@ impl App {
                         self.settings_toggle_open(chip);
                     }
                     row::VOLUMES | row::WEB_IMAGES => self.settings_step(row, 0.0),
-                    row::APPEARANCE => self.settings_step(row, 1.0),
+                    row::APPEARANCE | row::LANGUAGE => self.settings_step(row, 1.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
                 }
@@ -2485,6 +2520,16 @@ impl App {
                     st.chip = (st.chip as isize + d as isize).clamp(0, OPEN_KINDS as isize - 1) as usize;
                 }
                 return;
+            }
+            row::LANGUAGE => {
+                // "As the system", then each language.
+                let n = crate::i18n::LANGUAGES.len() as isize + 1;
+                let at = self.cfg.language.as_deref().and_then(|c| crate::i18n::LANGUAGES.iter().position(|(l, _, _)| *l == c)).map_or(0, |i| i as isize + 1);
+                let next = (at + d as isize).rem_euclid(n);
+                self.cfg.language = (next > 0).then(|| crate::i18n::LANGUAGES[next as usize - 1].0.to_string());
+                self.cfg.save();
+                crate::i18n::set(self.cfg.language.as_deref());
+                self.refresh_sidebar();
             }
             row::APPEARANCE => {
                 self.cfg.appearance = (self.cfg.appearance as isize + d as isize).rem_euclid(3) as u8;
@@ -2820,6 +2865,7 @@ impl App {
             | Cmd::ViewerSaveThen(_)
             | Cmd::ViewerDiscardThen(_) => self.viewer_cmd(cmd),
             Cmd::CloseViewer => self.request_close_viewer(),
+            Cmd::EmptyTrashAsk | Cmd::EmptyTrashNow | Cmd::DriveMount(_) | Cmd::DriveUnmount(_) | Cmd::DriveEject(_) => self.side_cmd(cmd),
             Cmd::UsageOpen(_)
             | Cmd::UsageReveal
             | Cmd::UsageZoomIn
@@ -3167,6 +3213,11 @@ fn mounts() -> Vec<(String, PathBuf)> {
         }
     }
     out
+}
+
+/// The home trash's files folder.
+pub fn trash_files() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("Trash/files"))
 }
 
 pub fn human_size(n: u64) -> String {

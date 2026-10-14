@@ -899,7 +899,10 @@ impl App {
         let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
         let (anchor, offset) = if side { (Align2::RIGHT_TOP, vec2(-16.0, 110.0)) } else { (Align2::CENTER_CENTER, vec2(0.0, 0.0)) };
         let vprefs = self.cfg.viewer.clone();
-        egui::Area::new("overlay".into())
+        // One area per kind of overlay: an area keeps its last size, and a
+        // small menu's would squeeze the settings' scroll area after it.
+        let kind = overlay.as_ref().map(std::mem::discriminant);
+        egui::Area::new(egui::Id::new(("overlay", kind)))
             .order(Order::Foreground)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
@@ -2131,6 +2134,30 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
             ev = Some(SettingsEvent::Appearance(i as u8));
         }
     }
+
+    // Language: ‹ name ›.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::LANGUAGE, "language");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::LANGUAGE));
+    }
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Language"), label_font.clone(), v.text_color());
+    let name = match cfg.language.as_deref().and_then(|c| crate::i18n::LANGUAGES.iter().find(|(l, _, _)| *l == c)) {
+        Some((_, own, _)) => own.to_string(),
+        None => format!("{} ({})", tr("As the system"), crate::i18n::LANGUAGES[crate::i18n::detect()].1),
+    };
+    let (minus, plus) = (
+        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
+        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+    );
+    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
+        let resp = ui.interact(b, ui.id().with(("lang", label)), Sense::click());
+        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
+        if resp.clicked() {
+            ev = Some(SettingsEvent::Step(row::LANGUAGE, d));
+        }
+    }
+    ui.painter().text(pos2((minus.max.x + plus.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
 
     // Steppers.
     let steppers: [(usize, &str, String); 4] = [

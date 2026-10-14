@@ -106,6 +106,15 @@ adds to the selection. Drag items by their icon or name onto a folder, the other
 sidebar place: a move on the same disk, otherwise a copy (Ctrl copies, Shift moves). Onto a
 writable archive they're added to it; onto the trash they're trashed.
 
+**Sidebar.** Places, pinned folders, **drives** (every partition that isn't the system's, mounted
+or not: ✕ mounts and opens one, △ has Mount / Unmount / Eject through udisks, which asks polkit for
+a password when needed) and tools. △ on any entry chooses its icon (a theme icon or your own
+picture); on the trash it also empties it (after asking).
+
+**Languages.** English, Русский, Українська, Deutsch, Español, Français, 中文, 日本語, 한국어 —
+the system's by default (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`), English when it isn't one
+of these; Settings → Language switches on the fly. CJK text needs a CJK font (e.g. noto-fonts-cjk).
+
 **Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
 live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along.
 

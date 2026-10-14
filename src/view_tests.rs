@@ -9,6 +9,10 @@ use egui_kittest::Harness;
 use crate::app::App;
 use crate::input::{Action, Input};
 
+/// Tests run in parallel in one process; the one that changes process-wide
+/// things (the language, the drive listing) runs on its own.
+static GLOBALS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 fn harness(dir: PathBuf) -> Harness<'static, App> {
     // Never touch the real config or gamepad from tests.
     let cfg = std::env::temp_dir().join(format!("polka-test-cfg-{}", std::process::id()));
@@ -16,6 +20,10 @@ fn harness(dir: PathBuf) -> Harness<'static, App> {
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
         std::env::set_var("POLKA_NO_GAMEPAD", "1");
         std::env::set_var("XDG_CACHE_HOME", cfg.join("cache"));
+        // The trash (and everything else in ~/.local/share) of their own.
+        std::env::set_var("XDG_DATA_HOME", cfg.join("data"));
+        let _ = std::fs::create_dir_all(cfg.join("data/Trash/files"));
+        let _ = std::fs::create_dir_all(cfg.join("data/Trash/info"));
     }
     Harness::builder()
         .with_size([1100.0, 680.0])
@@ -56,6 +64,7 @@ fn shot(h: &mut Harness<'static, App>, name: &str) {
 #[test]
 #[ignore]
 fn screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     settle(&mut h);
@@ -226,7 +235,8 @@ fn features(h: &mut Harness<'static, App>) {
     shot(h, "14-themes");
     // The picker must not grow while the cursor moves (it used to, every frame).
     let height = |h: &Harness<'static, App>| {
-        h.ctx.memory(|m| m.area_rect(egui::Id::new("overlay"))).map(|r| r.height()).unwrap()
+        let kind = h.state().overlay.as_ref().map(std::mem::discriminant);
+        h.ctx.memory(|m| m.area_rect(egui::Id::new(("overlay", kind)))).map(|r| r.height()).unwrap()
     };
     let before = height(h);
     for _ in 0..6 {
@@ -1336,6 +1346,7 @@ fn music(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn music_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     music(&mut h);
@@ -1435,6 +1446,7 @@ fn video(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn video_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     video(&mut h);
@@ -1505,6 +1517,7 @@ fn replacing(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn replace_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     replacing(&mut h);
@@ -1595,6 +1608,7 @@ fn web_pictures(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn web_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     web_pictures(&mut h);
@@ -1737,6 +1751,7 @@ fn disk_usage(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn usage_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     disk_usage(&mut h);
@@ -1804,6 +1819,7 @@ fn light_look(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn light_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     light_look(&mut h);
@@ -2020,7 +2036,172 @@ fn mouse(h: &mut Harness<'static, App>) {
 #[test]
 #[ignore]
 fn mouse_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     mouse(&mut h);
+}
+
+/// The sidebar: drives (from a saved lsblk listing; udisks isn't really
+/// called), any place's own icon, emptying the trash, the language.
+fn sidebar_more(h: &mut Harness<'static, App>) {
+    use crate::app::{Cmd, Overlay, row};
+    use crate::i18n::tr;
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let fixture = dir.join("lsblk.json");
+    std::fs::write(
+        &fixture,
+        r#"{"blockdevices":[
+          {"name":"sdz","path":"/dev/sdz","fstype":null,"mountpoints":[null],"rm":true,"hotplug":true,"type":"disk","rota":true,"size":32000000000,"children":[
+            {"name":"sdz1","path":"/dev/sdz1","uuid":"1234-ABCD","label":"STICK","fstype":"exfat","mountpoints":[null],"rm":true,"hotplug":true,"type":"part","rota":true,"size":32000000000}]},
+          {"name":"sdy","path":"/dev/sdy","fstype":null,"mountpoints":[null],"rm":false,"hotplug":false,"type":"disk","rota":true,"size":2000000000000,"children":[
+            {"name":"sdy1","path":"/dev/sdy1","uuid":"9999","fstype":"ntfs","mountpoints":[null],"rm":false,"hotplug":false,"type":"part","rota":true,"size":2000000000000}]}
+        ]}"#,
+    )
+    .unwrap();
+    unsafe { std::env::set_var("POLKA_LSBLK", &fixture) };
+    h.state_mut().overlay = None;
+    h.state_mut().refresh_sidebar();
+    let find = |h: &Harness<'static, App>, label: &str| h.state().side_items.iter().position(|s| s.label == label).unwrap_or_else(|| panic!("no {label} in the sidebar"));
+    let stick = find(h, "STICK");
+    let big = h.state().side_items.iter().position(|s| s.drive.as_ref().is_some_and(|d| d.dev == "/dev/sdy1")).unwrap();
+    assert!(h.state().side_items[big].label.starts_with(tr("Drive")));
+    // Drives come before the tools.
+    let tools = h.state().side_items.iter().position(|s| s.usage).unwrap();
+    assert!(stick < tools && h.state().side_items[stick].section == "Drives");
+    h.state_mut().focus_sidebar();
+    h.state_mut().side_cursor = stick;
+    press(h, &[Action::Actions]);
+    let labels = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let menu = labels(h);
+    assert!(menu.contains(&tr("Mount").to_string()) && menu.contains(&tr("Eject").to_string()) && menu.contains(&tr("Choose icon…").to_string()), "{menu:?}");
+    shot(h, "c0-drive-menu");
+    press(h, &[Action::Back]);
+    // ✕ on an unmounted drive mounts it (through udisks).
+    crate::drives::RAN.lock().unwrap().clear();
+    press(h, &[Action::Accept]);
+    for _ in 0..20 {
+        settle(h);
+        if !crate::drives::RAN.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(crate::drives::RAN.lock().unwrap().first().map(String::as_str), Some("udisksctl mount -b /dev/sdz1"));
+    h.state_mut().run(Cmd::DriveEject(stick));
+    settle(h);
+    assert!(crate::drives::RAN.lock().unwrap().iter().any(|c| c == "udisksctl power-off -b /dev/sdz"), "{:?}", crate::drives::RAN.lock().unwrap());
+    // Mounting opened it in the pane; back to the sidebar.
+    assert!(h.state().focus == crate::app::Focus::Panes);
+    h.state_mut().focus_sidebar();
+    // The internal disk can't be ejected.
+    h.state_mut().side_cursor = big;
+    press(h, &[Action::Actions]);
+    let menu = labels(h);
+    assert!(menu.contains(&tr("Mount").to_string()) && !menu.contains(&tr("Eject").to_string()), "{menu:?}");
+    press(h, &[Action::Back]);
+
+    // Any place takes its own icon: Home here.
+    let home = find(h, tr("Home"));
+    h.state_mut().side_cursor = home;
+    press(h, &[Action::Actions]);
+    assert!(labels(h).contains(&tr("Choose icon…").to_string()));
+    press(h, &[Action::Back]);
+    let home_path = dirs::home_dir().unwrap();
+    h.state_mut().run(Cmd::SetPinIcon(home_path.clone(), Some("folder-red".into())));
+    assert_eq!(h.state().side_items[find(h, tr("Home"))].custom_icon.as_deref(), Some("folder-red"));
+    // A drive's icon sticks to its UUID.
+    h.state_mut().run(Cmd::SetPinIcon("dev:1234-ABCD".into(), Some("media-flash".into())));
+    assert_eq!(h.state().side_items[find(h, "STICK")].custom_icon.as_deref(), Some("media-flash"));
+    settle(h);
+    shot(h, "c1-sidebar-drives-icons");
+    h.state_mut().run(Cmd::SetPinIcon(home_path, None));
+    h.state_mut().run(Cmd::SetPinIcon("dev:1234-ABCD".into(), None));
+
+    // The trash: a full bin, emptied after asking.
+    let trash = dirs::data_dir().unwrap().join("Trash");
+    assert!(trash.starts_with(std::env::temp_dir()), "not the test's own trash: {trash:?}");
+    for n in ["old.txt", "older.txt"] {
+        std::fs::write(trash.join("files").join(n), "x").unwrap();
+        std::fs::write(trash.join("info").join(format!("{n}.trashinfo")), "[Trash Info]\n").unwrap();
+    }
+    std::fs::create_dir_all(trash.join("files/dir/sub")).unwrap();
+    h.state_mut().refresh_sidebar();
+    let bin = find(h, tr("Trash"));
+    assert_eq!(h.state().side_items[bin].icon[0], "user-trash-full");
+    h.state_mut().side_cursor = bin;
+    press(h, &[Action::Actions]);
+    let menu = labels(h);
+    let at = menu.iter().position(|l| l == tr("Empty trash…")).expect("no Empty trash");
+    for _ in 0..at {
+        press(h, &[Action::Down]);
+    }
+    press(h, &[Action::Accept]);
+    shot(h, "c2-empty-trash-ask");
+    press(h, &[Action::Accept]);
+    for _ in 0..20 {
+        settle(h);
+        if std::fs::read_dir(trash.join("files")).unwrap().count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(std::fs::read_dir(trash.join("files")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(trash.join("info")).unwrap().count(), 0);
+    settle(h);
+    assert_eq!(h.state().side_items[find(h, tr("Trash"))].icon[0], "user-trash");
+
+    // Languages: from the settings, live.
+    let before = h.state().cfg.language.clone();
+    crate::i18n::set(Some("de"));
+    h.state_mut().cfg.language = Some("de".into());
+    h.state_mut().refresh_sidebar();
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::LANGUAGE;
+    }
+    press(h, &[Action::Right]);
+    assert_eq!(h.state().cfg.language.as_deref(), Some("es"));
+    assert_eq!(crate::i18n::current(), "es");
+    settle(h);
+    shot(h, "c3-settings-spanish");
+    press(h, &[Action::Back]);
+    h.state_mut().run(Cmd::Settings);
+    settle(h);
+    shot(h, "c3b-settings-spanish-again");
+    press(h, &[Action::Back]);
+    for code in ["zh", "ja", "ko", "uk", "fr", "de"] {
+        crate::i18n::set(Some(code));
+        h.state_mut().refresh_sidebar();
+        settle(h);
+        shot(h, &format!("c4-lang-{code}"));
+    }
+    // German runs long: the settings and a menu.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::CLOSE;
+    }
+    h.state_mut().ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
+    settle(h);
+    shot(h, "c5-settings-de");
+    press(h, &[Action::Back]);
+    press(h, &[Action::Actions]);
+    shot(h, "c6-menu-de");
+    press(h, &[Action::Back]);
+    h.state_mut().cfg.language = before.clone();
+    crate::i18n::set(before.as_deref());
+    h.state_mut().refresh_sidebar();
+    unsafe { std::env::remove_var("POLKA_LSBLK") };
+    h.state_mut().refresh_sidebar();
+}
+
+#[test]
+#[ignore]
+fn sidebar_screens() {
+    // Switches the language and the drives for the whole process.
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    sidebar_more(&mut h);
 }
