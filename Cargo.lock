@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "base64",
  "chrono",
@@ -3496,6 +3496,7 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "xz2",
+ "zbus",
  "zip",
  "zstd",
 ]

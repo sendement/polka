@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.sendement.Polka</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Polka</name>
+  <summary>File manager made for gamepads</summary>
+  <summary xml:lang="ru">Файловый менеджер для геймпада</summary>
+  <developer id="io.github.sendement">
+    <name>Sendem</name>
+  </developer>
+  <description>
+    <p>
+      Polka is a classic two-pane file manager that is fully usable with a gamepad
+      (DualSense, Xbox, Steam Deck controls) as well as the keyboard and mouse.
+    </p>
+    <ul>
+      <li>Archives open like folders and can be edited; multi-volume archives are grouped</li>
+      <li>Built-in viewer and editor for text with syntax highlighting, Markdown, pictures, music and video</li>
+      <li>Disk usage as rings, tiles or a list</li>
+      <li>Drives: mount, unmount and eject from the sidebar</li>
+      <li>Icon themes, accent colors, light and dark looks, nine languages</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.sendement.Polka.desktop</launchable>
+  <url type="homepage">https://github.com/sendement/polka</url>
+  <url type="bugtracker">https://github.com/sendement/polka/issues</url>
+  <categories>
+    <category>System</category>
+    <category>FileTools</category>
+  </categories>
+  <supports>
+    <control>gamepad</control>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.18.0" date="2026-10-14"/>
+  </releases>
+</component>

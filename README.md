@@ -139,6 +139,22 @@ Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,
 `icon_theme` override, `zoom` for TV use; Ctrl+= / Ctrl+- also zoom).
 `POLKA_NO_GAMEPAD=1` disables controller input.
 
+## Flatpak
+
+`packaging/flatpak/` builds the same program as a Flatpak (`io.github.sendement.Polka`, on
+org.freedesktop.Platform 25.08 with 7-Zip built in). Inside the sandbox Polka uses your real
+folders (trash, shared thumbnails, settings), the host's icon themes, starts the programs you open
+on the host, and talks to UDisks2 for drives.
+
+```sh
+flatpak install flathub org.freedesktop.Sdk//25.08 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.sendement.Polka.yml
+flatpak run io.github.sendement.Polka
+```
+
+After changing dependencies, regenerate `packaging/flatpak/cargo-sources.json` with
+[flatpak-cargo-generator](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo).
+
 ## Tests
 
 ```sh

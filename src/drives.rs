@@ -21,6 +21,8 @@ pub struct Drive {
     pub removable: bool,
     pub optical: bool,
     pub ssd: bool,
+    /// UDisks2 object paths (block, drive) when listed from it.
+    pub udisks: Option<(String, String)>,
 }
 
 impl Drive {
@@ -92,6 +94,7 @@ fn walk(v: &Value, parent: Option<&Value>, out: &mut Vec<Drive>) {
             ssd: !flag(v, "rota") && !removable,
             dev,
             disk,
+            udisks: None,
         });
     }
     if let Some(children) = v.get("children").and_then(Value::as_array) {
@@ -121,6 +124,11 @@ pub fn list() -> Vec<Drive> {
     }
     if cfg!(test) {
         return Vec::new();
+    }
+    // UDisks2 knows the host's real mounts (a Flatpak sandbox has its own);
+    // lsblk is the fallback without it.
+    if let Ok(v) = udisks::list() {
+        return v;
     }
     let out = std::process::Command::new("lsblk")
         .args(["-J", "-b", "-o", "NAME,PATH,LABEL,PARTLABEL,UUID,SIZE,FSTYPE,MOUNTPOINTS,RM,HOTPLUG,TYPE,ROTA,PKNAME"])
@@ -180,6 +188,9 @@ pub enum Done {
 
 /// Do it (blocking; call from a thread).
 pub fn apply(d: &Drive, op: &Op) -> Result<Done, String> {
+    if let Some((block, drive)) = &d.udisks {
+        return udisks::apply(d, block, drive, op);
+    }
     match op {
         Op::Mount => {
             let out = run(&["udisksctl", "mount", "-b", &d.dev])?;
@@ -200,6 +211,146 @@ pub fn apply(d: &Drive, op: &Op) -> Result<Done, String> {
                 run(&["udisksctl", "power-off", "-b", &d.disk])?;
             }
             Ok(Done::Ejected(mounted.iter().filter_map(|m| m.mount.clone()).collect()))
+        }
+    }
+}
+
+/// Drives through the UDisks2 daemon on the system bus.
+mod udisks {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use zbus::blocking::{Connection, Proxy};
+    use zbus::proxy::MethodFlags;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+
+    use super::{Done, Drive, Op, SKIP_FS, USER_MOUNTS};
+
+    const BUS: &str = "org.freedesktop.UDisks2";
+    type Props = HashMap<String, OwnedValue>;
+    type Objects = HashMap<OwnedObjectPath, HashMap<String, Props>>;
+
+    fn conn() -> zbus::Result<&'static Connection> {
+        static C: std::sync::OnceLock<Option<Connection>> = std::sync::OnceLock::new();
+        C.get_or_init(|| Connection::system().ok()).as_ref().ok_or_else(|| zbus::Error::Failure("no system bus".into()))
+    }
+
+    fn get<'a>(p: &'a Props, k: &str) -> Option<&'a Value<'static>> {
+        p.get(k).map(|v| &**v)
+    }
+    fn s(p: &Props, k: &str) -> Option<String> {
+        match get(p, k)? {
+            Value::Str(x) if !x.is_empty() => Some(x.to_string()),
+            Value::ObjectPath(x) if x.as_str() != "/" => Some(x.to_string()),
+            _ => None,
+        }
+    }
+    fn b(p: &Props, k: &str) -> bool {
+        matches!(get(p, k), Some(Value::Bool(true)))
+    }
+    fn u(p: &Props, k: &str) -> u64 {
+        match get(p, k) {
+            Some(Value::U64(x)) => *x,
+            Some(Value::I32(x)) => *x as u64,
+            _ => 0,
+        }
+    }
+    /// `ay` (with its trailing NUL) as text.
+    fn bytes(v: &Value) -> Option<String> {
+        let Value::Array(a) = v else { return None };
+        let raw: Vec<u8> = a.iter().filter_map(|x| if let Value::U8(c) = x { Some(*c) } else { None }).collect();
+        let t = String::from_utf8_lossy(&raw).trim_end_matches('\0').to_string();
+        (!t.is_empty()).then_some(t)
+    }
+
+    pub fn list() -> zbus::Result<Vec<Drive>> {
+        let p = Proxy::new(conn()?, BUS, "/org/freedesktop/UDisks2", "org.freedesktop.DBus.ObjectManager")?;
+        let objects: Objects = p.call("GetManagedObjects", &())?;
+        let mut out = Vec::new();
+        for (path, ifaces) in &objects {
+            let Some(block) = ifaces.get("org.freedesktop.UDisks2.Block") else { continue };
+            if b(block, "HintIgnore") || s(block, "IdUsage").as_deref() != Some("filesystem") {
+                continue;
+            }
+            let fstype = s(block, "IdType").unwrap_or_default();
+            if SKIP_FS.contains(&fstype.as_str()) {
+                continue;
+            }
+            let dev = get(block, "Device").and_then(bytes).unwrap_or_default();
+            let mounts: Vec<PathBuf> = ifaces
+                .get("org.freedesktop.UDisks2.Filesystem")
+                .and_then(|f| get(f, "MountPoints"))
+                .and_then(|v| if let Value::Array(a) = v { Some(a.iter().filter_map(bytes).map(PathBuf::from).collect()) } else { None })
+                .unwrap_or_default();
+            let user_mount = mounts.iter().find(|m| USER_MOUNTS.iter().any(|u| m.starts_with(u))).cloned();
+            let loop_dev = ifaces.contains_key("org.freedesktop.UDisks2.Loop");
+            let drive_path = s(block, "Drive").unwrap_or_default();
+            let drive = objects.iter().find(|(p, _)| p.as_str() == drive_path).and_then(|(_, i)| i.get("org.freedesktop.UDisks2.Drive"));
+            let removable = drive.is_some_and(|d| b(d, "Removable") || b(d, "MediaRemovable") || s(d, "ConnectionBus").as_deref() == Some("usb"));
+            let optical = drive.is_some_and(|d| b(d, "Optical"));
+            let size = u(block, "Size");
+            let system = !mounts.is_empty() && user_mount.is_none();
+            let tiny = mounts.is_empty() && !removable && size < 1_200_000_000;
+            if system || tiny || (loop_dev && user_mount.is_none()) {
+                continue;
+            }
+            out.push(Drive {
+                dev,
+                disk: drive_path.clone(),
+                label: s(block, "IdLabel").or_else(|| s(block, "HintName")),
+                uuid: s(block, "IdUUID"),
+                size,
+                fstype,
+                mount: user_mount,
+                removable,
+                optical,
+                ssd: drive.is_some_and(|d| matches!(get(d, "RotationRate"), Some(Value::I32(0)))) && !removable,
+                udisks: Some((path.to_string(), drive_path)),
+            });
+        }
+        out.sort_by(|a, b| a.dev.cmp(&b.dev));
+        Ok(out)
+    }
+
+    /// Call with polkit allowed to ask for a password.
+    fn call<R: serde::de::DeserializeOwned + zbus::zvariant::Type>(obj: &str, iface: &str, method: &str) -> Result<R, String> {
+        let c = conn().map_err(|e| e.to_string())?;
+        let p = Proxy::new(c, BUS, obj, iface).map_err(|e| e.to_string())?;
+        let opts: HashMap<&str, Value> = HashMap::new();
+        let flags = MethodFlags::AllowInteractiveAuth.into();
+        match p.call_with_flags::<_, _, R>(method, flags, &(opts,)) {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err("no reply".into()),
+            // "org.freedesktop.UDisks2.Error.DeviceBusy: Error unmounting …: target is busy" → the end.
+            Err(e) => {
+                let t = e.to_string();
+                Err(t.rsplit(": ").next().unwrap_or(&t).to_string())
+            }
+        }
+    }
+
+    pub fn apply(d: &Drive, block: &str, drive: &str, op: &Op) -> Result<Done, String> {
+        const FS: &str = "org.freedesktop.UDisks2.Filesystem";
+        const DRIVE: &str = "org.freedesktop.UDisks2.Drive";
+        match op {
+            Op::Mount => {
+                let at: String = call(block, FS, "Mount")?;
+                Ok(Done::Mounted(PathBuf::from(at)))
+            }
+            Op::Unmount => {
+                call::<()>(block, FS, "Unmount")?;
+                Ok(Done::Unmounted(d.mount.iter().cloned().collect()))
+            }
+            Op::Eject(mounted) => {
+                for m in mounted {
+                    if let Some((b, _)) = &m.udisks {
+                        call::<()>(b, FS, "Unmount")?;
+                    }
+                }
+                // A disc comes out; a USB disk is powered off safely.
+                if d.optical { call::<()>(drive, DRIVE, "Eject")? } else { call::<()>(drive, DRIVE, "PowerOff")? }
+                Ok(Done::Ejected(mounted.iter().filter_map(|m| m.mount.clone()).collect()))
+            }
         }
     }
 }
@@ -232,5 +383,20 @@ mod tests {
         assert!(d[2].optical && d[2].disk == "/dev/sr0");
         assert_eq!(mounted_at("Mounted /dev/sda1 at /run/media/me/STICK.\n").as_deref(), Some(Path::new("/run/media/me/STICK")));
         assert_eq!(mounted_at("Mounted /dev/sda1 at /run/media/me/My Stick\n").as_deref(), Some(Path::new("/run/media/me/My Stick")));
+    }
+
+    /// `cargo test udisks_real -- --ignored --nocapture`: what UDisks2 lists here.
+    #[test]
+    #[ignore]
+    fn udisks_real() {
+        match super::udisks::list() {
+            Ok(v) => {
+                println!("udisks: {} drive(s)", v.len());
+                for d in v {
+                    println!("  {} {:?} {:?} {} removable={} mount={:?}", d.dev, d.label, d.fstype, d.size, d.removable, d.mount);
+                }
+            }
+            Err(e) => println!("udisks error: {e}"),
+        }
     }
 }

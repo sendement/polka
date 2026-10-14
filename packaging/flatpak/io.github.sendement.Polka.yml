@@ -1,0 +1,70 @@
+# Flatpak build of Polka. Locally:
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.sendement.Polka.yml
+# (run from the repository root; cargo-sources.json comes from
+# flatpak-cargo-generator.py over Cargo.lock).
+id: io.github.sendement.Polka
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: polka
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # GPU, and gamepads (evdev under /dev/input)
+  - --device=all
+  # gamepads plugged in later are announced through udev
+  - --filesystem=/run/udev:ro
+  # a file manager: every file, plus the host's icon themes (/run/host/usr)
+  - --filesystem=host
+  - --filesystem=host-os:ro
+  - --socket=pulseaudio
+  # pictures from the internet in Markdown
+  - --share=network
+  # programs, scripts and launchers the user opens run on the host
+  - --talk-name=org.freedesktop.Flatpak
+  # mounting, unmounting and ejecting drives
+  - --system-talk-name=org.freedesktop.UDisks2
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+
+modules:
+  # 7-Zip for password-protected 7z and rar (not in the runtime)
+  - name: 7zip
+    buildsystem: simple
+    build-commands:
+      - make -C CPP/7zip/Bundles/Alone2 -f ../../cmpl_gcc.mak -j${FLATPAK_BUILDER_N_JOBS} CFLAGS_WARN_WALL=-Wall
+      - install -Dm755 CPP/7zip/Bundles/Alone2/b/g/7zz /app/bin/7zz
+      - ln -s 7zz /app/bin/7z
+    sources:
+      - type: archive
+        url: https://www.7-zip.org/a/7z2603-src.tar.xz
+        sha256: 9cbde5099c6deb73691b0579063da5827522ccbbcba3f0020fd04e8c8c16c0d4
+        strip-components: 0
+
+  - name: polka
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/polka/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/polka /app/bin/polka
+      - install -Dm644 packaging/flatpak/io.github.sendement.Polka.desktop /app/share/applications/io.github.sendement.Polka.desktop
+      - install -Dm644 packaging/polka.svg /app/share/icons/hicolor/scalable/apps/io.github.sendement.Polka.svg
+      - install -Dm644 packaging/flatpak/io.github.sendement.Polka.metainfo.xml /app/share/metainfo/io.github.sendement.Polka.metainfo.xml
+    sources:
+      # The working tree; a Flathub build points at a git tag instead.
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
+          - packaging/arch
+      - cargo-sources.json

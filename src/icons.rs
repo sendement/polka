@@ -508,7 +508,21 @@ pub fn installed_themes() -> Vec<ThemeInfo> {
 
 /// Icon theme from gsettings, then GTK/KDE config files.
 pub fn detect_theme() -> Option<String> {
-    if let Ok(out) = std::process::Command::new("gsettings")
+    // In a Flatpak gsettings reads the sandbox's own (empty) settings; the
+    // settings portal has the desktop's.
+    if crate::sandbox::flatpak() {
+        let out = std::process::Command::new("gdbus")
+            .args(["call", "--session", "--dest", "org.freedesktop.portal.Desktop", "--object-path", "/org/freedesktop/portal/desktop"])
+            .args(["--method", "org.freedesktop.portal.Settings.ReadOne", "org.gnome.desktop.interface", "icon-theme"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // (<<'Papirus-Dark'>>,)
+        if let Some(name) = out.split('\'').nth(1).filter(|n| !n.is_empty()) {
+            return Some(name.to_string());
+        }
+    } else if let Ok(out) = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "icon-theme"])
         .output()
     {

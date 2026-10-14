@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -15,6 +15,7 @@ base64 = "0.22"
 percent-encoding = "2"
 rayon = "1.12"
 libc = "0.2"
+zbus = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp", "gif", "webp", "tiff"] }
 gilrs = "0.11"
 compress-tools = "0.16"

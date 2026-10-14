@@ -11,6 +11,7 @@ mod launch;
 mod locks;
 mod mouse;
 mod ops;
+mod sandbox;
 mod sidebar;
 mod thumbs;
 mod trashbin;
@@ -24,12 +25,14 @@ mod viewer;
 mod view_tests;
 
 fn main() -> eframe::Result {
+    sandbox::fix_env();
     archive_rw::utf8_locale();
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Polka")
-            .with_app_id("polka")
+            // The window matches its .desktop file (and icon) by this.
+            .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "polka".into()))
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([520.0, 360.0]),
         ..Default::default()

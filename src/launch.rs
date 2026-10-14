@@ -109,8 +109,11 @@ thread_local! {
 }
 
 #[cfg(not(test))]
-fn spawn(mut cmd: Command) -> Result<(), String> {
+fn spawn(cmd: Command) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
+    // Programs and launchers run on the host, not in a Flatpak sandbox
+    // (xdg-open stays inside: there it hands over to the portal).
+    let mut cmd = if cmd.get_program() == "xdg-open" { cmd } else { crate::sandbox::host(cmd) };
     use std::process::Stdio;
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
