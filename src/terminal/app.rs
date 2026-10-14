@@ -136,14 +136,30 @@ impl App {
                     self.ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
-            if w.sessions.iter().all(|s| s.exited) {
+            if w.sessions.iter().all(|s| s.exited) && !w.failed {
                 let ok = w.sessions.iter().all(|s| s.status == Some(0));
-                self.term_window = None;
+                let code = w.sessions.first().and_then(|s| s.status);
+                let lines = w.sessions.first().map(|s| s.last_lines(8)).unwrap_or_default();
+                crate::log::line(format!(
+                    "terminal window {:?}: exit {code:?} after {:.1} s; last lines: {}",
+                    self.term_window_title,
+                    w.started.elapsed().as_secs_f32(),
+                    lines.join(" | ")
+                ));
+                // The wrapper said so and waited already: nothing more to read.
+                let told = lines.iter().any(|l| l.contains('✘'));
+                if ok || told {
+                    self.term_window = None;
+                    if ok {
+                        self.toast(tr("Done"), false);
+                    }
+                } else {
+                    // Ended badly (maybe before it could say why): kept for reading.
+                    w.failed = true;
+                    self.term_window_title = format!("{} — {} ({})", self.term_window_title, tr("Failed — Enter closes"), code.map_or("?".into(), |c| c.to_string()));
+                }
                 self.reload_all();
                 self.refresh_sidebar();
-                if ok {
-                    self.toast(tr("Done"), false);
-                }
             }
         }
         for (ti, tab) in self.tabs.iter_mut().enumerate() {
@@ -232,6 +248,13 @@ impl App {
 
     /// The pad on the page.
     pub fn terminal_input(&mut self, a: Action) {
+        // A window whose command failed: ✕ or ○ closes it.
+        if self.term_window.as_ref().is_some_and(|w| w.failed) {
+            if matches!(a, Action::Accept | Action::Back | Action::Menu) {
+                self.term_window = None;
+            }
+            return;
+        }
         let Some(t) = self.term_mut() else { return };
         if t.sessions.is_empty() {
             match a {
@@ -463,6 +486,12 @@ impl App {
 
     /// Keys go to the shell; a few Ctrl+Shift ones stay with the page.
     pub fn terminal_keyboard(&mut self, events: Vec<egui::Event>) -> Vec<egui::Event> {
+        if self.term_window.as_ref().is_some_and(|w| w.failed) {
+            if events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::Enter | Key::Escape, pressed: true, .. })) {
+                self.term_window = None;
+            }
+            return Vec::new();
+        }
         let mut rest = Vec::new();
         let mods = self.ctx.input(|i| i.modifiers);
         if events.iter().any(|e| matches!(e, egui::Event::Text(_) | egui::Event::Key { pressed: true, .. } | egui::Event::Paste(_))) {

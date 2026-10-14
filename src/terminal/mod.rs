@@ -85,7 +85,7 @@ fn shell_command(prefs: &TermPrefs, cwd: &Path, pid_file: Option<&Path>, env: &s
         let inner = format!("{note}command -v script >/dev/null && exec script -qfec {q} /dev/null; exec sh -c {q}");
         let mut args: Vec<String> = vec!["--host".into(), "--watch-bus".into()];
         args.extend(env.iter().map(|(k, v)| format!("--env={k}={v}")));
-        args.extend([format!("--directory={}", cwd.display()), "sh".into(), "-c".into(), inner]);
+        args.extend([format!("--directory={}", crate::sandbox::host_path(cwd).display()), "sh".into(), "-c".into(), inner]);
         return tty::Shell::new("flatpak-spawn".into(), args);
     }
     if crate::sandbox::flatpak() {
@@ -95,7 +95,7 @@ fn shell_command(prefs: &TermPrefs, cwd: &Path, pid_file: Option<&Path>, env: &s
         let inner = format!("{note}s={sh}; [ -x \"$s\" ] || s=/bin/sh; command -v script >/dev/null && exec script -qfe /dev/null -c \"exec $s\"; exec \"$s\"");
         let mut args: Vec<String> = vec!["--host".into(), "--watch-bus".into()];
         args.extend(env.iter().map(|(k, v)| format!("--env={k}={v}")));
-        args.extend([format!("--directory={}", cwd.display()), "sh".into(), "-c".into(), inner]);
+        args.extend([format!("--directory={}", crate::sandbox::host_path(cwd).display()), "sh".into(), "-c".into(), inner]);
         return tty::Shell::new("flatpak-spawn".into(), args);
     }
     let sh = chosen.or_else(login_shell).unwrap_or_else(|| "/bin/sh".into());
@@ -229,6 +229,20 @@ impl Session {
         Some((l.next()?.trim().to_string(), PathBuf::from(l.next()?.trim())))
     }
 
+    /// The last lines with something on them (for the log).
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line, Point};
+        let t = self.term.lock();
+        let mut lines: Vec<String> = (0..t.screen_lines() as i32)
+            .map(|l| (0..t.columns()).map(|c| t.grid()[Point::new(Line(l), Column(c))].c).collect::<String>().trim_end().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(n);
+        lines.drain(..start);
+        lines
+    }
+
     pub fn mode(&self) -> TermMode {
         *self.term.lock().mode()
     }
@@ -314,6 +328,10 @@ pub enum Out {
 /// The page in a tab.
 pub struct Terminal {
     pub shown: bool,
+    /// A window's command: when it started, and that it ended badly (the
+    /// window stays for reading).
+    pub started: Instant,
+    pub failed: bool,
     pub sessions: Vec<Session>,
     pub active: usize,
     /// Choosing text to copy with the pad (alacritty's vi mode).
@@ -331,7 +349,7 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new() -> Self {
-        Self { shown: true, sessions: Vec::new(), active: 0, selecting: false, hold: None, erase_down: None, mark: None, cell: (8.0, 16.0), grid: (80, 24) }
+        Self { shown: true, started: Instant::now(), failed: false, sessions: Vec::new(), active: 0, selecting: false, hold: None, erase_down: None, mark: None, cell: (8.0, 16.0), grid: (80, 24) }
     }
 
     pub fn cur(&self) -> Option<&Session> {

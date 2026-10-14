@@ -49,7 +49,7 @@ pub fn host(cmd: std::process::Command) -> std::process::Command {
     let mut c = std::process::Command::new("flatpak-spawn");
     c.arg("--host");
     if let Some(dir) = cmd.get_current_dir() {
-        c.arg(format!("--directory={}", dir.display()));
+        c.arg(format!("--directory={}", host_path(dir).display()));
     }
     // Variables set for the command go along to the host.
     for (k, v) in cmd.get_envs() {

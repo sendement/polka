@@ -3159,6 +3159,22 @@ fn packages(h: &mut Harness<'static, App>) {
         }
     }
     assert!(h.state().term_window.is_none(), "Enter didn't close it");
+    // Failing at once, before anything is shown: the window stays to say so.
+    let cfg = h.state().cfg.clone();
+    let t = crate::terminal::Terminal::with_command(&cfg.terminal, &dir, &h.state().ctx, "exit 5", "x").unwrap();
+    h.state_mut().term_window = Some(Box::new(t));
+    h.state_mut().term_window_title = "Quick".into();
+    for _ in 0..40 {
+        settle(h);
+        if h.state().term_window.as_ref().is_some_and(|w| w.failed) {
+            break;
+        }
+    }
+    assert!(h.state().term_window.as_ref().is_some_and(|w| w.failed), "closed without a word");
+    assert!(h.state().term_window_title.contains("(5)"), "{}", h.state().term_window_title);
+    shot(h, "p3-failed-at-once");
+    press(h, &[Action::Back]);
+    assert!(h.state().term_window.is_none());
     unsafe { std::env::set_var("PATH", path) };
 }
 
