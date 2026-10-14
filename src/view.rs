@@ -8,7 +8,7 @@ use egui::{
 };
 
 use crate::app::{
-    App, Cmd, Focus, Menu, Osk, OskKey, Overlay, Pane, Props, OSK_LAYOUTS, fmt_time, human_size,
+    App, Cmd, Focus, Menu, Osk, OskKey, Overlay, Pane, Props, fmt_time, human_size,
 };
 use crate::config::{Config, ViewMode};
 use crate::i18n::tr;
@@ -108,6 +108,11 @@ impl App {
         }
         let mut events = ctx.input(|i| i.events.clone());
         let osk = matches!(self.overlay, Some(Overlay::Osk(_)));
+        // The terminal's own keyboard: real keys go to the shell too.
+        if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live()) {
+            let _ = self.terminal_keyboard(events);
+            return;
+        }
         // A text file open: the editor takes the keys first.
         if self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_text()) {
             events = self.editor_keyboard(events);
@@ -590,6 +595,15 @@ impl App {
     fn hints(&self) -> Vec<(Action, &'static str)> {
         match &self.overlay {
             Some(Overlay::Menu(_)) => vec![(Action::Accept, tr("OK")), (Action::Back, tr("Back"))],
+            Some(Overlay::Osk(k)) if k.live() => vec![
+                (Action::Accept, tr("Press")),
+                (Action::Select, tr("Backspace")),
+                (Action::Actions, tr("Space")),
+                (Action::LeftTrigger, tr("Shift")),
+                (Action::View, tr("Layout")),
+                (Action::PrevTab, "← →"),
+                (Action::Back, tr("Close")),
+            ],
             Some(Overlay::Osk(_)) => vec![
                 (Action::Accept, "⌨"),
                 (Action::Select, tr("Backspace")),
@@ -808,7 +822,20 @@ impl App {
             }
             if let Some(t) = self.tabs[tab].term.as_deref_mut().filter(|t| t.shown) {
                 let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, ui.visuals().dark_mode);
-                term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused);
+                // The pad's keyboard below: the terminal ends above it, so the
+                // prompt stays in sight.
+                let above = match &self.overlay {
+                    Some(Overlay::Osk(k)) if k.live() => self.osk_top,
+                    _ => None,
+                };
+                let typing = above.is_some();
+                if let Some(y) = above {
+                    let r = ui.available_rect_before_wrap();
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(r.min, pos2(r.max.x, (y - 8.0).max(r.min.y + 120.0)))));
+                    term_act = crate::terminal::draw::draw(&mut child, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused || typing);
+                } else {
+                    term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused);
+                }
                 return;
             }
             let dragging = self.drag.is_some();
@@ -964,8 +991,9 @@ impl App {
         let screen = ctx.content_rect();
         let mut close = false;
         // Viewer settings sit beside the file so changes show live.
-        let side = matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
-        let bottom = matches!(self.overlay, Some(Overlay::TermKeys(_)));
+        let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live());
+        let side = live || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
+        let bottom = live || matches!(self.overlay, Some(Overlay::TermKeys(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side { 0 } else { 140 }));
@@ -998,7 +1026,7 @@ impl App {
         // One area per kind of overlay: an area keeps its last size, and a
         // small menu's would squeeze the settings' scroll area after it.
         let kind = overlay.as_ref().map(std::mem::discriminant);
-        egui::Area::new(egui::Id::new(("overlay", kind)))
+        let shown = egui::Area::new(egui::Id::new(("overlay", kind)))
             .order(Order::Foreground)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
@@ -1021,6 +1049,7 @@ impl App {
                     None => {}
                 });
             });
+        self.osk_top = live.then_some(shown.response.rect.min.y);
         if dismiss {
             self.overlay = None;
         }
@@ -1642,79 +1671,112 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
 }
 
 fn draw_osk(ui: &mut Ui, k: &mut Osk) -> Option<OskKey> {
+    use crate::keyboard::{self, Slot};
     let mut pressed = None;
-    ui.label(egui::RichText::new(&k.title).strong().size(16.0));
+    let unit = 46.0;
+    let gap = 4.0;
+    let width = 15.0 * unit;
+    ui.set_width(width);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(&k.title).strong().size(16.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(egui::RichText::new(keyboard::LAYOUTS[k.layout].name).strong().color(ui.visuals().selection.bg_fill));
+        });
+    });
     ui.add_space(6.0);
 
-    // Text field with caret.
-    let width = 560.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
-    ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
-    ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
-    let font = FontId::proportional(17.0);
-    let shown = |cs: &[char]| -> String { if k.secret { "•".repeat(cs.len()) } else { cs.iter().collect() } };
-    let text = shown(&k.text);
-    let before = shown(&k.text[..k.caret]);
-    let pre_w = ui.painter().layout_no_wrap(before, font.clone(), Color32::WHITE).size().x;
-    // Scroll the text so the caret stays visible.
-    let shift = (pre_w - (width - 30.0)).max(0.0);
-    let clip = ui.painter().with_clip_rect(rect.shrink(4.0));
-    clip.text(pos2(rect.min.x + 10.0 - shift, rect.center().y), Align2::LEFT_CENTER, text, font, ui.visuals().strong_text_color());
-    let cx = rect.min.x + 10.0 - shift + pre_w;
-    let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-    if blink {
-        clip.line_segment([pos2(cx, rect.min.y + 8.0), pos2(cx, rect.max.y - 8.0)], Stroke::new(2.0, ui.visuals().strong_text_color()));
+    // Text field with caret (none when typing straight into the terminal).
+    if !k.live() {
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+        ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
+        ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
+        let font = FontId::proportional(17.0);
+        let shown = |cs: &[char]| -> String { if k.secret { "•".repeat(cs.len()) } else { cs.iter().collect() } };
+        let text = shown(&k.text);
+        let before = shown(&k.text[..k.caret]);
+        let pre_w = ui.painter().layout_no_wrap(before, font.clone(), Color32::WHITE).size().x;
+        // Scroll the text so the caret stays visible.
+        let shift = (pre_w - (width - 30.0)).max(0.0);
+        let clip = ui.painter().with_clip_rect(rect.shrink(4.0));
+        clip.text(pos2(rect.min.x + 10.0 - shift, rect.center().y), Align2::LEFT_CENTER, text, font, ui.visuals().strong_text_color());
+        let cx = rect.min.x + 10.0 - shift + pre_w;
+        let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
+        if blink {
+            clip.line_segment([pos2(cx, rect.min.y + 8.0), pos2(cx, rect.max.y - 8.0)], Stroke::new(2.0, ui.visuals().strong_text_color()));
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        ui.add_space(10.0);
     }
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-    ui.add_space(10.0);
 
-    let key_w = (width - 10.0 * 4.0) / 11.0;
-    for row in 0..k.rows() {
-        let n = k.row_len(row);
-        let special = row == 4;
-        let w = if special { (width - (n as f32 - 1.0) * 4.0) / n as f32 } else { key_w };
-        let total = n as f32 * w + (n as f32 - 1.0) * 4.0;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_space((width - total) / 2.0);
-            for col in 0..n {
-                let key = k.key_at(row, col);
-                let label = match key {
-                    OskKey::Char(c) => c.to_string(),
-                    OskKey::Shift => if k.shift { "⇧ ABC".into() } else { "⇧ abc".into() },
-                    OskKey::Layout => OSK_LAYOUTS[k.layout].0.to_string(),
-                    OskKey::Space => tr("Space").into(),
-                    OskKey::Backspace => "⌫".into(),
-                    OskKey::Left => "◀ ▶".into(),
-                    OskKey::Right => "▶".into(),
-                    OskKey::Ok => tr("OK").into(),
-                };
-                let (rect, r) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
-                let cur = row == k.row && col == k.col;
-                let v = ui.visuals();
-                let bg = if cur { v.selection.bg_fill } else if r.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
-                ui.painter().rect_filled(rect, 6.0, bg);
-                if cur {
-                    ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, v.strong_text_color()), StrokeKind::Inside);
-                }
-                ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::proportional(16.0), v.strong_text_color());
-                if r.clicked() {
-                    k.row = row;
-                    k.col = col;
-                    // The ◀ ▶ key moves the caret by click position.
-                    pressed = Some(if key == OskKey::Left {
-                        let right = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| p.x > rect.center().x);
-                        if right { OskKey::Right } else { OskKey::Left }
-                    } else {
-                        key
-                    });
+    let (area, _) = ui.allocate_exact_size(vec2(width, keyboard::ROWS as f32 * (40.0 + gap) - gap), Sense::hover());
+    for r in 0..keyboard::ROWS {
+        let mut x = area.min.x;
+        let y = area.min.y + r as f32 * (40.0 + gap);
+        for (col, (slot, w)) in keyboard::row(r).into_iter().enumerate() {
+            let rect = Rect::from_min_size(pos2(x + gap / 2.0, y), vec2(w * unit - gap, 40.0));
+            x += w * unit;
+            let key = k.key_at(r, col);
+            let resp = ui.interact(rect, ui.id().with(("osk", r, col)), Sense::click());
+            let cur = r == k.row && col == k.col;
+            let v = ui.visuals();
+            // Modifiers that are on stay lit.
+            let on = match key {
+                OskKey::Shift => k.shift,
+                OskKey::Caps => k.caps,
+                OskKey::Ctrl => k.ctrl,
+                OskKey::Alt => k.alt,
+                _ => false,
+            };
+            let usable = k.live() || !matches!(key, OskKey::Ctrl | OskKey::Alt | OskKey::Tab);
+            let special = matches!(slot, Slot::Key(_));
+            let bg = if cur {
+                v.selection.bg_fill
+            } else if on {
+                v.selection.bg_fill.gamma_multiply(0.45)
+            } else if resp.hovered() {
+                v.widgets.hovered.bg_fill
+            } else if special {
+                v.widgets.inactive.bg_fill.gamma_multiply(0.7)
+            } else {
+                v.widgets.inactive.bg_fill
+            };
+            ui.painter().rect_filled(rect, 6.0, bg);
+            if cur {
+                ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, v.strong_text_color()), StrokeKind::Inside);
+            }
+            let color = if usable { v.strong_text_color() } else { v.weak_text_color().gamma_multiply(0.6) };
+            let label: String = match key {
+                OskKey::Char(c) => c.to_string(),
+                OskKey::Backspace => "⌫".into(),
+                OskKey::Tab => "Tab ⇥".into(),
+                OskKey::Caps => "Caps".into(),
+                OskKey::Enter => "Enter ⏎".into(),
+                OskKey::Shift => "⇧ Shift".into(),
+                OskKey::Ctrl => "Ctrl".into(),
+                OskKey::Alt => "Alt".into(),
+                OskKey::Lang => format!("⇄ {}", keyboard::LAYOUTS[(k.layout + 1) % keyboard::LAYOUTS.len()].name),
+                OskKey::Space => tr("Space").into(),
+                OskKey::Left => "←".into(),
+                OskKey::Up => "↑".into(),
+                OskKey::Down => "↓".into(),
+                OskKey::Right => "→".into(),
+                OskKey::Ok => tr("OK").into(),
+            };
+            let size = if special { 14.0 } else { 18.0 };
+            ui.painter().text(rect.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, label, FontId::proportional(size), color);
+            // The other symbol on the key, small in its corner.
+            if let Slot::Ch(i) = slot {
+                if let Some(alt) = keyboard::alt_at(k.layout, r, i, k.shift) {
+                    ui.painter().text(rect.min + vec2(5.0, 3.0), Align2::LEFT_TOP, alt.to_string(), FontId::proportional(11.0), v.weak_text_color());
                 }
             }
-        });
-        ui.add_space(2.0);
+            if resp.clicked() {
+                k.row = r;
+                k.col = col;
+                pressed = Some(key);
+            }
+        }
     }
-    ui.add_space(4.0);
-    ui.label(egui::RichText::new("L1/R1: ◀ ▶").small().weak());
     pressed
 }
 

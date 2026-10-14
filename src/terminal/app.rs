@@ -150,6 +150,7 @@ impl App {
             }
             Some(Action::Actions) => self.run(Cmd::TermHistoryMenu),
             Some(Action::View) => self.run(Cmd::TermSavedMenu),
+            Some(Action::Accept) => self.term_key(K::Enter, Mods::NONE),
             _ => {}
         }
         for (ti, o) in outs {
@@ -173,7 +174,7 @@ impl App {
         sys.or_else(|| self.text_clip.clone())
     }
 
-    fn term_key(&mut self, k: K, m: Mods) {
+    pub(crate) fn term_key(&mut self, k: K, m: Mods) {
         self.with_session(|s| {
             let b = keys::encode(k, m, s.mode());
             s.input(b);
@@ -221,8 +222,7 @@ impl App {
             Action::Right => self.term_key(K::Right, Mods::NONE),
             Action::Home => self.term_key(K::Home, Mods::NONE),
             Action::End => self.term_key(K::End, Mods::NONE),
-            Action::Accept => self.term_key(K::Enter, Mods::NONE),
-            Action::Back | Action::Actions | Action::View => {
+            Action::Back | Action::Actions | Action::View | Action::Accept => {
                 if let Some(t) = self.term_mut() {
                     t.hold = Some((a, Instant::now()));
                 }
@@ -271,6 +271,7 @@ impl App {
             Action::Back => self.term_key(K::Esc, Mods::NONE),
             Action::Actions => self.terminal_menu(),
             Action::View => self.run(Cmd::TermKeys),
+            Action::Accept => self.run(Cmd::TermRunAsk),
             _ => {}
         }
     }
@@ -593,8 +594,7 @@ impl App {
             i
         };
         let items = vec![
-            en(item(tr("Enter a command…"), Cmd::TermRunAsk), has),
-            en(item(tr("Type text…"), Cmd::TermTypeAsk), has),
+            en(item(tr("Type a command…"), Cmd::TermRunAsk), has),
             en(item(tr("Command history"), Cmd::Submenu(SubMenu::TermHistory)), has),
             en(item(tr("Saved commands"), Cmd::Submenu(SubMenu::TermSaved)), has),
             en(item(tr("Launch a program"), Cmd::Submenu(SubMenu::TermLaunch)), has),
@@ -638,11 +638,8 @@ impl App {
             }
             SubMenu::TermEntry(saved, i) => {
                 let text = if saved { self.cfg.terminal.saved.get(i) } else { self.term_hist.get(i) }.cloned().unwrap_or_default();
-                let mut v = vec![
-                    item(tr("Run"), Cmd::TermRun(text.clone())),
-                    item(tr("Edit and run…"), Cmd::TermEdit(text.clone())),
-                    item(tr("Type without running"), Cmd::TermType(text.clone())),
-                ];
+                // Typed in, not run: ✕ held is Enter.
+                let mut v = vec![item(tr("Insert"), Cmd::TermType(text.clone()))];
                 if saved {
                     v.push(item(tr("Remove from saved"), Cmd::TermForget(i)));
                 } else {
@@ -719,9 +716,10 @@ impl App {
                 self.with_session(|s| s.input(format!("{c}\r").into_bytes()));
             }
             Cmd::TermType(c) => self.with_session(|s| s.input(c.into_bytes())),
-            Cmd::TermEdit(c) => self.overlay = Some(Overlay::Osk(Osk::new(tr("Enter a command"), &c, OskPurpose::TermRun))),
-            Cmd::TermRunAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Enter a command"), "", OskPurpose::TermRun))),
-            Cmd::TermTypeAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Type text"), "", OskPurpose::TermType))),
+            Cmd::TermRunAsk => {
+                self.unmark();
+                self.overlay = Some(Overlay::Osk(Osk::new(tr("Typing into the terminal"), "", OskPurpose::TermLive)));
+            }
             Cmd::TermSaveAsk => self.overlay = Some(Overlay::Osk(Osk::new(tr("Save a command"), "", OskPurpose::TermSave))),
             Cmd::TermSave(c) => {
                 if !c.trim().is_empty() && !self.cfg.terminal.saved.contains(&c) {
@@ -787,8 +785,6 @@ impl App {
     /// The command typed on the on-screen keyboard.
     pub fn term_osk(&mut self, purpose: OskPurpose, text: String) {
         match purpose {
-            OskPurpose::TermRun if !text.trim().is_empty() => self.run(Cmd::TermRun(text)),
-            OskPurpose::TermType => self.run(Cmd::TermType(text)),
             OskPurpose::TermSave => self.run(Cmd::TermSave(text.trim().to_string())),
             _ => {}
         }
@@ -921,7 +917,7 @@ impl App {
             ];
         }
         vec![
-            (Action::Accept, "Enter"),
+            (Action::Accept, tr("Type · hold: Enter")),
             (Action::Back, tr("Esc · hold: leave")),
             (Action::Select, tr("Erase · +arrows: mark")),
             (Action::View, tr("Keys · hold: saved")),

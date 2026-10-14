@@ -437,9 +437,8 @@ pub enum Cmd {
     TermClose,
     TermRun(String),
     TermType(String),
-    TermEdit(String),
+    /// The on-screen keyboard, typing straight into the terminal.
     TermRunAsk,
-    TermTypeAsk,
     TermSaveAsk,
     TermSave(String),
     TermForget(usize),
@@ -662,9 +661,9 @@ pub enum OskPurpose {
     ViewerReplace,
     /// A text field of the archive dialog, which comes back afterwards.
     CompressField { dlg: Box<CompressDlg>, field: CField },
-    /// A command for the terminal: run it, type it, or keep it.
-    TermRun,
-    TermType,
+    /// Keys straight into the terminal (nothing kept here).
+    TermLive,
+    /// A command to keep among the saved ones.
     TermSave,
 }
 
@@ -686,28 +685,13 @@ pub struct Osk {
     pub purpose: OskPurpose,
     /// Draw the text as dots (passwords).
     pub secret: bool,
+    /// Caps Lock, and Ctrl / Alt for the next key.
+    pub caps: bool,
+    pub ctrl: bool,
+    pub alt: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OskKey {
-    Char(char),
-    Shift,
-    Layout,
-    Space,
-    Backspace,
-    Left,
-    Right,
-    Ok,
-}
-
-pub const OSK_LAYOUTS: [(&str, [&str; 4]); 3] = [
-    ("EN", ["1234567890-", "qwertyuiop_", "asdfghjkl.,", "zxcvbnm()[]"]),
-    ("RU", ["1234567890-", "йцукенгшщзх", "фывапролджэ", "ячсмитьбюъё"]),
-    // Symbols, for shell commands above all.
-    ("#&", ["1234567890=", "!@#$%^&*~`+", "|\\/:;\"'<>?-", "{}[]()_.,§€"]),
-];
-pub const OSK_SPECIAL: [OskKey; 6] =
-    [OskKey::Shift, OskKey::Layout, OskKey::Space, OskKey::Backspace, OskKey::Left, OskKey::Ok];
+pub use crate::keyboard::OskKey;
 
 impl Osk {
     pub(crate) fn new(title: &str, text: &str, purpose: OskPurpose) -> Self {
@@ -724,34 +708,48 @@ impl Osk {
             }
             _ => text.len(),
         };
-        Self { title: title.into(), text, caret, row: 1, col: 0, layout: 0, shift: false, purpose, secret: false }
+        // On "q" (or its layout's first letter).
+        Self {
+            title: title.into(),
+            text,
+            caret,
+            row: 1,
+            col: 1,
+            layout: crate::keyboard::last_layout(),
+            shift: false,
+            purpose,
+            secret: false,
+            caps: false,
+            ctrl: false,
+            alt: false,
+        }
     }
 
-    pub fn rows(&self) -> usize {
-        5
+    /// Typing straight into the terminal, nothing kept here.
+    pub fn live(&self) -> bool {
+        matches!(self.purpose, OskPurpose::TermLive)
     }
 
     pub fn row_len(&self, row: usize) -> usize {
-        if row < 4 { OSK_LAYOUTS[self.layout].1[row].chars().count() } else { OSK_SPECIAL.len() }
+        crate::keyboard::row(row).len()
     }
 
     pub fn key_at(&self, row: usize, col: usize) -> OskKey {
-        if row < 4 {
-            let c = OSK_LAYOUTS[self.layout].1[row].chars().nth(col).unwrap_or(' ');
-            OskKey::Char(if self.shift { c.to_uppercase().next().unwrap_or(c) } else { c })
-        } else {
-            OSK_SPECIAL[col.min(OSK_SPECIAL.len() - 1)]
+        match crate::keyboard::row(row).get(col).map(|(s, _)| *s) {
+            Some(crate::keyboard::Slot::Ch(i)) => OskKey::Char(crate::keyboard::char_at(self.layout, row, i, self.shift, self.caps).unwrap_or(' ')),
+            Some(crate::keyboard::Slot::Key(k)) => k,
+            None => OskKey::Ok,
         }
     }
 
     fn nav(&mut self, a: Action) {
-        let rows = self.rows();
+        let rows = crate::keyboard::ROWS;
         match a {
             Action::Up | Action::Down => {
-                // Keep the horizontal position proportional between rows.
-                let frac = (self.col as f32 + 0.5) / self.row_len(self.row) as f32;
+                // The key under the same spot, as on a real keyboard.
+                let x = crate::keyboard::center(self.row, self.col);
                 self.row = if a == Action::Up { (self.row + rows - 1) % rows } else { (self.row + 1) % rows };
-                self.col = ((frac * self.row_len(self.row) as f32) as usize).min(self.row_len(self.row) - 1);
+                self.col = crate::keyboard::nearest(self.row, x);
             }
             Action::Left => self.col = (self.col + self.row_len(self.row) - 1) % self.row_len(self.row),
             Action::Right => self.col = (self.col + 1) % self.row_len(self.row),
@@ -1154,6 +1152,8 @@ pub struct App {
     pub text_clip: Option<String>,
     /// Shell history behind the terminal's history menu.
     pub term_hist: Vec<String>,
+    /// Top of the pad's keyboard while it types into the terminal.
+    pub osk_top: Option<f32>,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1224,6 +1224,7 @@ impl App {
             edit_hold: None,
             text_clip: None,
             term_hist: Vec::new(),
+            osk_top: None,
             sys_clip: None,
             dark_applied: None,
             drag: None,
@@ -1733,13 +1734,13 @@ impl App {
                     self.osk_key(key);
                 }
                 Action::Back => self.osk_cancel(),
-                Action::Select => k.backspace(),
-                Action::Actions => k.insert(" "),
-                Action::PrevTab => k.caret_by(-1),
-                Action::NextTab => k.caret_by(1),
-                Action::LeftTrigger => k.shift = !k.shift,
-                Action::View => k.layout = (k.layout + 1) % OSK_LAYOUTS.len(),
-                Action::Menu | Action::RightTrigger => self.osk_submit(),
+                Action::Select => self.osk_key(OskKey::Backspace),
+                Action::Actions => self.osk_key(OskKey::Space),
+                Action::PrevTab => self.osk_key(OskKey::Left),
+                Action::NextTab => self.osk_key(OskKey::Right),
+                Action::LeftTrigger => self.osk_key(OskKey::Shift),
+                Action::View => self.osk_key(OskKey::Lang),
+                Action::Menu | Action::RightTrigger => self.osk_key(OskKey::Ok),
                 _ => {}
             },
             Overlay::Themes(t) => match a {
@@ -1825,16 +1826,49 @@ impl App {
     pub fn osk_key(&mut self, key: OskKey) {
         let Some(Overlay::Osk(k)) = self.overlay.as_mut() else { return };
         match key {
+            OskKey::Shift => k.shift = !k.shift,
+            OskKey::Caps => k.caps = !k.caps,
+            OskKey::Ctrl => k.ctrl = !k.ctrl,
+            OskKey::Alt => k.alt = !k.alt,
+            OskKey::Lang => {
+                k.layout = (k.layout + 1) % crate::keyboard::LAYOUTS.len();
+                crate::keyboard::set_last_layout(k.layout);
+            }
+            // Into the terminal as it's pressed.
+            _ if k.live() => {
+                let mods = crate::terminal::keys::Mods { ctrl: k.ctrl, alt: k.alt, shift: false };
+                let t = match key {
+                    OskKey::Char(c) => Some(crate::terminal::keys::K::Char(c)),
+                    OskKey::Space => Some(crate::terminal::keys::K::Char(' ')),
+                    OskKey::Backspace => Some(crate::terminal::keys::K::Backspace),
+                    OskKey::Tab => Some(crate::terminal::keys::K::Tab),
+                    OskKey::Enter => Some(crate::terminal::keys::K::Enter),
+                    OskKey::Left => Some(crate::terminal::keys::K::Left),
+                    OskKey::Right => Some(crate::terminal::keys::K::Right),
+                    OskKey::Up => Some(crate::terminal::keys::K::Up),
+                    OskKey::Down => Some(crate::terminal::keys::K::Down),
+                    _ => None,
+                };
+                if matches!(key, OskKey::Char(_) | OskKey::Space) {
+                    (k.shift, k.ctrl, k.alt) = (false, false, false);
+                }
+                match t {
+                    Some(t) => self.term_key(t, mods),
+                    None => self.overlay = None,
+                }
+            }
             OskKey::Char(c) => {
                 k.insert(&c.to_string());
+                k.shift = false;
             }
-            OskKey::Shift => k.shift = !k.shift,
-            OskKey::Layout => k.layout = (k.layout + 1) % OSK_LAYOUTS.len(),
             OskKey::Space => k.insert(" "),
             OskKey::Backspace => k.backspace(),
+            OskKey::Tab => {}
             OskKey::Left => k.caret_by(-1),
             OskKey::Right => k.caret_by(1),
-            OskKey::Ok => self.osk_submit(),
+            OskKey::Up => k.caret = 0,
+            OskKey::Down => k.caret = k.text.len(),
+            OskKey::Enter | OskKey::Ok => self.osk_submit(),
         }
     }
 
@@ -1866,7 +1900,7 @@ impl App {
         if matches!(k.purpose, OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace) {
             return self.viewer_osk(k.purpose, raw);
         }
-        if matches!(k.purpose, OskPurpose::TermRun | OskPurpose::TermType | OskPurpose::TermSave) {
+        if matches!(k.purpose, OskPurpose::TermLive | OskPurpose::TermSave) {
             return self.term_osk(k.purpose, raw);
         }
         if text.is_empty() {
@@ -2013,7 +2047,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermRun | OskPurpose::TermType | OskPurpose::TermSave => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave => unreachable!(),
         }
     }
 
@@ -3028,9 +3062,7 @@ impl App {
             | Cmd::TermClose
             | Cmd::TermRun(_)
             | Cmd::TermType(_)
-            | Cmd::TermEdit(_)
             | Cmd::TermRunAsk
-            | Cmd::TermTypeAsk
             | Cmd::TermSaveAsk
             | Cmd::TermSave(_)
             | Cmd::TermForget(_)

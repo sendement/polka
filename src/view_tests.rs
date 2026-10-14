@@ -2393,6 +2393,16 @@ fn terminal(h: &mut Harness<'static, App>) {
     key(h, Key::Enter, Modifiers::NONE);
     term_wait(h, "hello", 1);
     shot(h, "t0-terminal");
+    // Holding a button: △ history, ⧉ saved commands, ✕ Enter.
+    let hold = |h: &mut Harness<'static, App>, a: Action| {
+        h.state_mut().handle(Input::Press(a));
+        for _ in 0..16 {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        h.state_mut().handle(Input::Release(a));
+        settle(h);
+    };
     // □ erases what's typed: one character, or the part marked with □ held
     // and the arrows.
     type_text(h, "echo abcdef");
@@ -2406,33 +2416,53 @@ fn terminal(h: &mut Harness<'static, App>) {
     assert!(h.state().cur_tab().term.as_ref().unwrap().cur().unwrap().term.lock().selection.is_some(), "nothing marked");
     shot(h, "t0b-marked");
     press(h, &[Action::Select]);
-    press(h, &[Action::Accept]);
+    hold(h, Action::Accept);
     term_wait(h, "\nabc ", 1);
-    // Enter a command typed on the pad's keyboard (△ menu).
-    press(h, &[Action::Actions]);
-    menu_pick(h, crate::i18n::tr("Enter a command…"));
-    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
-    osk_type(h, "printf 'pad%s\\n' -run");
-    shot(h, "t1-run-osk");
-    press(h, &[Action::Menu]);
-    term_wait(h, "pad-run", 1);
+    // ✕: the pad's keyboard types straight into the shell, keys as pressed;
+    // the terminal makes room for it (a full screen keeps its prompt).
+    h.state_mut().run(Cmd::TermRun("seq 1 60".into()));
+    term_wait(h, "\n60", 1);
+    let rows = h.state().cur_tab().term.as_ref().unwrap().grid.1;
+    press(h, &[Action::Accept]);
+    settle(h);
+    let fewer = h.state().cur_tab().term.as_ref().unwrap().grid.1;
+    assert!(fewer + 5 < rows, "{rows} rows → {fewer}");
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if k.live()));
+    use crate::app::OskKey;
+    for c in "echo pad-runx".chars() {
+        h.state_mut().osk_key(if c == ' ' { OskKey::Space } else { OskKey::Char(c) });
+    }
+    term_wait(h, "echo pad-runx", 1);
+    // □ on the keyboard erases at once; Shift gives the key's other symbol.
+    press(h, &[Action::Select]);
+    term_wait(h, "echo pad-run ", 1);
+    press(h, &[Action::LeftTrigger]);
+    if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        (k.row, k.col) = (0, 1);
+    }
+    press(h, &[Action::Accept]);
+    term_wait(h, "echo pad-run!", 1);
+    shot(h, "t1-live-keyboard");
+    press(h, &[Action::Select]);
+    press(h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    hold(h, Action::Accept);
+    term_wait(h, "\npad-run", 1);
     // Interrupt from the menu.
+    h.state_mut().run(Cmd::TermRun("clear".into()));
+    for _ in 0..50 {
+        if term_screen(h).matches("$ ").count() == 1 {
+            break;
+        }
+        settle(h);
+    }
     h.state_mut().run(Cmd::TermRun("sleep 30".into()));
     term_wait(h, "sleep 30", 1);
     press(h, &[Action::Actions]);
     shot(h, "t2-menu");
     menu_pick(h, crate::i18n::tr("Interrupt (Ctrl+C)"));
-    term_wait(h, "$ ", 4);
+    term_wait(h, "$ ", 2);
     // History: △ held; what was run from here comes back.
-    let hold = |h: &mut Harness<'static, App>, a: Action| {
-        h.state_mut().handle(Input::Press(a));
-        for _ in 0..16 {
-            h.step();
-            std::thread::sleep(std::time::Duration::from_millis(40));
-        }
-        h.state_mut().handle(Input::Release(a));
-        settle(h);
-    };
     hold(h, Action::Actions);
     let Some(Overlay::Menu(m)) = h.state().overlay.as_ref() else { panic!("no history") };
     assert_eq!(m.title, crate::i18n::tr("Command history"));
@@ -2450,7 +2480,10 @@ fn terminal(h: &mut Harness<'static, App>) {
     h.state_mut().run(Cmd::TermSavedMenu);
     shot(h, "t4-saved");
     menu_pick(h, "echo saved-one");
-    menu_pick(h, crate::i18n::tr("Run"));
+    // Put in, not run: Enter is ✕ held.
+    menu_pick(h, crate::i18n::tr("Insert"));
+    assert!(term_screen(h).matches("saved-one").count() == 1);
+    hold(h, Action::Accept);
     term_wait(h, "saved-one", 2);
     // Quick keys know the pager and quit it.
     h.state_mut().run(Cmd::TermRun("less pager.txt".into()));
@@ -2481,7 +2514,7 @@ fn terminal(h: &mut Harness<'static, App>) {
     // Paste (what was copied here: no system clipboard in tests).
     h.state_mut().text_clip = Some("echo pasted-text".into());
     h.state_mut().run(Cmd::TermPaste);
-    press(h, &[Action::Accept]);
+    hold(h, Action::Accept);
     term_wait(h, "pasted-text", 2);
     // Colours and box drawing.
     h.state_mut().run(Cmd::TermRun("printf '\\e[31mred \\e[1;32mbold-green \\e[44m blue-bg \\e[0m\\n┌──┬──┐\\n│ab│cd│\\n└──┴──┘\\n▁▂▃▄▅▆▇█ ⣿⡇⠁\\n'".into()));

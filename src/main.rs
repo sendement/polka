@@ -8,6 +8,7 @@ mod fonts;
 mod i18n;
 mod icons;
 mod input;
+mod keyboard;
 mod launch;
 mod locks;
 mod mouse;

@@ -18,6 +18,9 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Top bar icons come from the icon theme (monochrome ones are recoloured to fit the UI)
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
+- The on-screen keyboard is a real keyboard's main block (EN, RU, UK; ⇄ switches), with what
+  Shift gives on every key (`!` on 1, `№` on 3 in Russian…), Caps Lock, and for the terminal Ctrl,
+  Alt, Tab and arrows
 - Pinned folders can use any theme icon (Papirus colour variants included) or your own picture
   (icon picker → △ "Own picture…", then pick an image in the panes); label sizes follow icon sizes
 
@@ -67,12 +70,14 @@ scrollback, start folder.
 
 | Terminal | Gamepad | Keyboard |
 |---|---|---|
-| Arrows / Enter | D-pad / ✕ / A | as usual |
+| Arrows | D-pad | as usual |
+| Type: the on-screen keyboard, straight into the shell (keys as pressed, Ctrl / Alt / Tab / arrows included; the terminal makes room for it) | ✕ / A tap | type |
+| Enter | ✕ / A held | Enter |
 | Erase a character | □ / X tap | Backspace |
 | Mark part of the command, then erase it | □ / X held + ← → (↑ ↓: to the line's start / end), then □ / X tap | — |
 | Esc | ○ / B tap | Esc |
 | Leave for the sidebar (shells keep running) | ○ / B held | mouse |
-| Menu: enter a command (on-screen keyboard, `#&` = symbols), interrupt, copy, paste, launch htop/btop/… | △ / Y tap | Ctrl+C, Ctrl+Shift+C / V |
+| Menu: type a command, interrupt, copy, paste, launch htop/btop/… | △ / Y tap | Ctrl+C, Ctrl+Shift+C / V |
 | Command history | △ / Y held | Ctrl+Shift+H |
 | Quick keys for what's running (vim, nano, htop, mc, less, lazygit, tmux…) | Create / View tap | Ctrl+Shift+K |
 | Saved commands | Create / View held | — |
@@ -80,7 +85,7 @@ scrollback, start folder.
 | Choose text to copy | △ → "Choose text to copy": move, □ start, ✕ copy | drag, Ctrl+Shift+Space |
 | Terminal tabs | tab strip, △ → Terminal tabs | Ctrl+Shift+T / W, Ctrl+PgUp / PgDn |
 
-History merges the shell's own (fish, zsh, bash) with what was run from here. In the Flatpak the
+History and saved commands are put in, not run: ✕ held runs them. History merges the shell's own (fish, zsh, bash) with what was run from here. In the Flatpak the
 shell runs on the host (`flatpak-spawn` and `script`), with resizes, Ctrl+C and the current folder.
 
 ## Steam
