@@ -58,6 +58,9 @@ fn main() -> eframe::Result {
     log::catch_panics();
     let _ = input::LOG.set(|s| log::line(s));
     log::startup();
+    // On Wayland the clipboard goes through Polka's own data device (drag
+    // and drop needs to be the only one): see vendor/egui-winit.
+    egui_winit::clipboard::external_wayland();
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -89,6 +92,19 @@ fn main() -> eframe::Result {
             if let (Ok(d), Ok(w)) = (cc.display_handle(), cc.window_handle()) {
                 if let (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(w)) = (d.as_raw(), w.as_raw()) {
                     app.dnd = dnd::Dnd::new(d.display.as_ptr(), w.surface.as_ptr(), cc.egui_ctx.clone());
+                    if app.dnd.is_some() {
+                        egui_winit::clipboard::set_external((dnd::clip_get, dnd::clip_set));
+                    }
+                    // A self-check of the clipboard (for testing, logged).
+                    if std::env::var_os("POLKA_CLIPBOARD_CHECK").is_some() {
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                            log::line(format!("clipboard check: read {:?}", dnd::clip_get()));
+                            dnd::clip_set("polka-clipboard-check".into());
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            log::line(format!("clipboard check: own {:?}", dnd::clip_get()));
+                        });
+                    }
                     log::line(format!("drag and drop with other programs: {}", if app.dnd.is_some() { "on" } else { "unavailable" }));
                 }
             }

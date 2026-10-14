@@ -1277,8 +1277,6 @@ dependencies = [
 [[package]]
 name = "egui-winit"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98466000559d66ba4db786a30448b01483946add4188e7f10f522a27b4fb89cc"
 dependencies = [
  "accesskit_winit",
  "arboard",
@@ -3477,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.19.2"
+version = "0.19.3"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -3506,6 +3504,7 @@ dependencies = [
  "raw-window-handle",
  "rayon",
  "regex",
+ "resvg",
  "rodio",
  "serde",
  "serde_json",

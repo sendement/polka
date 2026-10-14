@@ -216,3 +216,6 @@ POLKA_TEST_DIR=/some/dir POLKA_SHOT_DIR=/tmp/shots cargo test -- --ignored scree
 ## License
 
 MIT. Audio decoding uses [Symphonia](https://github.com/pdeljanov/Symphonia) (MPL-2.0).
+`vendor/egui-winit` is [egui-winit](https://github.com/emilk/egui) (MIT OR Apache-2.0) with one
+change: on Wayland the clipboard goes through Polka's own data device, which also does drag and
+drop with other programs (see `vendor/egui-winit/POLKA-NOTICE.md`).

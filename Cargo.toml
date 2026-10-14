@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.19.2"
+version = "0.19.3"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -74,6 +74,7 @@ serde_json = "1"
 alacritty_terminal = "0.26.0"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
+resvg = { version = "0.45", default-features = false }
 
 [profile.release]
 lto = "thin"
@@ -81,3 +82,8 @@ strip = true
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }
+
+# egui-winit with one change: Polka's own Wayland clipboard (see
+# vendor/egui-winit/POLKA-NOTICE.md).
+[patch.crates-io]
+egui-winit = { path = "vendor/egui-winit" }

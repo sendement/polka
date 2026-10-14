@@ -1601,19 +1601,6 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/egui-winit/egui-winit-0.36.2.crate",
-        "sha256": "98466000559d66ba4db786a30448b01483946add4188e7f10f522a27b4fb89cc",
-        "dest": "cargo/vendor/egui-winit-0.36.2"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"98466000559d66ba4db786a30448b01483946add4188e7f10f522a27b4fb89cc\", \"files\": {}}",
-        "dest": "cargo/vendor/egui-winit-0.36.2",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/egui_extras/egui_extras-0.36.2.crate",
         "sha256": "05cbdc785020861553f230f23d330ba1fb72613b9d8e0e457f3bdc8ba6db6dcf",
         "dest": "cargo/vendor/egui_extras-0.36.2"

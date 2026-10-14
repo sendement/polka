@@ -297,13 +297,32 @@ impl App {
         }
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let Some(p) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let accent = ctx.style_of(ctx.theme()).visuals.selection.bg_fill;
+        // The stack's pictures (paths), for the system's drag.
+        let pics_for_icon: Vec<String> = if self.dnd_out || ctx.content_rect().contains(p) {
+            Vec::new()
+        } else {
+            let shown = self.drag.as_ref().map(|d| d.shown.clone()).unwrap_or_default();
+            let thumbs = self.cfg.thumbnails;
+            shown
+                .iter()
+                .filter_map(|(e, path)| {
+                    let thumb = match (path, e.mtime) {
+                        (Some(p), Some(t)) if thumbs && !e.is_dir => self.icons.thumb(p, t).map(|(u, _)| u),
+                        _ => None,
+                    };
+                    thumb.or_else(|| self.icons.for_entry(e, path.as_deref(), 64))
+                })
+                .collect()
+        };
         // Pulled out of the window: the system's drag takes the files on, to
         // other programs (and back here, if it returns).
         if !self.dnd_out && !ctx.content_rect().contains(p) {
             if let (Some(dnd), Some(d)) = (&self.dnd, &self.drag) {
                 let files: Vec<PathBuf> = d.sources.iter().filter_map(|l| l.local_path().map(|p| p.to_path_buf())).collect();
                 if d.from != EXTERNAL && files.len() == d.sources.len() {
-                    dnd.start(files);
+                    let icon = drag_icon(&pics_for_icon, d.sources.len(), accent, ctx.pixels_per_point());
+                    dnd.start(files, icon);
                     self.dnd_out = true;
                     self.dnd_dropped = false;
                 }
@@ -325,7 +344,6 @@ impl App {
                 (icon, thumb)
             })
             .collect();
-        let accent = ctx.style_of(ctx.theme()).visuals.selection.bg_fill;
         let Some(d) = self.drag.as_mut() else { return };
         // The stack trails the pointer a little…
         let target = p + vec2(10.0, 14.0);
@@ -380,5 +398,137 @@ impl App {
             ui.painter().galley(chip.min + vec2(6.0, 3.0), g, ui.visuals().strong_text_color());
         });
         ctx.request_repaint();
+    }
+}
+
+/// One picture file as RGBA at `px` pixels (SVG drawn, others scaled).
+fn load_rgba(uri: &str, px: u32) -> Option<image::RgbaImage> {
+    let path = std::path::Path::new(uri.strip_prefix("file://")?);
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        let data = std::fs::read(path).ok()?;
+        let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
+        let mut pm = resvg::tiny_skia::Pixmap::new(px, px)?;
+        let s = tree.size();
+        let k = px as f32 / s.width().max(s.height());
+        let t = resvg::tiny_skia::Transform::from_scale(k, k).post_translate((px as f32 - s.width() * k) / 2.0, (px as f32 - s.height() * k) / 2.0);
+        resvg::render(&tree, t, &mut pm.as_mut());
+        // Premultiplied already; kept that way below.
+        return image::RgbaImage::from_raw(px, px, pm.take());
+    }
+    let img = image::open(path).ok()?;
+    let img = img.resize(px, px, image::imageops::FilterType::Triangle).to_rgba8();
+    // Premultiply, centred in a square.
+    let mut out = image::RgbaImage::new(px, px);
+    let (ox, oy) = ((px - img.width()) / 2, (px - img.height()) / 2);
+    for (x, y, p) in img.enumerate_pixels() {
+        let a = p[3] as u32;
+        out.put_pixel(ox + x, oy + y, image::Rgba([(p[0] as u32 * a / 255) as u8, (p[1] as u32 * a / 255) as u8, (p[2] as u32 * a / 255) as u8, p[3]]));
+    }
+    Some(out)
+}
+
+/// Digits 0-9, 3×5 dots each (rows top down, 3 bits a row).
+const DIGITS: [[u8; 5]; 10] = [
+    [7, 5, 5, 5, 7],
+    [2, 6, 2, 2, 7],
+    [7, 1, 7, 4, 7],
+    [7, 1, 7, 1, 7],
+    [5, 5, 7, 1, 1],
+    [7, 4, 7, 1, 7],
+    [7, 4, 7, 5, 7],
+    [7, 1, 2, 2, 2],
+    [7, 5, 7, 5, 7],
+    [7, 5, 7, 1, 7],
+];
+
+/// The stack following the pointer, for the system's drag: up to three
+/// pictures, each a bit lower right, and a count when there are more.
+pub fn drag_icon(pics: &[String], count: usize, accent: egui::Color32, ppp: f32) -> Option<crate::dnd::Icon> {
+    let scale = ppp.ceil().max(1.0) as u32;
+    let (w, h) = (96 * scale, 84 * scale);
+    let size = 48 * scale;
+    let mut canvas = image::RgbaImage::new(w, h);
+    let blend = |c: &mut image::RgbaImage, x: i64, y: i64, p: [u8; 4]| {
+        if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 {
+            return;
+        }
+        let d = c.get_pixel_mut(x as u32, y as u32);
+        let a = p[3] as u32;
+        for i in 0..4 {
+            d[i] = (p[i] as u32 + d[i] as u32 * (255 - a) / 255).min(255) as u8;
+        }
+    };
+    let imgs: Vec<image::RgbaImage> = pics.iter().take(3).filter_map(|u| load_rgba(u, size)).collect();
+    if imgs.is_empty() {
+        return None;
+    }
+    // Back to front, like the stack in the window.
+    for (k, img) in imgs.iter().enumerate().rev() {
+        let (ox, oy) = ((10 + k as u32 * 7) * scale, (14 + k as u32 * 5) * scale);
+        for (x, y, p) in img.enumerate_pixels() {
+            blend(&mut canvas, (ox + x) as i64, (oy + y) as i64, p.0);
+        }
+    }
+    if count > 1 {
+        let (cx, cy, r) = (((10 + 48 + (imgs.len() as u32 - 1) * 7) as f32 - 2.0) * scale as f32, 18.0 * scale as f32, 11.0 * scale as f32);
+        for y in (cy - r) as i64..=(cy + r) as i64 {
+            for x in (cx - r) as i64..=(cx + r) as i64 {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                let cov = (r - d + 0.5).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = (255.0 * cov) as u32;
+                    blend(&mut canvas, x, y, [(accent.r() as u32 * a / 255) as u8, (accent.g() as u32 * a / 255) as u8, (accent.b() as u32 * a / 255) as u8, a as u8]);
+                }
+            }
+        }
+        let text = count.min(999).to_string();
+        let dot = 2 * scale as i64;
+        let tw = text.len() as i64 * 4 * dot - dot;
+        let (x0, y0) = (cx as i64 - tw / 2, cy as i64 - 5 * dot / 2);
+        for (i, ch) in text.bytes().enumerate() {
+            let g = DIGITS[(ch - b'0') as usize];
+            for (row, bits) in g.iter().enumerate() {
+                for col in 0..3 {
+                    if bits & (4 >> col) != 0 {
+                        for dy in 0..dot {
+                            for dx in 0..dot {
+                                blend(&mut canvas, x0 + i as i64 * 4 * dot + col * dot + dx, y0 + row as i64 * dot + dy, [255, 255, 255, 255]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // RGBA premultiplied → Wayland's ARGB8888 (BGRA in memory).
+    let mut pixels = canvas.into_raw();
+    for p in pixels.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    Some(crate::dnd::Icon { w, h, pixels, scale: scale as i32 })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn drag_picture() {
+        let dir = std::env::temp_dir().join(format!("polka-drag-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        image::RgbaImage::from_fn(32, 32, |x, y| image::Rgba([200, (x * 8) as u8, (y * 8) as u8, 255])).save(&png).unwrap();
+        let svg = dir.join("b.svg");
+        std::fs::write(&svg, r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect x="1" y="1" width="14" height="14" rx="3" fill="#3080f0"/></svg>"##).unwrap();
+        let pics = vec![crate::icons::uri(&png), crate::icons::uri(&svg), crate::icons::uri(&png)];
+        let icon = super::drag_icon(&pics, 12, egui::Color32::from_rgb(40, 120, 220), 2.0).expect("no picture");
+        assert_eq!((icon.w, icon.h, icon.scale), (192, 168, 2));
+        assert_eq!(icon.pixels.len(), 192 * 168 * 4);
+        assert!(icon.pixels.chunks(4).filter(|p| p[3] > 0).count() > 3000);
+        if let Some(d) = std::env::var_os("POLKA_SHOT_DIR") {
+            let mut rgba = icon.pixels.clone();
+            for p in rgba.chunks_exact_mut(4) {
+                p.swap(0, 2);
+            }
+            image::RgbaImage::from_raw(icon.w, icon.h, rgba).unwrap().save(std::path::Path::new(&d).join("drag-icon.png")).unwrap();
+        }
     }
 }

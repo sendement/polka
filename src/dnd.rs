@@ -1,26 +1,34 @@
-//! Drag and drop with other programs on Wayland (winit has none): a second
-//! queue on the window's own connection listens to the seat's data device
-//! for drops coming in, and starts a drag when files are pulled out of the
-//! window. The app sees it all as pointer moves and a release, so dropping
-//! works through the same code as inside the window.
+//! Drag and drop with other programs, and the clipboard, on Wayland: one
+//! data device on the window's own connection (a second queue), since some
+//! compositors (Hyprland) talk to only one device per client. Drops coming
+//! in and our own drag coming back become pointer moves and a release for
+//! egui, so they work through the same code as inside the window; files
+//! pulled out of the window start the system's drag, with their picture.
 
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crossbeam_channel::{Receiver, Sender};
+use wayland_client::protocol::wl_buffer::{self, WlBuffer};
+use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
 use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
 use wayland_client::protocol::wl_data_source::{self, WlDataSource};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
-use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::protocol::wl_shm::{self, WlShm};
+use wayland_client::protocol::wl_shm_pool::WlShmPool;
+use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, event_created_child};
 
 const URIS: &str = "text/uri-list";
+/// Text kinds, the best first.
+const TEXT: [&str; 5] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
 
 /// What happened, in the window's logical coordinates.
 #[derive(Debug)]
@@ -36,13 +44,58 @@ pub enum Ev {
     OutEnded,
 }
 
+/// A picture to drag along: width and height in pixels, BGRA premultiplied
+/// (Wayland's ARGB8888), and its scale.
+pub struct Icon {
+    pub w: u32,
+    pub h: u32,
+    pub pixels: Vec<u8>,
+    pub scale: i32,
+}
+
 enum Cmd {
-    Start(Vec<PathBuf>),
+    Start(Vec<PathBuf>, Option<Icon>),
+    GetText(Sender<Option<String>>),
+    SetText(String),
 }
 
 pub struct Dnd {
     cmd: Sender<Cmd>,
     pub events: Receiver<Ev>,
+}
+
+/// Wakes the Wayland thread for a command.
+struct Waker {
+    tx: Sender<Cmd>,
+    pipe: Mutex<std::io::PipeWriter>,
+}
+
+impl Waker {
+    fn send(&self, c: Cmd) {
+        if self.tx.send(c).is_ok() {
+            if let Ok(mut p) = self.pipe.lock() {
+                let _ = p.write_all(b"x");
+            }
+        }
+    }
+}
+
+/// The running one, for the clipboard functions egui-winit calls.
+static WAKER: OnceLock<Waker> = OnceLock::new();
+
+/// The clipboard's text (egui-winit's get).
+pub fn clip_get() -> Option<String> {
+    let w = WAKER.get()?;
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    w.send(Cmd::GetText(tx));
+    rx.recv_timeout(std::time::Duration::from_millis(1500)).ok().flatten()
+}
+
+/// Puts text on the clipboard (egui-winit's set).
+pub fn clip_set(text: String) {
+    if let Some(w) = WAKER.get() {
+        w.send(Cmd::SetText(text));
+    }
 }
 
 impl Dnd {
@@ -56,19 +109,46 @@ impl Dnd {
         let qh = queue.handle();
         let (ev_tx, events) = crossbeam_channel::unbounded();
         let (cmd, cmd_rx) = crossbeam_channel::unbounded();
-        let mut st = State { qh: qh.clone(), surface, ev: ev_tx, ctx, seat: None, manager: None, device: None, pointer: None, serial: 0, offer: None, own: None, out_files: Vec::new() };
+        let (wake_r, wake_w) = std::io::pipe().ok()?;
+        let mut st = State {
+            qh: qh.clone(),
+            surface,
+            ev: ev_tx,
+            ctx,
+            seat: None,
+            manager: None,
+            device: None,
+            pointer: None,
+            keyboard: None,
+            compositor: None,
+            shm: None,
+            serial: 0,
+            offer: None,
+            selection: None,
+            own: None,
+            out_files: Vec::new(),
+            icon: None,
+            clip: None,
+        };
         conn.display().get_registry(&qh, ());
         queue.roundtrip(&mut st).ok()?;
         queue.roundtrip(&mut st).ok()?;
         st.device.as_ref()?;
-        std::thread::Builder::new().name("polka-dnd".into()).spawn(move || run(conn, queue, st, cmd_rx)).ok()?;
+        let _ = WAKER.set(Waker { tx: cmd.clone(), pipe: Mutex::new(wake_w) });
+        std::thread::Builder::new().name("polka-dnd".into()).spawn(move || run(conn, queue, st, cmd_rx, wake_r)).ok()?;
         Some(Self { cmd, events })
     }
 
     /// Hand the files to the system's drag (they've left the window).
-    pub fn start(&self, files: Vec<PathBuf>) {
-        let _ = self.cmd.send(Cmd::Start(files));
+    pub fn start(&self, files: Vec<PathBuf>, icon: Option<Icon>) {
+        match WAKER.get() {
+            Some(w) => w.send(Cmd::Start(files, icon)),
+            None => {
+                let _ = self.cmd.send(Cmd::Start(files, icon));
+            }
+        }
     }
+
     /// For tests: events fed by hand, and the files of drags started.
     #[cfg(test)]
     pub fn fake() -> (Self, Sender<Ev>, Receiver<Vec<PathBuf>>) {
@@ -76,30 +156,38 @@ impl Dnd {
         let (cmd, cmd_rx) = crossbeam_channel::unbounded::<Cmd>();
         let (out_tx, out) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
-            while let Ok(Cmd::Start(f)) = cmd_rx.recv() {
-                let _ = out_tx.send(f);
+            while let Ok(c) = cmd_rx.recv() {
+                if let Cmd::Start(f, _) = c {
+                    let _ = out_tx.send(f);
+                }
             }
         });
         (Self { cmd, events }, ev_tx, out)
     }
 }
 
-fn run(conn: Connection, mut queue: EventQueue<State>, mut st: State, cmds: Receiver<Cmd>) {
+fn run(conn: Connection, mut queue: EventQueue<State>, mut st: State, cmds: Receiver<Cmd>, mut wake: std::io::PipeReader) {
     loop {
         if queue.dispatch_pending(&mut st).is_err() {
             return;
         }
         while let Ok(c) = cmds.try_recv() {
             match c {
-                Cmd::Start(files) => st.start(files),
+                Cmd::Start(files, icon) => st.start(files, icon),
+                Cmd::GetText(reply) => st.get_text(&conn, reply),
+                Cmd::SetText(t) => st.set_text(t),
             }
         }
         let _ = conn.flush();
         let Some(guard) = queue.prepare_read() else { continue };
-        let raw = std::os::fd::AsRawFd::as_raw_fd(&guard.connection_fd());
-        let mut p = [libc::pollfd { fd: raw, events: libc::POLLIN, revents: 0 }];
-        let n = unsafe { libc::poll(p.as_mut_ptr(), 1, 30) };
-        if n > 0 {
+        let raw = guard.connection_fd().as_raw_fd();
+        let mut p = [libc::pollfd { fd: raw, events: libc::POLLIN, revents: 0 }, libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        let n = unsafe { libc::poll(p.as_mut_ptr(), 2, 200) };
+        if n > 0 && p[1].revents != 0 {
+            let mut b = [0u8; 64];
+            let _ = wake.read(&mut b);
+        }
+        if n > 0 && p[0].revents != 0 {
             if guard.read().is_err() {
                 return;
             }
@@ -107,6 +195,12 @@ fn run(conn: Connection, mut queue: EventQueue<State>, mut st: State, cmds: Rece
             drop(guard);
         }
     }
+}
+
+/// A data source: our drag, or text we put on the clipboard.
+enum Source {
+    Drag,
+    Clip,
 }
 
 struct State {
@@ -118,13 +212,20 @@ struct State {
     manager: Option<WlDataDeviceManager>,
     device: Option<WlDataDevice>,
     pointer: Option<WlPointer>,
-    /// The last button press on our window (a drag must name it).
+    keyboard: Option<WlKeyboard>,
+    compositor: Option<WlCompositor>,
+    shm: Option<WlShm>,
+    /// The last input on our window (drags and the clipboard must name one).
     serial: u32,
-    /// The offer over the window now.
+    /// The offer dragged over the window now, and the clipboard's.
     offer: Option<WlDataOffer>,
-    /// Our own drag, while it lasts.
+    selection: Option<WlDataOffer>,
+    /// Our own drag, while it lasts, and its picture.
     own: Option<WlDataSource>,
     out_files: Vec<PathBuf>,
+    icon: Option<(WlSurface, WlBuffer)>,
+    /// Text we put on the clipboard.
+    clip: Option<(WlDataSource, String)>,
 }
 
 impl State {
@@ -133,26 +234,99 @@ impl State {
         self.ctx.request_repaint();
     }
 
-    fn start(&mut self, files: Vec<PathBuf>) {
+    fn start(&mut self, files: Vec<PathBuf>, icon: Option<Icon>) {
         let (Some(m), Some(d)) = (&self.manager, &self.device) else { return };
         if self.own.is_some() || files.is_empty() {
             return;
         }
-        let src = m.create_data_source(&self.qh, ());
+        let src = m.create_data_source(&self.qh, Source::Drag);
         src.offer(URIS.into());
         src.offer("text/plain;charset=utf-8".into());
         if src.version() >= 3 {
             src.set_actions(DndAction::Copy | DndAction::Move);
         }
-        d.start_drag(Some(&src), &self.surface, None, self.serial);
+        let pic = icon.and_then(|i| self.icon_surface(i));
+        d.start_drag(Some(&src), &self.surface, pic.as_ref().map(|(s, _)| s), self.serial);
+        if let Some((s, _)) = &pic {
+            s.commit();
+        }
+        self.icon = pic;
         self.out_files = files;
         self.own = Some(src);
+    }
+
+    /// The picture under the pointer while dragging out: a surface with an
+    /// shm buffer.
+    fn icon_surface(&self, i: Icon) -> Option<(WlSurface, WlBuffer)> {
+        let (Some(c), Some(shm)) = (&self.compositor, &self.shm) else { return None };
+        let size = (i.w * i.h * 4) as usize;
+        let fd = unsafe { libc::memfd_create(c"polka-drag".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+        file.write_all(&i.pixels).ok()?;
+        let pool = shm.create_pool(file.as_fd(), size as i32, &self.qh, ());
+        let buf = pool.create_buffer(0, i.w as i32, i.h as i32, (i.w * 4) as i32, wl_shm::Format::Argb8888, &self.qh, ());
+        pool.destroy();
+        let s = c.create_surface(&self.qh, ());
+        if s.version() >= 3 {
+            s.set_buffer_scale(i.scale.max(1));
+        }
+        s.attach(Some(&buf), 0, 0);
+        s.damage(0, 0, i32::MAX, i32::MAX);
+        Some((s, buf))
     }
 
     fn end_own(&mut self) {
         if let Some(s) = self.own.take() {
             s.destroy();
+            if let Some((s, b)) = self.icon.take() {
+                s.destroy();
+                b.destroy();
+            }
             self.send(Ev::OutEnded);
+        }
+    }
+
+    fn get_text(&self, conn: &Connection, reply: Sender<Option<String>>) {
+        // Ours: no need to ask ourselves through a pipe.
+        if let Some((_, t)) = &self.clip {
+            let _ = reply.send(Some(t.clone()));
+            return;
+        }
+        let Some(offer) = &self.selection else {
+            let _ = reply.send(None);
+            return;
+        };
+        let mimes: Vec<String> = offer.data::<Mimes>().map(|m| m.lock().unwrap().clone()).unwrap_or_default();
+        let Some(mime) = TEXT.iter().find(|t| mimes.iter().any(|m| m == *t)) else {
+            let _ = reply.send(None);
+            return;
+        };
+        let Ok((mut r, w)) = std::io::pipe() else {
+            let _ = reply.send(None);
+            return;
+        };
+        offer.receive(mime.to_string(), w.as_fd());
+        drop(w);
+        let _ = conn.flush();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let ok = r.read_to_string(&mut text).is_ok();
+            let _ = reply.send(ok.then_some(text));
+        });
+    }
+
+    fn set_text(&mut self, text: String) {
+        let (Some(m), Some(d)) = (&self.manager, &self.device) else { return };
+        let src = m.create_data_source(&self.qh, Source::Clip);
+        for t in TEXT {
+            src.offer(t.into());
+        }
+        d.set_selection(Some(&src), self.serial);
+        if let Some((old, _)) = self.clip.replace((src, text)) {
+            old.destroy();
         }
     }
 }
@@ -167,7 +341,7 @@ fn uri_list(files: &[PathBuf]) -> String {
             if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
                 out.push(b as char);
             } else {
-                out.push_str(&format!("%{b:02X}"));
+                out += &format!("%{b:02X}");
             }
         }
         out += "\r\n";
@@ -210,11 +384,11 @@ fn receive(conn: &Connection, offer: &WlDataOffer) -> Option<Vec<PathBuf>> {
     offer.receive(URIS.into(), w.as_fd());
     drop(w);
     let _ = conn.flush();
-    let mut text = String::new();
     let mut r = r;
     // A slow giver shouldn't hang the drag forever.
     let (tx, rx) = crossbeam_channel::bounded(1);
     std::thread::spawn(move || {
+        let mut text = String::new();
         let _ = r.read_to_string(&mut text);
         let _ = tx.send(text);
     });
@@ -228,6 +402,8 @@ impl Dispatch<WlRegistry, ()> for State {
             match interface.as_str() {
                 "wl_seat" if st.seat.is_none() => st.seat = Some(reg.bind::<WlSeat, _, _>(name, version.min(5), qh, ())),
                 "wl_data_device_manager" => st.manager = Some(reg.bind::<WlDataDeviceManager, _, _>(name, version.min(3), qh, ())),
+                "wl_compositor" => st.compositor = Some(reg.bind::<WlCompositor, _, _>(name, version.min(4), qh, ())),
+                "wl_shm" => st.shm = Some(reg.bind::<WlShm, _, _>(name, 1, qh, ())),
                 _ => {}
             }
             if let (Some(seat), Some(m), None) = (&st.seat, &st.manager, &st.device) {
@@ -243,6 +419,9 @@ impl Dispatch<WlSeat, ()> for State {
             if c.contains(wl_seat::Capability::Pointer) && st.pointer.is_none() {
                 st.pointer = Some(seat.get_pointer(qh, ()));
             }
+            if c.contains(wl_seat::Capability::Keyboard) && st.keyboard.is_none() {
+                st.keyboard = Some(seat.get_keyboard(qh, ()));
+            }
         }
     }
 }
@@ -255,8 +434,31 @@ impl Dispatch<WlPointer, ()> for State {
     }
 }
 
-impl Dispatch<WlDataDeviceManager, ()> for State {
-    fn event(_: &mut Self, _: &WlDataDeviceManager, _: <WlDataDeviceManager as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(st: &mut Self, _: &WlKeyboard, e: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        // Ctrl+C is a key press: its serial lets us take the clipboard.
+        match e {
+            wl_keyboard::Event::Key { serial, .. } | wl_keyboard::Event::Enter { serial, .. } => st.serial = serial,
+            _ => {}
+        }
+    }
+}
+
+macro_rules! ignore_events {
+    ($($t:ty),*) => {$(
+        impl Dispatch<$t, ()> for State {
+            fn event(_: &mut Self, _: &$t, _: <$t as Proxy>::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+        }
+    )*};
+}
+ignore_events!(WlDataDeviceManager, WlCompositor, WlShm, WlShmPool);
+
+impl Dispatch<WlSurface, ()> for State {
+    fn event(_: &mut Self, _: &WlSurface, _: wl_surface::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
+}
+
+impl Dispatch<WlBuffer, ()> for State {
+    fn event(_: &mut Self, _: &WlBuffer, _: wl_buffer::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}
 }
 
 /// Kinds of data an offer has.
@@ -301,12 +503,16 @@ impl Dispatch<WlDataDevice, ()> for State {
             }
             wl_data_device::Event::Drop => {
                 if let Some(o) = st.offer.take() {
-                    // Where it was let go: the last motion stands.
                     st.send(Ev::Drop);
                     if o.version() >= 3 {
                         o.finish();
                     }
                     o.destroy();
+                }
+            }
+            wl_data_device::Event::Selection { id } => {
+                if let Some(old) = std::mem::replace(&mut st.selection, id) {
+                    old.destroy();
                 }
             }
             _ => {}
@@ -326,10 +532,10 @@ impl Dispatch<WlDataOffer, Mimes> for State {
     }
 }
 
-impl Dispatch<WlDataSource, ()> for State {
-    fn event(st: &mut Self, _: &WlDataSource, e: wl_data_source::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
-        match e {
-            wl_data_source::Event::Send { mime_type, fd } => {
+impl Dispatch<WlDataSource, Source> for State {
+    fn event(st: &mut Self, src: &WlDataSource, e: wl_data_source::Event, kind: &Source, _: &Connection, _: &QueueHandle<Self>) {
+        match (kind, e) {
+            (Source::Drag, wl_data_source::Event::Send { mime_type, fd }) => {
                 let text = if mime_type == URIS {
                     uri_list(&st.out_files)
                 } else {
@@ -338,7 +544,20 @@ impl Dispatch<WlDataSource, ()> for State {
                 let mut f = std::fs::File::from(OwnedFd::from(fd));
                 let _ = f.write_all(text.as_bytes());
             }
-            wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => st.end_own(),
+            (Source::Drag, wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished) => st.end_own(),
+            (Source::Clip, wl_data_source::Event::Send { fd, .. }) => {
+                if let Some((_, t)) = &st.clip {
+                    let mut f = std::fs::File::from(OwnedFd::from(fd));
+                    let _ = f.write_all(t.as_bytes());
+                }
+            }
+            // Someone else took the clipboard.
+            (Source::Clip, wl_data_source::Event::Cancelled) => {
+                if st.clip.as_ref().is_some_and(|(s, _)| s == src) {
+                    st.clip = None;
+                }
+                src.destroy();
+            }
             _ => {}
         }
     }
