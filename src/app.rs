@@ -1159,6 +1159,16 @@ pub struct App {
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
     /// Items being dragged with the mouse.
     pub drag: Option<crate::mouse::Drag>,
+    /// Drag and drop with other programs (Wayland), and what it feeds egui.
+    pub dnd: Option<crate::dnd::Dnd>,
+    pub dnd_inject: Vec<egui::Event>,
+    pub dnd_pos: Option<egui::Pos2>,
+    /// Our drag went out to the system / one came in from it / was dropped here.
+    pub dnd_out: bool,
+    pub dnd_in: bool,
+    pub dnd_dropped: bool,
+    /// A drop's release is on its way to egui (keep the drag till then).
+    pub dnd_release: Option<Instant>,
     /// Light/dark last set on the context.
     pub dark_applied: Option<bool>,
     /// Template folders for the "New document" submenus.
@@ -1227,6 +1237,13 @@ impl App {
             osk_top: None,
             sys_clip: None,
             dark_applied: None,
+            dnd: None,
+            dnd_inject: Vec::new(),
+            dnd_pos: None,
+            dnd_out: false,
+            dnd_in: false,
+            dnd_dropped: false,
+            dnd_release: None,
             drag: None,
             templates: Vec::new(),
         };
@@ -1275,6 +1292,7 @@ impl App {
         self.tick_audio();
         self.tick_usage();
         self.tick_terminal();
+        self.dnd_tick();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             for p in &mut t.panes {
@@ -1671,11 +1689,17 @@ impl App {
             Action::Right | Action::Back => self.focus = Focus::Panes,
             Action::Accept => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
+                    // The sidebar keeps the focus: the place shows, and → or
+                    // ○ goes over to it.
                     if it.usage {
-                        return self.open_usage(None);
+                        self.open_usage(None);
+                        self.focus = Focus::Sidebar;
+                        return;
                     }
                     if it.term {
-                        return self.open_terminal(None);
+                        self.open_terminal(None);
+                        self.focus = Focus::Sidebar;
+                        return;
                     }
                     // A drive not mounted yet: mount it, then open it.
                     if let Some(d) = it.drive.as_ref().filter(|d| d.mount.is_none()) {
@@ -1690,7 +1714,6 @@ impl App {
                         t.shown = false;
                     }
                     self.pane_mut().navigate(it.loc, None, &cfg);
-                    self.focus = Focus::Panes;
                 }
             }
             Action::Actions => {

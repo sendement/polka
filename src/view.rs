@@ -44,6 +44,16 @@ const SMALL_ICON_LOOKUP: u16 = 32;
 const SIDE_W: f32 = 210.0;
 
 impl eframe::App for App {
+    /// Pointer events of drags from and to other programs.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        raw.events.append(&mut self.dnd_inject);
+        // X11 has the files only at the drop (and no position): the panel.
+        if !raw.dropped_files.is_empty() && self.overlay.is_none() {
+            let files: Vec<std::path::PathBuf> = raw.dropped_files.drain(..).map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect();
+            self.drop_external(files);
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let inputs: Vec<Input> = self.pad_rx.try_iter().collect();

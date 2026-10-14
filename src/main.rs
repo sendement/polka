@@ -3,6 +3,7 @@ mod appearance;
 mod archive_rw;
 mod config;
 mod diagnose;
+mod dnd;
 mod drives;
 mod fonts;
 mod i18n;
@@ -55,6 +56,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     log::catch_panics();
+    let _ = input::LOG.set(|s| log::line(s));
     log::startup();
     let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
     let options = eframe::NativeOptions {
@@ -81,6 +83,15 @@ fn main() -> eframe::Result {
             let mut app = app::App::new(cc.egui_ctx.clone(), start);
             use raw_window_handle::HasDisplayHandle;
             app.sys_clip = Some(egui_winit::clipboard::Clipboard::new(cc.display_handle().ok().map(|h| h.as_raw())));
+            // Drag and drop with other programs: Wayland only (X11 drops come
+            // through winit).
+            use raw_window_handle::{HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+            if let (Ok(d), Ok(w)) = (cc.display_handle(), cc.window_handle()) {
+                if let (RawDisplayHandle::Wayland(d), RawWindowHandle::Wayland(w)) = (d.as_raw(), w.as_raw()) {
+                    app.dnd = dnd::Dnd::new(d.display.as_ptr(), w.surface.as_ptr(), cc.egui_ctx.clone());
+                    log::line(format!("drag and drop with other programs: {}", if app.dnd.is_some() { "on" } else { "unavailable" }));
+                }
+            }
             Ok(Box::new(app))
         }),
     )

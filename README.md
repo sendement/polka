@@ -136,7 +136,8 @@ Filter: app menu → Filter… or Ctrl+F (○/B clears it). Search in subfolders
 On-screen keyboard: ✕/A types the key, □/X erases, △/Y inserts a space, L1/R1 move
 the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu confirms.
 
-Gamepad input is ignored while Polka is not the focused window.
+Gamepad input is ignored while Polka is not the focused window. Touch screens, touchpads and pens
+aren't taken for pads (on the Steam Deck the screen's touches stay touches).
 
 **Mouse.** Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
 click opens a folder in a new tab, the side buttons go back / forward. Drag from empty space
@@ -144,11 +145,14 @@ click opens a folder in a new tab, the side buttons go back / forward. Drag from
 adds to the selection. Drag items by their icon or name onto a folder, the other pane or a
 sidebar place, then pick Move here / Copy here (the usual one is preselected: a move on the
 same disk, else a copy; Ctrl or Shift held skips the question). Dropped on a program, script or
-launcher they can also be opened with it. Onto the trash they're trashed. A folded multi-volume
+launcher they can also be opened with it. Onto the trash they're trashed. Files dragged in from other programs land
+the same way, and items pulled out of the window go to other programs (Wayland; X11 takes drops
+into the panel). A folded multi-volume
 set is selected whole; an unfolded one volume by volume. Running operations show a progress card
 (item, amount, speed, time left, cancel; also App menu → Cancel operations).
 
-**Sidebar.** Places, pinned folders, **drives** (every partition that isn't the system's, mounted
+**Sidebar.** ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to
+it. Places, pinned folders, **drives** (every partition that isn't the system's, mounted
 or not: ✕ mounts and opens one, △ has Mount / Unmount / Eject through udisks, which asks polkit for
 a password when needed) and tools. △ on any entry chooses its icon (a theme icon or your own
 picture); on the trash it also empties it (after asking).

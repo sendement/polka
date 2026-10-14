@@ -102,6 +102,9 @@ struct PadThread {
     held: Vec<Held>,
     left: Stick,
     owner: Option<(GamepadId, Instant)>,
+    /// The device whose stick moved last, and how many stick moves were logged.
+    stick_from: String,
+    stick_logged: u32,
 }
 
 /// Start reading gamepads into `tx`.
@@ -125,12 +128,36 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
                 held: Vec::new(),
                 left: Stick::default(),
                 owner: None,
+                stick_from: String::new(),
+                stick_logged: 0,
             };
+            let mut seen = std::collections::HashSet::new();
             loop {
                 let timeout = t.next_deadline().map(|d| d.saturating_duration_since(Instant::now()));
                 let ev = gilrs.next_event_blocking(Some(timeout.unwrap_or(Duration::from_millis(500))));
                 // Touch screens and pens look like pads to gilrs.
+                if let Some(e) = &ev {
+                    if seen.insert(e.id) {
+                        let p = gilrs.gamepad(e.id);
+                        log(&format!(
+                            "input device {:?} ({}) {:04x}:{:04x} mapping {:?}{}",
+                            p.name(),
+                            p.os_name(),
+                            p.vendor_id().unwrap_or(0),
+                            p.product_id().unwrap_or(0),
+                            p.mapping_source(),
+                            if not_a_pad(&p) { ": ignored, not a pad" } else { "" }
+                        ));
+                    }
+                }
                 let ev = ev.filter(|e| !not_a_pad(&gilrs.gamepad(e.id)));
+                if let Some(e) = &ev {
+                    if let EventType::AxisChanged(Axis::LeftStickX | Axis::LeftStickY, v, _) = e.event {
+                        if v.abs() >= STICK_ON {
+                            t.stick_from = gilrs.gamepad(e.id).name().to_string();
+                        }
+                    }
+                }
                 if let Some(ev) = ev {
                     let before = t.owner.map(|(o, _)| o);
                     t.handle(ev.id, ev.event);
@@ -158,7 +185,19 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
 /// as a stick pushed to one side and never let go.
 pub fn not_a_pad(pad: &gilrs::Gamepad) -> bool {
     let name = format!("{} {}", pad.name(), pad.os_name()).to_lowercase();
-    ["touch", "fts3528", "stylus", "wacom", " pen"].iter().any(|k| name.contains(k)) || pad.vendor_id() == Some(0x2808)
+    ["touch", "fts3528", "stylus", "wacom", " pen"].iter().any(|k| name.contains(k))
+        || pad.vendor_id() == Some(0x2808)
+        // Every pad has its ✕ / A; a screen or a pen doesn't.
+        || pad.button_code(Button::South).is_none()
+}
+
+/// Where the app's log goes (unset: nowhere, as in the examples).
+pub static LOG: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+fn log(s: &str) {
+    if let Some(f) = LOG.get() {
+        f(s);
+    }
 }
 
 fn map_button(b: Button) -> Option<Action> {
@@ -319,6 +358,11 @@ impl PadThread {
                 self.release(c);
             }
             if let Some(w) = want {
+                // A few, to tell which device moves things by itself.
+                if self.stick_logged < 30 {
+                    self.stick_logged += 1;
+                    log(&format!("stick {w:?} from {:?} ({x:.2}, {y:.2})", self.stick_from));
+                }
                 self.press(w);
             }
             let s = &mut self.left;

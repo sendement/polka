@@ -29,6 +29,34 @@ pub struct Drag {
     pub vx: f32,
 }
 
+/// `Drag::from` of files dragged in from another program.
+pub const EXTERNAL: (usize, usize) = (usize::MAX, usize::MAX);
+
+impl Drag {
+    /// Files coming from another program.
+    pub fn external(files: Vec<PathBuf>) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let entry = |p: &PathBuf| {
+            let m = std::fs::metadata(p).ok();
+            crate::vfs::Entry {
+                name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                is_dir: m.as_ref().is_some_and(|m| m.is_dir()),
+                is_link: false,
+                size: m.as_ref().map_or(0, |m| m.len()),
+                mtime: m.as_ref().map(|m| m.mtime()),
+                mode: m.as_ref().map_or(0o644, |m| m.mode()),
+            }
+        };
+        let label = match files.len() {
+            1 => entry(&files[0]).name,
+            n => trn("%n items", n),
+        };
+        let shown = files.iter().take(3).map(|p| (entry(p), Some(p.clone()))).collect();
+        let sources = files.into_iter().map(Location::Local).collect();
+        Drag { sources, label, shown, from: EXTERNAL, names: HashSet::new(), pos: None, angle: 0.0, spin: 0.0, last: None, vx: 0.0 }
+    }
+}
+
 /// Size of the icons following the pointer.
 const ICON: f32 = 48.0;
 
@@ -176,18 +204,111 @@ impl App {
         }
     }
 
+    /// Drags from and to other programs, turned into the pointer moves and
+    /// release that drags inside the window are made of.
+    pub fn dnd_tick(&mut self) {
+        let Some(d) = &self.dnd else { return };
+        let evs: Vec<crate::dnd::Ev> = d.events.try_iter().collect();
+        let zoom = self.ctx.zoom_factor();
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        for e in evs {
+            use crate::dnd::Ev;
+            match e {
+                Ev::Enter { x, y, files } => {
+                    let p = pos2(x / zoom, y / zoom);
+                    self.dnd_pos = Some(p);
+                    self.dnd_inject.push(egui::Event::PointerMoved(p));
+                    // No press for egui (it would start a selection where the
+                    // pointer came in); the release alone drops.
+                    if let Some(files) = files {
+                        self.drag = Some(Drag::external(files));
+                        self.dnd_in = true;
+                    }
+                }
+                Ev::Motion { x, y } => {
+                    let p = pos2(x / zoom, y / zoom);
+                    self.dnd_pos = Some(p);
+                    self.dnd_inject.push(egui::Event::PointerMoved(p));
+                }
+                Ev::Leave => {
+                    if std::mem::take(&mut self.dnd_in) {
+                        self.drag = None;
+                        self.release_far();
+                    }
+                }
+                Ev::Drop => {
+                    let p = self.dnd_pos.unwrap_or_default();
+                    self.dnd_inject.push(egui::Event::PointerMoved(p));
+                    // From elsewhere egui saw no press: a press and release
+                    // right where it was let go. Ours has its press still on.
+                    if self.dnd_in {
+                        self.dnd_inject.push(button(p, true));
+                    }
+                    self.dnd_inject.push(button(p, false));
+                    // Our own drag, dropped back here (its end follows).
+                    self.dnd_dropped = !self.dnd_in;
+                    self.dnd_in = false;
+                    self.dnd_release = Some(std::time::Instant::now());
+                }
+                Ev::OutEnded => {
+                    self.dnd_out = false;
+                    // Dropped here: the release above does it. Elsewhere: the
+                    // button egui still thinks is down goes up, out of the way.
+                    if !std::mem::take(&mut self.dnd_dropped) {
+                        self.drag = None;
+                        self.release_far();
+                    }
+                }
+            }
+        }
+    }
+
+    fn release_far(&mut self) {
+        let far = pos2(-10000.0, -10000.0);
+        self.dnd_inject.push(egui::Event::PointerMoved(far));
+        self.dnd_inject.push(egui::Event::PointerButton { pos: far, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        self.dnd_inject.push(egui::Event::PointerGone);
+    }
+
+    /// Files dropped with no place to point at (X11): into the panel.
+    pub fn drop_external(&mut self, files: Vec<PathBuf>) {
+        if files.is_empty() {
+            return;
+        }
+        self.drag = Some(Drag::external(files));
+        let pane = self.tabs[self.tab].active;
+        self.drop_on_pane(pane, None);
+    }
+
     /// The dragged items follow the pointer as a little stack that trails
     /// behind and sways on a spring; letting go anywhere else drops nothing.
     pub fn draw_drag(&mut self, ctx: &egui::Context) {
         if self.drag.is_none() {
             return;
         }
-        if !ctx.input(|i| i.pointer.primary_down()) {
+        // (One from elsewhere has its press handed to egui a frame later.)
+        // A drop's release handed to egui: wait till it's seen (a second at most).
+        if ctx.input(|i| i.pointer.primary_released()) || self.dnd_release.is_some_and(|t| t.elapsed().as_secs_f32() > 1.0) {
+            self.dnd_release = None;
+        }
+        if !ctx.input(|i| i.pointer.primary_down()) && !self.dnd_in && self.dnd_release.is_none() {
             self.drag = None;
             return;
         }
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         let Some(p) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        // Pulled out of the window: the system's drag takes the files on, to
+        // other programs (and back here, if it returns).
+        if !self.dnd_out && !ctx.content_rect().contains(p) {
+            if let (Some(dnd), Some(d)) = (&self.dnd, &self.drag) {
+                let files: Vec<PathBuf> = d.sources.iter().filter_map(|l| l.local_path().map(|p| p.to_path_buf())).collect();
+                if d.from != EXTERNAL && files.len() == d.sources.len() {
+                    dnd.start(files);
+                    self.dnd_out = true;
+                    self.dnd_dropped = false;
+                }
+            }
+        }
         let (dt, m) = ctx.input(|i| (i.stable_dt.clamp(0.001, 0.05), i.modifiers));
         // Icons first (they need `self.icons`), then the motion.
         let shown = self.drag.as_ref().map(|d| d.shown.clone()).unwrap_or_default();

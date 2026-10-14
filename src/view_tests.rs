@@ -1653,6 +1653,9 @@ fn disk_usage(h: &mut Harness<'static, App>) {
     h.state_mut().side_cursor = i;
     press(h, &[Action::Accept]);
     assert!(h.state().usage_shown());
+    // The sidebar keeps the focus; → goes over to the page.
+    assert!(h.state().focus == crate::app::Focus::Sidebar);
+    press(h, &[Action::Right]);
     shot(h, "90-usage-start");
     let this = match &h.state().cur_tab().usage.as_ref().unwrap().state {
         State::Start { targets, .. } => targets.iter().position(|t| t.path == dir).expect("this folder not offered"),
@@ -1753,8 +1756,9 @@ fn disk_usage(h: &mut Harness<'static, App>) {
     press(h, &[Action::Accept]);
     assert!(h.state().usage_shown());
     assert_eq!(sel(h).1, "Code", "the result was kept");
-    // Measured again: still in the same place; a new file shows up.
-    press(h, &[Action::Right]);
+    // Measured again: still in the same place; a new file shows up. (The
+    // first → only leaves the sidebar.)
+    press(h, &[Action::Right, Action::Right]);
     file("Code/big.dat", 9000);
     h.state_mut().run(Cmd::UsageRescan);
     ready(h);
@@ -2387,6 +2391,10 @@ fn terminal(h: &mut Harness<'static, App>) {
     h.state_mut().focus = Focus::Sidebar;
     press(h, &[Action::Accept]);
     assert!(h.state().term_shown());
+    // The sidebar keeps the focus; → goes over.
+    assert!(h.state().focus == Focus::Sidebar);
+    press(h, &[Action::Right]);
+    assert!(h.state().focus == Focus::Panes);
     term_wait(h, "$ ", 1);
     // Keyboard.
     type_text(h, "echo hel''lo");
@@ -2489,7 +2497,15 @@ fn terminal(h: &mut Harness<'static, App>) {
     h.state_mut().run(Cmd::TermRun("less pager.txt".into()));
     term_wait(h, "line 20", 1);
     press(h, &[Action::RightTrigger]);
-    term_wait(h, "line 26", 1);
+    // A page on: the first line shown isn't line 1 any more.
+    for _ in 0..100 {
+        if !term_screen(h).starts_with("line 1 ") {
+            break;
+        }
+        settle(h);
+    }
+    let paged = term_screen(h);
+    assert!(!paged.starts_with("line 1 "), "not paged:\n{paged}");
     press(h, &[Action::View]);
     let Some(Overlay::TermKeys(q)) = h.state().overlay.as_ref() else { panic!("no quick keys") };
     assert!(q.title.contains("less"), "{}", q.title);
@@ -2501,7 +2517,7 @@ fn terminal(h: &mut Harness<'static, App>) {
     press(h, &[Action::Select]);
     assert!(h.state().overlay.is_none());
     term_wait(h, "$ ", 1);
-    assert!(!term_screen(h).contains("line 26"), "{}", term_screen(h));
+    assert!(!term_screen(h).contains(paged.lines().next().unwrap()), "{}", term_screen(h));
     // Choosing text with the pad.
     h.state_mut().run(Cmd::TermRun("echo copy-me-please".into()));
     term_wait(h, "copy-me-please", 2);
@@ -2685,6 +2701,8 @@ fn steam(h: &mut Harness<'static, App>) {
     h.state_mut().side_cursor = i;
     h.state_mut().focus = Focus::Sidebar;
     press(h, &[Action::Accept]);
+    assert!(h.state().focus == Focus::Sidebar);
+    press(h, &[Action::Right]);
     let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
     assert_eq!(h.state().pane().loc, Location::Steam(View::Root));
     assert_eq!(names(h), vec![tr("Games").to_string(), tr("Prefixes").to_string()]);
@@ -2742,4 +2760,134 @@ fn steam_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     steam(&mut h);
+}
+
+/// Drag and drop with other programs: files coming in onto a folder, a
+/// drag passing by, ours leaving the window (handed to the system) and
+/// coming back. The Wayland side is faked; egui gets what it would.
+fn other_programs(h: &mut Harness<'static, App>) {
+    use crate::dnd::Ev;
+    use crate::i18n::tr;
+    use crate::vfs::Location;
+    use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+    let base = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap();
+    let dir = base.join("dnd");
+    let ext = base.join("dnd-elsewhere");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&ext);
+    std::fs::create_dir_all(dir.join("In")).unwrap();
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(dir.join("out.txt"), "going out\n").unwrap();
+    for n in ["ext-a.txt", "ext b.txt"] {
+        std::fs::write(ext.join(n), n).unwrap();
+    }
+    let (fake, tx, started) = crate::dnd::Dnd::fake();
+    h.state_mut().dnd = Some(fake);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg.clone();
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    // What the app would hand egui (kittest has no raw input hook).
+    let feed = |h: &mut Harness<'static, App>| {
+        for _ in 0..3 {
+            h.step();
+            let evs = std::mem::take(&mut h.state_mut().dnd_inject);
+            for e in evs {
+                h.event(e);
+            }
+            h.step();
+        }
+    };
+    let rect_of = |h: &Harness<'static, App>, name: &str| {
+        let p = h.state().pane();
+        let i = p.entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("{name} not shown"));
+        let (_, row, hot) = *p.drawn.iter().find(|d| d.0 == i).expect("not drawn");
+        (row, hot)
+    };
+    let menu = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => (m.title.clone(), m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()),
+        _ => (String::new(), Vec::new()),
+    };
+    // Two files from elsewhere onto the folder: copy them in.
+    let (row_in, _) = rect_of(h, "In");
+    let c = row_in.center();
+    tx.send(Ev::Enter { x: c.x - 150.0, y: c.y + 80.0, files: Some(vec![ext.join("ext-a.txt"), ext.join("ext b.txt")]) }).unwrap();
+    feed(h);
+    tx.send(Ev::Motion { x: c.x, y: c.y }).unwrap();
+    feed(h);
+    assert_eq!(h.state().drag.as_ref().map(|d| d.sources.len()), Some(2));
+    shot(h, "d0-drag-in");
+    tx.send(Ev::Drop).unwrap();
+    feed(h);
+    settle(h);
+    let (title, labels) = menu(h);
+    assert!(title.ends_with("→ In"), "{title}");
+    assert_eq!(labels, [tr("Move here"), tr("Copy here"), tr("Cancel")]);
+    shot(h, "d1-drop-menu");
+    menu_pick(h, tr("Copy here"));
+    wait_jobs(h);
+    assert!(dir.join("In/ext-a.txt").exists() && dir.join("In/ext b.txt").exists(), "not copied in");
+    assert!(ext.join("ext-a.txt").exists(), "the originals stay");
+    // A drag that only passes by leaves nothing behind.
+    tx.send(Ev::Enter { x: c.x, y: c.y, files: Some(vec![ext.join("ext-a.txt")]) }).unwrap();
+    feed(h);
+    tx.send(Ev::Leave).unwrap();
+    feed(h);
+    settle(h);
+    assert!(h.state().drag.is_none() && h.state().overlay.is_none());
+    assert!(!h.ctx.input(|i| i.pointer.primary_down()), "button left down");
+    // Ours pulled out of the window: the system's drag gets its path.
+    let press_at = |h: &mut Harness<'static, App>, pos: Pos2, down: bool| {
+        h.event(Event::PointerMoved(pos));
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE });
+        h.step();
+    };
+    let move_to = |h: &mut Harness<'static, App>, pos: Pos2| {
+        h.event(Event::PointerMoved(pos));
+        h.step();
+    };
+    let pull_out = |h: &mut Harness<'static, App>| {
+        let (_, hot) = rect_of(h, "out.txt");
+        press_at(h, hot.center(), true);
+        move_to(h, hot.center() + vec2(8.0, 8.0));
+        move_to(h, hot.center() + vec2(100.0, 40.0));
+        move_to(h, pos2(1300.0, 300.0));
+        move_to(h, pos2(1310.0, 305.0));
+    };
+    pull_out(h);
+    let files = started.recv_timeout(std::time::Duration::from_secs(2)).expect("no drag started");
+    assert_eq!(files, vec![dir.join("out.txt")]);
+    // Dropped in another program: done here, the button up again.
+    tx.send(Ev::OutEnded).unwrap();
+    feed(h);
+    assert!(h.state().drag.is_none());
+    assert!(!h.ctx.input(|i| i.pointer.primary_down()), "button left down");
+    assert!(dir.join("out.txt").exists());
+    // Out and back in onto the folder: the usual question.
+    pull_out(h);
+    started.recv_timeout(std::time::Duration::from_secs(2)).expect("no drag started");
+    tx.send(Ev::Enter { x: c.x + 40.0, y: c.y, files: None }).unwrap();
+    tx.send(Ev::Motion { x: c.x, y: c.y }).unwrap();
+    feed(h);
+    tx.send(Ev::Drop).unwrap();
+    tx.send(Ev::OutEnded).unwrap();
+    feed(h);
+    settle(h);
+    let (title, labels) = menu(h);
+    assert_eq!(title, "out.txt → In");
+    assert_eq!(labels[0], tr("Move here"));
+    press(h, &[Action::Back]);
+    assert!(h.state().drag.is_none());
+    h.state_mut().dnd = None;
+}
+
+#[test]
+#[ignore]
+fn dnd_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    other_programs(&mut h);
 }
