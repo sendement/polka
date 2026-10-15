@@ -14,6 +14,9 @@ pub struct Icons {
     /// The theme as chosen (or detected).
     chosen: String,
     dark: bool,
+    /// The UI's text colour, given to KDE's monochrome icons (as Plasma
+    /// does), which are otherwise dark grey on any background.
+    text: egui::Color32,
     /// icon name -> resolved uri (None = not found in any theme)
     names: HashMap<String, Option<String>>,
     /// file path -> uri for per-file icons (.desktop, .exe)
@@ -35,6 +38,7 @@ impl Icons {
             theme: String::new(),
             chosen: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
             dark: true,
+            text: egui::Color32::from_gray(220),
             names: HashMap::new(),
             files: Default::default(),
             pending: Default::default(),
@@ -146,9 +150,17 @@ impl Icons {
                 // Some themes only ship symbolic variants for UI names.
                 freedesktop_icons::lookup(name).with_size(size).with_cache().find()
             })
-            .map(|p| uri(&p));
+            .map(|p| recolored(&p, self.text).unwrap_or_else(|| uri(&p)));
         self.names.insert(key, found.clone());
         found
+    }
+
+    /// The text colour for monochrome icons; a change looks them up again.
+    pub fn set_text_color(&mut self, c: egui::Color32) {
+        if self.text != c {
+            self.text = c;
+            self.names.clear();
+        }
     }
 
     /// Icon for a directory entry. `path` is the real file when local, which

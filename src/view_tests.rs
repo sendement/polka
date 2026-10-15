@@ -30,6 +30,7 @@ fn harness_with(dir: PathBuf, size: [f32; 2], tag: &str) -> Harness<'static, App
         let _ = std::fs::create_dir_all(cfg.join("data/Trash/files"));
         let _ = std::fs::create_dir_all(cfg.join("data/Trash/info"));
     }
+    kde_test_theme(&cfg.join("data"));
     Harness::builder()
         .with_size(size)
         .wgpu()
@@ -3974,4 +3975,52 @@ fn show_in_folder_screens() {
     settle(&mut h);
     assert_eq!(h.state().tabs.len(), 1);
     assert_eq!(h.state().pane().current().unwrap().name, "a.txt");
+}
+
+/// A KDE-style theme with a dark grey monochrome trash. Icon themes are
+/// listed once, at the first lookup, so every harness puts it in place.
+fn kde_test_theme(data: &std::path::Path) {
+    let theme = data.join("icons/PolkaKdeTest");
+    if theme.exists() {
+        return;
+    }
+    std::fs::create_dir_all(theme.join("places/22")).unwrap();
+    std::fs::write(
+        theme.join("places/22/user-trash.svg"),
+        r#"<svg width="22" height="22" xmlns="http://www.w3.org/2000/svg"><defs><style id="current-color-scheme" type="text/css">.ColorScheme-Text { color:#363636; }</style></defs><rect class="ColorScheme-Text" x="5" y="4" width="12" height="15" fill="currentColor"/></svg>"#,
+    )
+    .unwrap();
+    std::fs::write(theme.join("index.theme"), "[Icon Theme]\nName=PolkaKdeTest\nInherits=hicolor\nDirectories=places/22\n\n[places/22]\nSize=22\nContext=Places\nType=Fixed\n").unwrap();
+}
+
+/// KDE's monochrome icons (ColorScheme-Text, dark grey) take the UI's text
+/// colour, as Plasma gives them: the trash in Win11-like themes was dark
+/// grey on the dark sidebar. POLKA_REAL_THEME also shoots an installed theme.
+#[test]
+#[ignore]
+fn kde_icon_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    h.state_mut().icons.set_theme(Some("PolkaKdeTest".into()));
+    let text = h.state().ctx.style_of(egui::Theme::Dark).visuals.text_color();
+    h.state_mut().icons.set_text_color(text);
+    let u = h.state_mut().icons.named(&["user-trash"], 22).expect("no trash icon");
+    let file = u.strip_prefix("file://").unwrap();
+    let svg = std::fs::read_to_string(file).unwrap();
+    let hex = format!("#{:02x}{:02x}{:02x}", text.r(), text.g(), text.b());
+    assert!(svg.contains(&hex) && !svg.contains("#363636"), "{file}: {svg}");
+    // Light: dark text, looked up again.
+    let light = h.state().ctx.style_of(egui::Theme::Light).visuals.text_color();
+    h.state_mut().icons.set_text_color(light);
+    let u2 = h.state_mut().icons.named(&["user-trash"], 22).unwrap();
+    assert_ne!(u, u2);
+    if let Some(real) = std::env::var_os("POLKA_REAL_THEME") {
+        h.state_mut().cfg.icon_theme = Some(real.to_string_lossy().into_owned());
+        h.state_mut().icons.set_theme(Some(real.to_string_lossy().into_owned()));
+        h.state_mut().icons.set_text_color(text);
+        h.state_mut().refresh_sidebar();
+        settle(&mut h);
+        shot(&mut h, "kde-real-theme");
+    }
 }

@@ -1316,6 +1316,8 @@ impl App {
             self.dark_applied = Some(dark);
             self.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
             self.icons.set_dark(dark);
+            let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
+            self.icons.set_text_color(self.ctx.style_of(theme).visuals.text_color());
             apply_accent(&self.ctx, &self.cfg);
         }
     }
