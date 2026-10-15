@@ -33,10 +33,8 @@ optdepends=(
 makedepends=('cargo')
 # Rust links with lld here; GCC LTO objects from C build scripts break that.
 options=('!lto')
-# Local snapshot made by make-tarball.sh; switch to the GitHub tag tarball
-# once the repository is public.
-source=("$pkgname-$pkgver.tar.gz")
-sha256sums=('SKIP')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('66fd708c3a4ae66a26ff8fe72384278dcc1eb4366c2a948b6e03a0d1d6223181')
 
 prepare() {
   cd "$pkgname-$pkgver"

@@ -224,8 +224,8 @@ cargo build --release
 ./target/release/polka [DIR | FILE | ARCHIVE | file://URI]
 ```
 
-Arch package: `packaging/arch/make-tarball.sh`, then `makepkg` in `packaging/arch`
-(installs the binary, desktop entry and icon).
+Arch package: `makepkg -si` in `packaging/arch` builds the tagged release (the binary, desktop
+entry and icon).
 Video playback and thumbnails need `ffmpeg` (or `ffmpegthumbnailer` for thumbnails); so does
 music in formats Symphonia can't decode.
 
