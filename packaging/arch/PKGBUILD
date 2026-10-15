@@ -1,6 +1,6 @@
 # Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
 pkgname=polka
-pkgver=0.23.1
+pkgver=0.24.0
 pkgrel=1
 pkgdesc="Gamepad-first file manager: dual pane, archives as folders, themed and .exe icons"
 arch=('x86_64')
@@ -61,6 +61,7 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/polka "$pkgdir/usr/bin/polka"
   install -Dm644 packaging/polka.desktop "$pkgdir/usr/share/applications/polka.desktop"
+  install -Dm644 packaging/io.github.sendement.Polka.FileManager1.service "$pkgdir/usr/share/dbus-1/services/io.github.sendement.Polka.FileManager1.service"
   install -Dm644 packaging/polka.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/polka.svg"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

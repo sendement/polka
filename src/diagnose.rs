@@ -26,6 +26,7 @@ pub fn run() {
         println!("trash: {}", r.display());
     }
     println!("trash items: {}", crate::trashbin::count());
+    println!("show in folder (FileManager1): {}", crate::fm1::current_owner());
     for m in crate::usage::mounts() {
         println!("mount: {} (read at {}) {} {}/{} bytes", m.host.display(), m.path.display(), m.fstype, m.used, m.total);
     }

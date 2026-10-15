@@ -25,6 +25,7 @@ use wayland_client::protocol::wl_shm::{self, WlShm};
 use wayland_client::protocol::wl_shm_pool::WlShmPool;
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, event_created_child};
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 
 const URIS: &str = "text/uri-list";
 /// Text kinds, the best first.
@@ -57,6 +58,8 @@ enum Cmd {
     Start(Vec<PathBuf>, Option<Icon>),
     GetText(Sender<Option<String>>),
     SetText(String),
+    /// Raise the window with another program's activation token.
+    Activate(String),
 }
 
 pub struct Dnd {
@@ -79,6 +82,9 @@ impl Waker {
         }
     }
 }
+
+/// Whether the compositor offers xdg-activation.
+static ACTIVATION: OnceLock<bool> = OnceLock::new();
 
 /// The running one, for the clipboard functions egui-winit calls.
 static WAKER: OnceLock<Waker> = OnceLock::new();
@@ -116,6 +122,7 @@ impl Dnd {
             ev: ev_tx,
             ctx,
             seat: None,
+            activation: None,
             manager: None,
             device: None,
             pointer: None,
@@ -134,6 +141,7 @@ impl Dnd {
         queue.roundtrip(&mut st).ok()?;
         queue.roundtrip(&mut st).ok()?;
         st.device.as_ref()?;
+        let _ = ACTIVATION.set(st.activation.is_some());
         let _ = WAKER.set(Waker { tx: cmd.clone(), pipe: Mutex::new(wake_w) });
         std::thread::Builder::new().name("polka-dnd".into()).spawn(move || run(conn, queue, st, cmd_rx, wake_r)).ok()?;
         Some(Self { cmd, events })
@@ -147,6 +155,17 @@ impl Dnd {
                 let _ = self.cmd.send(Cmd::Start(files, icon));
             }
         }
+    }
+
+    /// Raise the window with an activation token another program handed
+    /// over (false: the compositor has no xdg-activation).
+    pub fn activate(&self, token: String) -> bool {
+        let Some(w) = WAKER.get() else { return false };
+        if !ACTIVATION.get().copied().unwrap_or(false) {
+            return false;
+        }
+        w.send(Cmd::Activate(token));
+        true
     }
 
     /// For tests: events fed by hand, and the files of drags started.
@@ -176,6 +195,11 @@ fn run(conn: Connection, mut queue: EventQueue<State>, mut st: State, cmds: Rece
                 Cmd::Start(files, icon) => st.start(files, icon),
                 Cmd::GetText(reply) => st.get_text(&conn, reply),
                 Cmd::SetText(t) => st.set_text(t),
+                Cmd::Activate(token) => {
+                    if let Some(a) = &st.activation {
+                        a.activate(token, &st.surface);
+                    }
+                }
             }
         }
         let _ = conn.flush();
@@ -209,6 +233,7 @@ struct State {
     ev: Sender<Ev>,
     ctx: egui::Context,
     seat: Option<WlSeat>,
+    activation: Option<XdgActivationV1>,
     manager: Option<WlDataDeviceManager>,
     device: Option<WlDataDevice>,
     pointer: Option<WlPointer>,
@@ -415,6 +440,7 @@ impl Dispatch<WlRegistry, ()> for State {
                 "wl_data_device_manager" => st.manager = Some(reg.bind::<WlDataDeviceManager, _, _>(name, version.min(3), qh, ())),
                 "wl_compositor" => st.compositor = Some(reg.bind::<WlCompositor, _, _>(name, version.min(4), qh, ())),
                 "wl_shm" => st.shm = Some(reg.bind::<WlShm, _, _>(name, 1, qh, ())),
+                "xdg_activation_v1" => st.activation = Some(reg.bind::<XdgActivationV1, _, _>(name, 1, qh, ())),
                 _ => {}
             }
             if let (Some(seat), Some(m), None) = (&st.seat, &st.manager, &st.device) {
@@ -462,7 +488,7 @@ macro_rules! ignore_events {
         }
     )*};
 }
-ignore_events!(WlDataDeviceManager, WlCompositor, WlShm, WlShmPool);
+ignore_events!(WlDataDeviceManager, WlCompositor, WlShm, WlShmPool, XdgActivationV1);
 
 impl Dispatch<WlSurface, ()> for State {
     fn event(_: &mut Self, _: &WlSurface, _: wl_surface::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {}

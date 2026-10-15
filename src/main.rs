@@ -6,6 +6,7 @@ mod diagnose;
 mod dnd;
 mod drives;
 mod elevate;
+mod fm1;
 mod fonts;
 mod i18n;
 mod icons;
@@ -64,7 +65,10 @@ fn main() -> eframe::Result {
     // On Wayland the clipboard goes through Polka's own data device (drag
     // and drop needs to be the only one): see vendor/egui-winit.
     egui_winit::clipboard::external_wayland();
-    let start = std::env::args_os().nth(1).map(|a| app::arg_path(&a));
+    // Started by D-Bus for "Show in folder": the first request fills the
+    // first tab.
+    let dbus = std::env::args().nth(1).as_deref() == Some("--dbus");
+    let start = if dbus { None } else { std::env::args_os().nth(1).map(|a| app::arg_path(&a)) };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Polka")
@@ -87,6 +91,8 @@ fn main() -> eframe::Result {
             fonts::install(&cc.egui_ctx);
             appearance::watch(cc.egui_ctx.clone());
             let mut app = app::App::new(cc.egui_ctx.clone(), start);
+            app.dbus_fresh = dbus;
+            fm1::serve(app.msg_tx.clone(), cc.egui_ctx.clone());
             use raw_window_handle::HasDisplayHandle;
             app.sys_clip = Some(egui_winit::clipboard::Clipboard::new(cc.display_handle().ok().map(|h| h.as_raw())));
             // Drag and drop with other programs: Wayland only (X11 drops come

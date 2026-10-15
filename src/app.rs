@@ -1137,6 +1137,9 @@ pub enum Msg {
     NeedPassword(PathBuf, bool, Retry),
     /// A file from an archive was extracted for the viewer.
     View { tab: usize, path: PathBuf, name: String, origin: usize, source: Option<(PathBuf, String)> },
+    /// "Show in folder" from another program (D-Bus), with its activation
+    /// token if it gave one.
+    Show(crate::fm1::Show, String),
 }
 
 // ---------------------------------------------------------------- app
@@ -1161,6 +1164,8 @@ pub struct App {
     pub jobs: Vec<Arc<Job>>,
     pub toast: Option<(String, bool, Instant)>,
     pub msg_tx: Sender<Msg>,
+    /// Started for a D-Bus request: its folder takes the first tab.
+    pub dbus_fresh: bool,
     msg_rx: Receiver<Msg>,
     pub ctx: egui::Context,
     pub quit: bool,
@@ -1256,6 +1261,7 @@ impl App {
             jobs: Vec::new(),
             toast: None,
             msg_tx,
+            dbus_fresh: false,
             msg_rx,
             ctx,
             quit: false,
@@ -1346,6 +1352,7 @@ impl App {
                     }
                 }
                 Msg::NeedPassword(a, wrong, retry) => self.ask_password(a, wrong, retry),
+                Msg::Show(what, token) => self.show_from_dbus(what, &token),
                 Msg::View { tab, path, name, origin, source } => {
                     if tab < self.tabs.len() {
                         self.show_viewer(tab, path, name, origin, Vec::new());
@@ -1437,6 +1444,52 @@ impl App {
     pub fn wake(&self) -> impl Fn() + Send + Sync + 'static {
         let c = self.ctx.clone();
         move || c.request_repaint()
+    }
+
+    /// "Show in folder": each folder in a tab (the current one when it's
+    /// already there), its asked-for files selected, the cursor on the
+    /// first; the window raised.
+    pub fn show_from_dbus(&mut self, what: crate::fm1::Show, token: &str) {
+        use crate::fm1::{Show, group};
+        let (groups, props) = match what {
+            Show::Folders(v) => (v.into_iter().map(|p| if p.is_dir() { vec![(p, Vec::new())] } else { group(&[p]) }).flatten().collect::<Vec<_>>(), false),
+            Show::Items(v) => (group(&v), false),
+            Show::Properties(v) => (group(&v), true),
+        };
+        let cfg = self.cfg.clone();
+        for (dir, names) in groups {
+            let loc = Location::Local(dir);
+            if self.dbus_fresh {
+                self.dbus_fresh = false;
+                self.tab = 0;
+                self.tabs[0].active = 0;
+                self.pane_mut().navigate(loc, None, &cfg);
+            } else if !(self.pane().loc == loc && self.cur_tab().viewer.is_none() && !self.usage_shown() && !self.term_shown()) {
+                self.run(Cmd::OpenInNewTab(loc));
+            }
+            let pane = self.pane_mut();
+            pane.selected.clear();
+            if let Some(first) = names.first() {
+                // A folder still listing gets the cursor when it's ready.
+                pane.pending_focus = Some(first.clone());
+                if let Some(i) = pane.entries.iter().position(|e| &e.name == first) {
+                    pane.set_cursor(i);
+                }
+            }
+            if names.len() > 1 {
+                pane.selected.extend(names);
+            }
+        }
+        self.overlay = None;
+        self.focus = Focus::Panes;
+        if props {
+            self.open_props();
+        }
+        // The caller's token raises the window where the compositor allows.
+        let raised = !token.is_empty() && self.dnd.as_ref().is_some_and(|d| d.activate(token.to_string()));
+        if !raised {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
     }
 
     pub fn refresh_sidebar(&mut self) {

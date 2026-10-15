@@ -28,6 +28,8 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
   # mounting, unmounting and ejecting drives
   - --system-talk-name=org.freedesktop.UDisks2
+  # answering "Show in folder" from other programs
+  - --own-name=org.freedesktop.FileManager1
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin

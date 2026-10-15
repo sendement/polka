@@ -3922,3 +3922,56 @@ fn menu_size_screens() {
     assert!(rect.height() >= n as f32 * 34.0, "app menu squeezed to {} for {n} items", rect.height());
     shot(&mut h, "m0-app-menu-after-small");
 }
+
+/// "Show in folder" from another program: the folder in a new tab with the
+/// file under the cursor; several files selected; a folder already shown
+/// reuses its tab; properties.
+#[test]
+#[ignore]
+fn show_in_folder_screens() {
+    use crate::fm1::Show;
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let work = dir.join("shown");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("sub")).unwrap();
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(work.join(n), n).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let tabs = h.state().tabs.len();
+    h.state_mut().show_from_dbus(Show::Items(vec![work.join("b.txt")]), "");
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), tabs + 1);
+    assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(work.clone()));
+    assert_eq!(h.state().pane().current().unwrap().name, "b.txt");
+    shot(&mut h, "fm0-show-item");
+    // Same folder again: same tab; two files: both selected.
+    h.state_mut().show_from_dbus(Show::Items(vec![work.join("c.txt"), work.join("a.txt")]), "");
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), tabs + 1);
+    assert_eq!(h.state().pane().current().unwrap().name, "c.txt");
+    let mut sel: Vec<_> = h.state().pane().selected.iter().cloned().collect();
+    sel.sort();
+    assert_eq!(sel, vec!["a.txt", "c.txt"]);
+    // A folder opens itself.
+    h.state_mut().show_from_dbus(Show::Folders(vec![work.join("sub")]), "");
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), tabs + 2);
+    assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(work.join("sub")));
+    // Properties.
+    h.state_mut().show_from_dbus(Show::Properties(vec![work.join("a.txt")]), "");
+    settle(&mut h);
+    assert!(matches!(h.state().overlay, Some(crate::app::Overlay::Props(_))));
+    assert_eq!(h.state().pane().current().unwrap().name, "a.txt");
+    shot(&mut h, "fm1-properties");
+    // Started by D-Bus: the first request takes the first tab.
+    let mut h = harness(dir);
+    settle(&mut h);
+    h.state_mut().dbus_fresh = true;
+    h.state_mut().show_from_dbus(Show::Items(vec![work.join("a.txt")]), "");
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    assert_eq!(h.state().pane().current().unwrap().name, "a.txt");
+}

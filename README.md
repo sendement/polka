@@ -215,6 +215,23 @@ From the [releases](https://github.com/sendement/polka/releases):
   `flatpak install --user polka-<version>-x86_64.flatpak` (pulls org.freedesktop.Platform 25.08
   from Flathub)
 
+## "Show in folder"
+
+Browsers, chat programs and download lists ask the desktop's file manager to show a file through
+D-Bus (`org.freedesktop.FileManager1`). A running Polka answers: the folder opens in a tab with the
+file under the cursor (several files are selected), and the window is raised where the compositor
+allows. With no Polka running, the Arch package's D-Bus service starts one (`polka --dbus`).
+
+Another file manager that already holds the name keeps it; Polka waits in line and takes over when
+it quits. With Dolphin installed, stop its background copy and let Polka's service file win:
+
+```sh
+mkdir -p ~/.local/share/dbus-1/services
+cp /usr/share/dbus-1/services/io.github.sendement.Polka.FileManager1.service ~/.local/share/dbus-1/services/
+systemctl --user stop plasma-dolphin.service
+busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus ReloadConfig
+```
+
 ## Build
 
 Needs Rust, libarchive and zstd (`pacman -S libarchive zstd`).
