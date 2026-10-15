@@ -4,6 +4,19 @@ A gamepad-first file manager for Linux, written in Rust (egui).
 Everything works from a controller: browsing, selection, file operations,
 renaming via an on-screen keyboard. Keyboard and mouse work too.
 
+![Polka](docs/screenshots/01-home.png)
+
+<table>
+<tr><td width="50%"><img src="docs/screenshots/02-pictures-grid.png" alt="Grid with thumbnails"><br><sub>Grid with thumbnails</sub></td><td width="50%"><img src="docs/screenshots/03-dual-archive.png" alt="Dual pane, inside a zip"><br><sub>Dual pane, inside a zip</sub></td></tr>
+<tr><td width="50%"><img src="docs/screenshots/04-actions.png" alt="△ actions on a package"><br><sub>△ actions on a package</sub></td><td width="50%"><img src="docs/screenshots/05-install.png" alt="Installing it with pacman, in a terminal window"><br><sub>Installing it with pacman, in a terminal window</sub></td></tr>
+<tr><td width="50%"><img src="docs/screenshots/06-code.png" alt="Code viewer and editor"><br><sub>Code viewer and editor</sub></td><td width="50%"><img src="docs/screenshots/07-markdown.png" alt="Markdown, rendered"><br><sub>Markdown, rendered</sub></td></tr>
+<tr><td width="50%"><img src="docs/screenshots/08-terminal.png" alt="Terminal page"><br><sub>Terminal page</sub></td><td width="50%"><img src="docs/screenshots/09-disk-usage.png" alt="Disk usage"><br><sub>Disk usage</sub></td></tr>
+<tr><td width="50%"><img src="docs/screenshots/10-steam.png" alt="Steam games by name, with their icons"><br><sub>Steam games by name, with their icons</sub></td><td width="50%"><img src="docs/screenshots/11-keyboard.png" alt="On-screen keyboard"><br><sub>On-screen keyboard</sub></td></tr>
+<tr><td width="50%"><img src="docs/screenshots/12-settings.png" alt="Settings"><br><sub>Settings</sub></td><td width="50%"><img src="docs/screenshots/13-light.png" alt="Light look, check boxes"><br><sub>Light look, check boxes</sub></td></tr>
+</table>
+
+<sub>Screenshots are rendered offscreen by a test (`demo_shots` in `src/view_tests.rs`) from a made-up home folder.</sub>
+
 - Classic layout: collapsible sidebar (places, pinned folders, drives), path bar, tabs
 - List and grid views, dual-pane mode
 - Archives work like folders (libarchive): browse zip, 7z, rar, tar.*, iso…; copy, move, rename,
@@ -192,6 +205,16 @@ of these; Settings → Language switches on the fly. CJK text needs a CJK font (
 **Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
 live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along.
 
+## Install
+
+From the [releases](https://github.com/sendement/polka/releases):
+
+- Arch Linux and derivatives: `sudo pacman -U polka-<version>-1-x86_64.pkg.tar.zst`, or build the
+  attached `PKGBUILD` with `makepkg -si`
+- Anywhere with Flatpak, Steam Deck included:
+  `flatpak install --user polka-<version>-x86_64.flatpak` (pulls org.freedesktop.Platform 25.08
+  from Flathub)
+
 ## Build
 
 Needs Rust, libarchive and zstd (`pacman -S libarchive zstd`).
@@ -237,6 +260,9 @@ cargo test
 # offscreen UI renders (needs a GPU):
 POLKA_TEST_DIR=/some/dir POLKA_SHOT_DIR=/tmp/shots cargo test -- --ignored screens
 ```
+
+The README's screenshots come from `demo_shots`, which builds a made-up home folder; see its
+comment for running it in `bwrap` so that paths read `/home/alex`.
 
 `tools/fakepad.py` creates a virtual Xbox pad via uinput for manual input testing
 (`examples/padtest.rs` prints what Polka receives).

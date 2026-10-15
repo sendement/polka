@@ -14,8 +14,13 @@ use crate::input::{Action, Input};
 static GLOBALS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 fn harness(dir: PathBuf) -> Harness<'static, App> {
+    harness_with(dir, [1100.0, 680.0], "")
+}
+
+/// `tag` gives a config of its own (one that leaves the others' alone).
+fn harness_with(dir: PathBuf, size: [f32; 2], tag: &str) -> Harness<'static, App> {
     // Never touch the real config or gamepad from tests.
-    let cfg = std::env::temp_dir().join(format!("polka-test-cfg-{}", std::process::id()));
+    let cfg = std::env::temp_dir().join(format!("polka-test-cfg-{}{tag}", std::process::id()));
     unsafe {
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
         std::env::set_var("POLKA_NO_GAMEPAD", "1");
@@ -26,7 +31,7 @@ fn harness(dir: PathBuf) -> Harness<'static, App> {
         let _ = std::fs::create_dir_all(cfg.join("data/Trash/info"));
     }
     Harness::builder()
-        .with_size([1100.0, 680.0])
+        .with_size(size)
         .wgpu()
         .build_eframe(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -3474,4 +3479,421 @@ fn list_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     list_columns(&mut h);
+}
+
+// ------------------------------------------------------------------ demo
+
+/// Pictures for the README: a made-up home (no real files, names, mounts
+/// or processes), English, PlayStation glyphs, 1280×800. Not part of the
+/// usual run; POLKA_DEMO_HOME puts the home where it looks real (an empty
+/// folder bound over /home/alex, so paths read /home/alex):
+///   bwrap --dev-bind / / --tmpfs /home --bind ~ ~ --bind "$(mktemp -d)" /home/alex \
+///     env POLKA_DEMO_HOME=/home/alex POLKA_DEMO_DIR=$PWD/docs/screenshots \
+///     cargo test demo_shots -- --ignored
+#[test]
+#[ignore]
+fn demo_shots() {
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let out = std::env::var_os("POLKA_DEMO_DIR").map(PathBuf::from);
+    let base = std::env::temp_dir().join(format!("polka-demo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home = std::env::var_os("POLKA_DEMO_HOME").map(PathBuf::from).unwrap_or_else(|| base.join("home/alex"));
+    demo_home(&home);
+    let steam = base.join("steam");
+    demo_steam(&steam);
+    let bin = base.join("bin");
+    demo_bin(&bin);
+    let lsblk = base.join("lsblk.json");
+    std::fs::write(
+        &lsblk,
+        r#"{"blockdevices":[
+          {"name":"sdz","path":"/dev/sdz","fstype":null,"mountpoints":[null],"rm":true,"hotplug":true,"type":"disk","rota":true,"size":64000000000,"children":[
+            {"name":"sdz1","path":"/dev/sdz1","uuid":"5A1E-2C3D","label":"TRAVEL","fstype":"exfat","mountpoints":[null],"rm":true,"hotplug":true,"type":"part","rota":true,"size":64000000000}]}
+        ]}"#,
+    )
+    .unwrap();
+    let saved: Vec<(&str, Option<std::ffi::OsString>)> = ["HOME", "PATH", "POLKA_STEAM_ROOT", "POLKA_LSBLK"].iter().map(|k| (*k, std::env::var_os(k))).collect();
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("POLKA_STEAM_ROOT", &steam);
+        std::env::set_var("POLKA_LSBLK", &lsblk);
+    }
+    crate::i18n::set(Some("en"));
+    let mut h = harness_with(home.clone(), [1280.0, 800.0], "-demo");
+    // Places come from the made-up user-dirs.dirs, in the harness's config.
+    let xdg = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap());
+    std::fs::create_dir_all(&xdg).unwrap();
+    std::fs::write(
+        xdg.join("user-dirs.dirs"),
+        ["DESKTOP", "DOCUMENTS", "DOWNLOAD", "MUSIC", "PICTURES", "VIDEOS"]
+            .iter()
+            .zip(["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"])
+            .map(|(k, d)| format!("XDG_{k}_DIR=\"$HOME/{d}\"\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    demo(&mut h, &home, &base, out.as_deref());
+    let _ = std::fs::remove_file(xdg.join("user-dirs.dirs"));
+    drop(h);
+    crate::i18n::set(None);
+    for (k, v) in saved {
+        unsafe {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    if std::env::var_os("POLKA_DEMO_HOME").is_some() {
+        for e in std::fs::read_dir(&home).unwrap().flatten() {
+            let _ = if e.path().is_dir() { std::fs::remove_dir_all(e.path()) } else { std::fs::remove_file(e.path()) };
+        }
+    }
+}
+
+fn demo(h: &mut Harness<'static, App>, home: &std::path::Path, base: &std::path::Path, out: Option<&std::path::Path>) {
+    use crate::app::{Cmd, Focus, Overlay, row};
+    use crate::config::ViewMode;
+    use crate::vfs::Location;
+    let snap = |h: &mut Harness<'static, App>, name: &str| {
+        // Thumbnails and icons arrive from other threads.
+        for _ in 0..4 {
+            settle(h);
+        }
+        let img = h.render().expect("render");
+        if let Some(dir) = out {
+            std::fs::create_dir_all(dir).unwrap();
+            img.save(dir.join(format!("{name}.png"))).unwrap();
+        }
+    };
+    let go = |h: &mut Harness<'static, App>, p: &std::path::Path| {
+        let cfg = h.state().cfg.clone();
+        h.state_mut().pane_mut().navigate(Location::Local(p.to_path_buf()), None, &cfg);
+        settle(h);
+    };
+    let at = |h: &Harness<'static, App>, name: &str| h.state().pane().entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+    h.state_mut().pad = crate::input::PadKind::PlayStation;
+    h.state_mut().pad_seen = true;
+    // The config the app read set its own language; English for these.
+    crate::i18n::set(Some("en"));
+    h.state_mut().cfg.language = Some("en".into());
+    h.state_mut().cfg.grid_icon = 96.0;
+    h.state_mut().cfg.pinned = vec![home.join("Projects")];
+    h.state_mut().refresh_sidebar();
+    // Only the made-up drive: nothing the machine has mounted.
+    h.state_mut().side_items.retain(|s| s.section != "Drives" || s.drive.is_some());
+    assert!(h.state().side_items.iter().any(|s| s.label == "TRAVEL"));
+    assert!(h.state().side_items.iter().any(|s| s.label == "Steam"));
+
+    // Home, as a list.
+    go(h, home);
+    let i = at(h, "Documents");
+    h.state_mut().pane_mut().set_cursor(i);
+    snap(h, "01-home");
+
+    // Pictures as a grid of thumbnails.
+    go(h, &home.join("Pictures"));
+    h.state_mut().run(Cmd::SetView(ViewMode::Grid));
+    for _ in 0..10 {
+        settle(h);
+    }
+    let i = at(h, "lagoon.png");
+    h.state_mut().pane_mut().set_cursor(i);
+    snap(h, "02-pictures-grid");
+    h.state_mut().run(Cmd::SetView(ViewMode::List));
+
+    // Two panes: Downloads, and inside an archive.
+    go(h, &home.join("Downloads"));
+    for _ in 0..10 {
+        settle(h);
+    }
+    press(h, &[Action::View, Action::RightTrigger]);
+    go(h, &home.join("Downloads"));
+    let i = at(h, "wallpapers.zip");
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Accept]);
+    assert!(h.state().pane().loc.is_archive());
+    press(h, &[Action::Accept]);
+    snap(h, "03-dual-archive");
+    press(h, &[Action::LeftTrigger, Action::View]);
+
+    // △ on a package: installing it, or looking inside.
+    go(h, &home.join("Downloads"));
+    let i = at(h, "aurora-notes-2.4.1-1-x86_64.pkg.tar.zst");
+    h.state_mut().pane_mut().set_cursor(i);
+    press(h, &[Action::Actions]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))));
+    snap(h, "04-actions");
+    press(h, &[Action::Back]);
+    // ✕ installs it in a window (pacman and sudo are stand-ins).
+    press(h, &[Action::Accept]);
+    for _ in 0..150 {
+        settle(h);
+        if window_screen(h).contains("Proceed with installation?") {
+            break;
+        }
+    }
+    assert!(window_screen(h).contains("Proceed with installation?"), "{}", window_screen(h));
+    snap(h, "05-install");
+    type_text(h, "n");
+    key(h, egui::Key::Enter, egui::Modifiers::NONE);
+    for _ in 0..100 {
+        settle(h);
+        if h.state().term_window.as_ref().is_some_and(|w| w.failed) || h.state().term_window.is_none() {
+            break;
+        }
+    }
+    h.state_mut().term_window = None;
+
+    // The viewer: code, then Markdown.
+    let project = home.join("Projects/starmap");
+    go(h, &project.join("src"));
+    let i = at(h, "main.rs");
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::OpenInViewer);
+    snap(h, "06-code");
+    h.state_mut().run(Cmd::CloseViewer);
+    go(h, &project);
+    let i = at(h, "README.md");
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::OpenInViewer);
+    snap(h, "07-markdown");
+    h.state_mut().run(Cmd::CloseViewer);
+    settle(h);
+
+    // The terminal, in the project.
+    // Named bash, for the tab's title; outside the home, out of the shots.
+    let sh = base.join("shell/bash");
+    std::fs::create_dir_all(sh.parent().unwrap()).unwrap();
+    std::fs::write(
+        &sh,
+        "#!/bin/sh\nexport PS1='\\[\\e[1;32m\\]alex@polka\\[\\e[0m\\]:\\[\\e[1;34m\\]\\w\\[\\e[0m\\]$ ' HISTFILE=/dev/null LS_COLORS= LC_ALL=C.UTF-8\nexec /usr/bin/bash --norc --noprofile\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    h.state_mut().cfg.terminal.shell = Some(sh.display().to_string());
+    let i = h.state().side_items.iter().position(|it| it.term).unwrap();
+    h.state_mut().side_cursor = i;
+    h.state_mut().focus = Focus::Sidebar;
+    press(h, &[Action::Accept, Action::Right]);
+    term_wait(h, "$ ", 1);
+    for cmd in ["ls --color=always -F", "wc -l src/*.rs", "grep -n fn src/stars.rs"] {
+        type_text(h, cmd);
+        key(h, egui::Key::Enter, egui::Modifiers::NONE);
+        settle(h);
+    }
+    term_wait(h, "$ ", 4);
+    snap(h, "08-terminal");
+    h.state_mut().run(Cmd::TermClose);
+    settle(h);
+
+    // Disk usage of the home folder.
+    h.state_mut().focus_sidebar();
+    let i = h.state().side_items.iter().position(|s| s.usage).unwrap();
+    h.state_mut().side_cursor = i;
+    press(h, &[Action::Accept, Action::Right]);
+    match &h.state().cur_tab().usage.as_ref().unwrap().state {
+        crate::usage::State::Start { targets, .. } => assert_eq!(targets[0].path, home),
+        _ => panic!("not the start screen"),
+    }
+    press(h, &[Action::Accept]);
+    for _ in 0..100 {
+        settle(h);
+        if h.state().cur_tab().usage.as_ref().unwrap().ready().is_some() {
+            break;
+        }
+    }
+    snap(h, "09-disk-usage");
+    h.state_mut().run(Cmd::UsageClose);
+    settle(h);
+
+    // Steam: games by name, with their icons.
+    let i = h.state().side_items.iter().position(|s| s.label == "Steam").unwrap();
+    h.state_mut().focus_sidebar();
+    h.state_mut().side_cursor = i;
+    press(h, &[Action::Accept, Action::Right, Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(crate::steam::View::Games));
+    h.state_mut().run(Cmd::SetView(ViewMode::Grid));
+    press(h, &[Action::Right]);
+    snap(h, "10-steam");
+    h.state_mut().run(Cmd::SetView(ViewMode::List));
+
+    // The on-screen keyboard, renaming.
+    go(h, &home.join("Documents"));
+    let i = at(h, "trip-plan.odt");
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Rename);
+    settle(h);
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))));
+    snap(h, "11-keyboard");
+    press(h, &[Action::Back]);
+
+    // Settings, then the light look.
+    h.state_mut().run(Cmd::Settings);
+    snap(h, "12-settings");
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::APPEARANCE;
+    }
+    press(h, &[Action::Right, Action::Right]);
+    assert_eq!(h.state().cfg.appearance, crate::appearance::LIGHT);
+    press(h, &[Action::Back]);
+    go(h, &home.join("Pictures"));
+    let i = at(h, "dunes.png");
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().pane_mut().selected.insert("dunes.png".into());
+    h.state_mut().pane_mut().selected.insert("meadow.png".into());
+    snap(h, "13-light");
+}
+
+/// A landscape: sky, sun, two ridges of hills, as a demo picture.
+fn demo_picture(path: &std::path::Path, sky: [[f32; 3]; 2], hills: [[f32; 3]; 2], sun: f32) {
+    let (w, hgt) = (640u32, 400u32);
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|i| (a[i] + (b[i] - a[i]) * t) as u8);
+    image::RgbImage::from_fn(w, hgt, |x, y| {
+        let (fx, fy) = (x as f32 / w as f32, y as f32 / hgt as f32);
+        let far = 0.55 + 0.08 * (fx * 7.0 + sun * 3.0).sin() + 0.04 * (fx * 17.0).sin();
+        let near = 0.72 + 0.07 * (fx * 4.0 + 1.0 + sun).sin() + 0.03 * (fx * 23.0).cos();
+        let d = ((fx - sun).powi(2) * 2.6 + (fy - 0.38).powi(2)).sqrt();
+        if fy > near {
+            image::Rgb(mix(hills[1], [10.0, 10.0, 18.0], (fy - near) * 1.5))
+        } else if fy > far {
+            image::Rgb(mix(hills[0], hills[1], 0.3))
+        } else if d < 0.09 {
+            image::Rgb([255, 236, 190])
+        } else {
+            let glow = (0.25 - d).max(0.0) * 1.6;
+            image::Rgb(mix(mix(sky[0], sky[1], fy / far).map(f32::from), [255.0, 220.0, 170.0], glow))
+        }
+    })
+    .save(path)
+    .unwrap();
+}
+
+fn demo_home(home: &std::path::Path) {
+    let w = |p: &str, s: &[u8]| {
+        let p = home.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, s).unwrap();
+    };
+    let big = |p: &str, mib: usize| w(p, &vec![0x5a; mib << 20]);
+    for d in ["Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "Projects", "Games/Saves"] {
+        std::fs::create_dir_all(home.join(d)).unwrap();
+    }
+    w("Desktop/todo.txt", b"- water the plants\n- back up photos\n");
+    w("Documents/trip-plan.odt", &[0x50; 18_000]);
+    w("Documents/budget-2026.ods", &[0x50; 24_000]);
+    w("Documents/recipes.md", b"# Recipes\n\n## Pancakes\n\n- flour\n- milk\n- eggs\n");
+    w("Documents/manual.pdf", b"%PDF-1.4\n%demo\n");
+    big("Documents/scans/passport-copy.pdf", 2);
+    big("Music/Night Drive/01 - Neon Coast.flac", 9);
+    big("Music/Night Drive/02 - Overpass.flac", 8);
+    big("Music/Night Drive/03 - Last Exit.flac", 11);
+    big("Music/podcast-episode-12.mp3", 6);
+    big("Videos/summer-trip.mkv", 48);
+    big("Videos/cat-vs-laser.mp4", 14);
+    big("Games/Saves/backup-2026-09.tar", 5);
+    w(".bashrc", b"# demo\n");
+    let pics: [(&str, [[f32; 3]; 2], [[f32; 3]; 2], f32); 8] = [
+        ("dunes.png", [[250.0, 170.0, 90.0], [255.0, 225.0, 160.0]], [[200.0, 120.0, 60.0], [150.0, 80.0, 40.0]], 0.7),
+        ("lagoon.png", [[60.0, 150.0, 220.0], [170.0, 225.0, 245.0]], [[40.0, 140.0, 130.0], [20.0, 90.0, 80.0]], 0.25),
+        ("meadow.png", [[120.0, 190.0, 240.0], [220.0, 240.0, 255.0]], [[110.0, 170.0, 70.0], [60.0, 120.0, 40.0]], 0.5),
+        ("aurora.png", [[10.0, 30.0, 60.0], [40.0, 160.0, 130.0]], [[30.0, 40.0, 70.0], [15.0, 20.0, 40.0]], 0.85),
+        ("sunset.png", [[90.0, 50.0, 130.0], [250.0, 140.0, 90.0]], [[70.0, 40.0, 90.0], [40.0, 20.0, 60.0]], 0.4),
+        ("glacier.png", [[150.0, 190.0, 230.0], [235.0, 245.0, 255.0]], [[200.0, 220.0, 240.0], [120.0, 150.0, 190.0]], 0.15),
+        ("canyon.png", [[230.0, 130.0, 80.0], [250.0, 200.0, 140.0]], [[170.0, 70.0, 40.0], [110.0, 40.0, 30.0]], 0.6),
+        ("forest.png", [[90.0, 140.0, 120.0], [200.0, 220.0, 190.0]], [[40.0, 90.0, 60.0], [20.0, 50.0, 35.0]], 0.3),
+    ];
+    for (name, sky, hills, sun) in pics {
+        demo_picture(&home.join("Pictures").join(name), sky, hills, sun);
+    }
+    // A project to read and to list in the terminal.
+    let p = "Projects/starmap";
+    w(&format!("{p}/Cargo.toml"), b"[package]\nname = \"starmap\"\nversion = \"0.3.0\"\nedition = \"2024\"\n\n[dependencies]\nserde = \"1\"\n");
+    w(
+        &format!("{p}/README.md"),
+        b"# Starmap\n\nA tiny **night sky** planner: which constellations are up tonight, and when.\n\n> [!TIP]\n> Run it with `--city` to skip the location prompt.\n\n## Features\n\n- [x] Rise and set times\n- [x] Moon phase\n- [ ] Planet tracking\n\n| Key | Action |\n|:--|:--|\n| `n` | Next night |\n| `p` | Previous night |\n| `q` | Quit |\n\n```sh\ncargo run -- --city Lisbon\n```\n",
+    );
+    w(
+        &format!("{p}/src/main.rs"),
+        b"//! Starmap: what's up in the sky tonight.\n\nmod stars;\n\nuse std::env;\n\nuse stars::{Catalog, Sky};\n\nfn main() {\n    let city = env::args().skip_while(|a| a != \"--city\").nth(1).unwrap_or_else(|| \"Lisbon\".into());\n    let catalog = Catalog::load(\"data/stars.csv\").expect(\"no star catalog\");\n    let sky = Sky::tonight(&city);\n    // Brightest first, only what clears the horizon.\n    let mut up: Vec<_> = catalog.iter().filter(|s| sky.altitude(s) > 5.0).collect();\n    up.sort_by(|a, b| a.magnitude.total_cmp(&b.magnitude));\n    for star in up.iter().take(10) {\n        println!(\"{:<12} {:>5.1}\\u{b0}  mag {:.1}\", star.name, sky.altitude(star), star.magnitude);\n    }\n    println!(\"{} stars above {city}\", up.len());\n}\n",
+    );
+    w(
+        &format!("{p}/src/stars.rs"),
+        b"pub struct Star {\n    pub name: String,\n    pub magnitude: f32,\n}\n\npub struct Catalog(Vec<Star>);\n\nimpl Catalog {\n    pub fn load(path: &str) -> std::io::Result<Self> {\n        let text = std::fs::read_to_string(path)?;\n        Ok(Catalog(text.lines().filter_map(parse).collect()))\n    }\n    pub fn iter(&self) -> impl Iterator<Item = &Star> {\n        self.0.iter()\n    }\n}\n\nfn parse(line: &str) -> Option<Star> {\n    let (name, mag) = line.split_once(',')?;\n    Some(Star { name: name.into(), magnitude: mag.trim().parse().ok()? })\n}\n",
+    );
+    w(&format!("{p}/data/stars.csv"), b"Sirius,-1.46\nCanopus,-0.74\nArcturus,-0.05\nVega,0.03\n");
+    // Downloads: a pacman package (the real thing, .PKGINFO inside), a
+    // flatpak, a script, an archive of the pictures.
+    let src = home.join(".cache/pkg-src");
+    std::fs::create_dir_all(src.join("usr/bin")).unwrap();
+    std::fs::write(src.join(".PKGINFO"), "pkgname = aurora-notes\npkgver = 2.4.1-1\n").unwrap();
+    std::fs::write(src.join("usr/bin/aurora-notes"), "#!/bin/sh\n").unwrap();
+    let dl = home.join("Downloads");
+    let ok = std::process::Command::new("tar").arg("--zstd").arg("-cf").arg(dl.join("aurora-notes-2.4.1-1-x86_64.pkg.tar.zst")).arg("-C").arg(&src).args([".PKGINFO", "usr"]).status().unwrap();
+    assert!(ok.success());
+    std::fs::remove_dir_all(home.join(".cache")).unwrap();
+    std::fs::write(dl.join("Pixel-Garden.flatpak"), vec![0x5au8; 300_000]).unwrap();
+    std::fs::write(dl.join("setup-printer.sh"), "#!/bin/sh\necho configuring\n").unwrap();
+    std::fs::write(dl.join("invoice-0815.pdf"), b"%PDF-1.4\n").unwrap();
+    let ok = std::process::Command::new("bsdtar").arg("--format").arg("zip").arg("-cf").arg(dl.join("wallpapers.zip")).arg("-C").arg(home).arg("Pictures").status().unwrap();
+    assert!(ok.success());
+}
+
+/// Stand-ins for sudo and pacman, for the install window.
+fn demo_bin(bin: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin).unwrap();
+    let script = |name: &str, body: &str| {
+        std::fs::write(bin.join(name), body).unwrap();
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script("sudo", "#!/bin/sh\nexec \"$@\"\n");
+    script(
+        "pacman",
+        "#!/bin/sh\necho 'loading packages...'\necho 'resolving dependencies...'\necho 'looking for conflicting packages...'\necho\necho 'Package (1)       New Version  Net Change'\necho\necho 'aurora-notes      2.4.1-1        3.21 MiB'\necho\necho 'Total Installed Size:  3.21 MiB'\necho\nprintf ':: Proceed with installation? [Y/n] '\nread a\n[ \"$a\" = n ] && exit 1\nexit 0\n",
+    );
+}
+
+/// A Steam with made-up games, each with an icon.
+fn demo_steam(root: &std::path::Path) {
+    let w = |p: std::path::PathBuf, s: &[u8]| {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, s).unwrap();
+    };
+    w(root.join("steamapps/libraryfolders.vdf"), format!("\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n", root.display()).as_bytes());
+    let games: [(u32, &str, [u8; 3], [u8; 3]); 6] = [
+        (910010, "Starfall Drift", [40, 60, 160], [250, 200, 80]),
+        (910020, "Hollow Lantern", [30, 30, 40], [250, 160, 60]),
+        (910030, "Crimson Orbit", [120, 20, 40], [250, 120, 120]),
+        (910040, "Tiny Harbor", [40, 140, 180], [250, 250, 250]),
+        (910050, "Moss & Marrow", [40, 90, 50], [190, 230, 120]),
+        (910060, "Neon Courier", [60, 20, 90], [80, 240, 230]),
+    ];
+    for (i, (id, name, bg, fg)) in games.into_iter().enumerate() {
+        w(root.join(format!("steamapps/appmanifest_{id}.acf")), format!("\"AppState\"\n{{\n\t\"appid\"\t\t\"{id}\"\n\t\"name\"\t\t\"{name}\"\n\t\"installdir\"\t\t\"{name}\"\n}}\n").as_bytes());
+        w(root.join(format!("steamapps/common/{name}/data.pak")), b"demo");
+        std::fs::create_dir_all(root.join(format!("steamapps/compatdata/{id}/pfx/drive_c"))).unwrap();
+        // An emblem: a ring, a dot, a bar, by game.
+        let icon = root.join(format!("appcache/librarycache/{id}/{:040x}.jpg", id as u128 * 7919));
+        std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        image::RgbImage::from_fn(128, 128, |x, y| {
+            let (dx, dy) = (x as f32 - 64.0, y as f32 - 64.0);
+            let r = (dx * dx + dy * dy).sqrt();
+            // Distance outside the shape, in pixels: soft edges.
+            let out = match i % 3 {
+                0 => (r - 44.0).max(28.0 - r),
+                1 => (r - 26.0).min((dy.abs() - 6.0).max(dx.abs() - 52.0)),
+                _ => ((dx + dy).abs() / 1.414 - 10.0).min(r - 16.0),
+            };
+            let t = (0.5 - out).clamp(0.0, 1.0);
+            let shade = 1.0 - y as f32 / 280.0;
+            image::Rgb([0, 1, 2].map(|k| (bg[k] as f32 * shade * (1.0 - t) + fg[k] as f32 * t) as u8))
+        })
+        .save(&icon)
+        .unwrap();
+    }
 }
