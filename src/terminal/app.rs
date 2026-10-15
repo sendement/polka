@@ -147,7 +147,8 @@ impl App {
                     lines.join(" | ")
                 ));
                 // The wrapper said so and waited already: nothing more to read.
-                let told = lines.iter().any(|l| l.contains('✘'));
+                // (Its own line, starting with the mark — not quoted in an error.)
+                let told = lines.iter().any(|l| l.trim_start().starts_with('✘'));
                 if ok || told {
                     self.term_window = None;
                     if ok {

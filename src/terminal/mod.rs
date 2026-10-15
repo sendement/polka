@@ -82,7 +82,15 @@ fn shell_command(prefs: &TermPrefs, cwd: &Path, pid_file: Option<&Path>, env: &s
         }
         let note = pid_file.map(|p| format!("echo $$ > '{}'; ", p.display())).unwrap_or_default();
         let q = crate::packages::quote(cmd);
-        let inner = format!("{note}command -v script >/dev/null && exec script -qfec {q} /dev/null; exec sh -c {q}");
+        // Tests: a host whose user shell is another one (fish, say).
+        let mut env = env.clone();
+        if let Ok(sh) = std::env::var("POLKA_TEST_HOST_SHELL") {
+            env.insert("SHELL".into(), sh);
+        }
+        let env = &env;
+        // script runs it with $SHELL: sh, whatever the user's is (fish
+        // wouldn't take sh's syntax).
+        let inner = format!("{note}command -v script >/dev/null && SHELL=/bin/sh exec script -qfec {q} /dev/null; exec sh -c {q}");
         let mut args: Vec<String> = vec!["--host".into(), "--watch-bus".into()];
         args.extend(env.iter().map(|(k, v)| format!("--env={k}={v}")));
         args.extend([format!("--directory={}", crate::sandbox::host_path(cwd).display()), "sh".into(), "-c".into(), inner]);

@@ -125,7 +125,7 @@ fn terminal() {
     // A command of its own, as a package install runs (its end and code).
     // In a folder seen through the host's root (as "File system" shows it).
     let inside = crate::sandbox::root().join(home.strip_prefix("/").unwrap_or(&home));
-    let mut cmd = crate::terminal::Session::spawn_with(&prefs, &inside, &ctx, 80, 24, true, Some("test -t 0 && echo polka-tty; exit 7")).ok();
+    let mut cmd = crate::terminal::Session::spawn_with(&prefs, &inside, &ctx, 80, 24, true, Some("s=7; test -t 0 && echo polka-tty; exit $s")).ok();
     let mut cmd_ok = None;
     for _ in 0..200 {
         let Some(c) = cmd.as_mut() else { break };
