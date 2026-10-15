@@ -241,7 +241,7 @@ fn features(h: &mut Harness<'static, App>) {
     // The picker must not grow while the cursor moves (it used to, every frame).
     let height = |h: &Harness<'static, App>| {
         let kind = h.state().overlay.as_ref().map(std::mem::discriminant);
-        h.ctx.memory(|m| m.area_rect(egui::Id::new(("overlay", kind)))).map(|r| r.height()).unwrap()
+        h.ctx.memory(|m| m.area_rect(egui::Id::new(("overlay", kind, None::<(String, usize)>)))).map(|r| r.height()).unwrap()
     };
     let before = height(h);
     for _ in 0..6 {
@@ -3896,4 +3896,29 @@ fn demo_steam(root: &std::path::Path) {
         .save(&icon)
         .unwrap();
     }
+}
+
+/// A small menu, then the app menu: it shows all its items (an area once
+/// kept the small one's size and the app menu showed two).
+#[test]
+#[ignore]
+fn menu_size_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    settle(&mut h);
+    h.state_mut().focus_sidebar();
+    let i = h.state().side_items.iter().position(|it| it.term).unwrap();
+    h.state_mut().side_cursor = i;
+    press(&mut h, &[Action::Actions]);
+    press(&mut h, &[Action::Back]);
+    h.state_mut().focus = crate::app::Focus::Panes;
+    press(&mut h, &[Action::Menu]);
+    let (id, n) = match &h.state().overlay {
+        Some(o @ crate::app::Overlay::Menu(m)) => (egui::Id::new(("overlay", Some(std::mem::discriminant(o)), Some((m.title.clone(), m.items.len())))), m.items.len()),
+        _ => panic!("no app menu"),
+    };
+    let rect = h.state().ctx.memory(|m| m.area_rect(id)).expect("no area");
+    assert!(rect.height() >= n as f32 * 34.0, "app menu squeezed to {} for {n} items", rect.height());
+    shot(&mut h, "m0-app-menu-after-small");
 }

@@ -1091,10 +1091,15 @@ impl App {
             (Align2::CENTER_CENTER, vec2(0.0, 0.0))
         };
         let vprefs = self.cfg.viewer.clone();
-        // One area per kind of overlay: an area keeps its last size, and a
-        // small menu's would squeeze the settings' scroll area after it.
+        // One area per kind of overlay, and per menu: an area keeps its last
+        // size, and a small one's would squeeze the scroll area of a bigger
+        // one after it (two items of the app menu after a sidebar menu).
         let kind = overlay.as_ref().map(std::mem::discriminant);
-        let shown = egui::Area::new(egui::Id::new(("overlay", kind)))
+        let menu = match overlay.as_ref() {
+            Some(Overlay::Menu(m)) => Some((m.title.clone(), m.items.len())),
+            _ => None,
+        };
+        let shown = egui::Area::new(egui::Id::new(("overlay", kind, menu)))
             .order(Order::Foreground)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
@@ -1828,7 +1833,10 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
     let max_h = (ui.ctx().content_rect().height() - 140.0).max(200.0);
     let follow = m.shown != Some(m.cursor);
     m.shown = Some(m.cursor);
-    egui::ScrollArea::vertical().id_salt(("menu-scroll", m.title.clone())).max_height(max_h).show(ui, |ui| {
+    // As tall as its items (up to max_h) from the first frame: a new area
+    // starts at the centre, with only half the screen below it.
+    let natural = m.items.len() as f32 * 36.0;
+    egui::ScrollArea::vertical().id_salt(("menu-scroll", m.title.clone())).max_height(max_h).min_scrolled_height(natural.min(max_h)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         // Line labels up when some items have checkboxes and others don't.
         let has_checks = m.items.iter().any(|i| i.checked.is_some());
