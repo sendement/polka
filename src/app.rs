@@ -53,6 +53,8 @@ pub struct Pane {
     pub band: Option<crate::mouse::Band>,
     /// Entries drawn last frame: (index, row, icon and name), for tests.
     pub drawn: Vec<(usize, egui::Rect, egui::Rect)>,
+    /// The list's column headers (last frame), for tests.
+    pub heads: Vec<(crate::config::SortKey, egui::Rect)>,
     /// No cursor shown (after a mouse drop took its item away); the next
     /// pad or arrow press only brings it back.
     pub cursor_hidden: bool,
@@ -89,6 +91,7 @@ impl Pane {
             hover_volume: None,
             band: None,
             drawn: Vec::new(),
+            heads: Vec::new(),
             cursor_hidden: false,
             collapse: cfg.collapse_volumes,
             expanded: Vec::new(),

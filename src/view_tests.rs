@@ -1414,6 +1414,24 @@ fn video(h: &mut Harness<'static, App>) {
     press(h, &[Action::View]);
     assert!(vid(h).unwrap().4 && h.state().video_full());
     shot(h, "67-video-full");
+    // Playing, controls due to hide, the pointer resting on the volume
+    // slider: they stay, frame after frame (they used to flicker).
+    press(h, &[Action::Accept]);
+    let screen = h.state().ctx.content_rect();
+    let on_volume = egui::pos2(screen.max.x - 18.0 - 28.0 - 16.0 - 45.0, screen.max.y - 80.0 + 58.0);
+    h.event(egui::Event::PointerMoved(on_volume));
+    // (Moving shows them for a while: that settles first.)
+    h.step();
+    h.step();
+    let tab = h.state().tab;
+    if let Some(Content::Video(m)) = h.state_mut().tabs[tab].viewer.as_mut().map(|v| &mut v.content) {
+        m.controls_until = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    }
+    for _ in 0..8 {
+        h.step();
+        assert_ne!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "the controls hid under the pointer");
+    }
+    press(h, &[Action::Accept]);
     press(h, &[Action::Back]);
     assert!(!vid(h).unwrap().4 && h.state().cur_tab().viewer.is_some());
     // □ tap: subtitles off; the menu offers the audio track.
@@ -3374,4 +3392,86 @@ fn steam_add_screens() {
     let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
     let mut h = harness(dir);
     add_to_steam(&mut h);
+}
+
+/// The list: a type column, headers that sort (again: the other way), and
+/// check boxes that take items in and out of the selection with the mouse.
+fn list_columns(h: &mut Harness<'static, App>) {
+    use crate::config::{SortKey, ViewMode};
+    use crate::vfs::Location;
+    use egui::{Event, Modifiers, PointerButton, Pos2};
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").unwrap()).unwrap().join("columns");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Folder")).unwrap();
+    std::fs::write(dir.join("big.txt"), "x".repeat(5000)).unwrap();
+    std::fs::write(dir.join("small.md"), "# x").unwrap();
+    image::RgbImage::new(8, 8).save(dir.join("picture.png")).unwrap();
+    std::fs::write(dir.join("setup.exe"), b"MZ").unwrap();
+    let mut cfg = h.state().cfg.clone();
+    cfg.view = ViewMode::List;
+    cfg.dual = false;
+    cfg.sort = SortKey::Name;
+    cfg.sort_reverse = false;
+    h.state_mut().cfg = cfg.clone();
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(h);
+    let click = |h: &mut Harness<'static, App>, pos: Pos2| {
+        h.event(Event::PointerMoved(pos));
+        h.step();
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+        settle(h);
+    };
+    let head = |h: &Harness<'static, App>, k: SortKey| h.state().pane().heads.iter().find(|(x, _)| *x == k).map(|(_, r)| r.center()).expect("no such header");
+    let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    shot(h, "l0-type-column");
+    // Size: biggest first; again: smallest first.
+    click(h, head(h, SortKey::Size));
+    assert_eq!((h.state().cfg.sort, h.state().cfg.sort_reverse), (SortKey::Size, false));
+    let files: Vec<String> = names(h).into_iter().filter(|n| n != "Folder").collect();
+    assert_eq!(files.first().map(String::as_str), Some("big.txt"), "{files:?}");
+    click(h, head(h, SortKey::Size));
+    assert!(h.state().cfg.sort_reverse);
+    shot(h, "l1-sorted-by-size-reversed");
+    click(h, head(h, SortKey::Type));
+    assert_eq!((h.state().cfg.sort, h.state().cfg.sort_reverse), (SortKey::Type, false));
+    click(h, head(h, SortKey::Name));
+    assert_eq!(h.state().cfg.sort, SortKey::Name);
+    // Check boxes: two in, then one out again; the other stays.
+    let row = |h: &Harness<'static, App>, name: &str| {
+        let p = h.state().pane();
+        let i = p.entries.iter().position(|e| e.name == name).unwrap();
+        p.drawn.iter().find(|d| d.0 == i).unwrap().1
+    };
+    let check = |h: &Harness<'static, App>, name: &str| {
+        let r = row(h, name);
+        egui::pos2(r.min.x + 6.0 + 11.0, r.center().y)
+    };
+    click(h, check(h, "big.txt"));
+    click(h, check(h, "picture.png"));
+    let mut sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+    sel.sort();
+    assert_eq!(sel, ["big.txt", "picture.png"]);
+    shot(h, "l2-checked");
+    click(h, check(h, "big.txt"));
+    let sel: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+    assert_eq!(sel, ["picture.png"], "unchecking took the wrong ones");
+    h.state_mut().cfg.view = ViewMode::Grid;
+    settle(h);
+    shot(h, "l3-grid-checked");
+    h.state_mut().cfg.view = ViewMode::List;
+    h.state_mut().pane_mut().selected.clear();
+    settle(h);
+}
+
+#[test]
+#[ignore]
+fn list_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    list_columns(&mut h);
 }

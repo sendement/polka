@@ -1,6 +1,11 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Launcher", "ランチャー"),
+    ("Package", "パッケージ"),
+    ("Script", "スクリプト"),
+    ("Windows program", "Windows プログラム"),
+    ("Document", "ドキュメント"),
     ("Already in Steam", "すでに Steam にあります"),
     ("Add (shows after Steam restarts)", "追加（Steam 再起動後に表示）"),
     ("Add to Steam", "Steam に追加"),

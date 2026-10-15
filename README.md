@@ -165,7 +165,9 @@ the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu c
 Gamepad input is ignored while Polka is not the focused window. Touch screens, touchpads and pens
 aren't taken for pads (on the Steam Deck the screen's touches stay touches).
 
-**Mouse.** Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
+**Mouse.** The list's headers (Name, Type, Size, Modified) sort by their column, a second click the
+other way; check boxes (on the selected, under the pointer, and all while anything is selected)
+take items in and out of the selection. Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
 click opens a folder in a new tab, the side buttons go back / forward. Drag from empty space
 (right of the names in the list, between icons in the grid) for a selection rectangle; Ctrl
 adds to the selection. Drag items by their icon or name onto a folder, the other pane or a

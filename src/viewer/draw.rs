@@ -1109,7 +1109,11 @@ fn draw_video(ui: &mut Ui, m: &mut super::video::VideoState, prefs: &ViewerPrefs
         painter.circle_filled(c, 40.0, Color32::from_black_alpha(150));
         tri(&painter, c + vec2(5.0, 0.0), 18.0, true, white);
     }
-    let shown = !full || m.controls_shown() || resp.hover_pos().is_some_and(|p| p.y > area.max.y - 90.0);
+    // The pointer near the bottom keeps them: wherever it is, not only over
+    // the picture (over a control the picture isn't "hovered", and the
+    // controls would come and go every frame).
+    let near = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p) && p.y > area.max.y - 90.0);
+    let shown = !full || m.controls_shown() || near;
     if !shown {
         if full && resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);

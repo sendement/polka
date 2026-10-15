@@ -1,6 +1,11 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Launcher", "실행기"),
+    ("Package", "패키지"),
+    ("Script", "스크립트"),
+    ("Windows program", "Windows 프로그램"),
+    ("Document", "문서"),
     ("Already in Steam", "이미 Steam에 있음"),
     ("Add (shows after Steam restarts)", "추가 (Steam 재시작 후 표시)"),
     ("Add to Steam", "Steam에 추가"),

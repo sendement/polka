@@ -1,6 +1,11 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("Launcher", "Starter"),
+    ("Package", "Paket"),
+    ("Script", "Skript"),
+    ("Windows program", "Windows-Programm"),
+    ("Document", "Dokument"),
     ("Already in Steam", "Schon in Steam"),
     ("Add (shows after Steam restarts)", "Hinzufügen (erscheint nach Steam-Neustart)"),
     ("Add to Steam", "Zu Steam hinzufügen"),

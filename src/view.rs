@@ -10,7 +10,7 @@ use egui::{
 use crate::app::{
     App, Cmd, Focus, Menu, Osk, OskKey, Overlay, Pane, Props, fmt_time, human_size,
 };
-use crate::config::{Config, ViewMode};
+use crate::config::{Config, SortKey, ViewMode};
 use crate::i18n::tr;
 use crate::icons::Icons;
 use crate::input::{Action, Input, PadKind};
@@ -944,6 +944,29 @@ impl App {
             self.focus = Focus::Panes;
             self.tabs[tab].active = idx;
             match e {
+                PaneEvent::Toggle(i) => {
+                    let p = self.pane_mut();
+                    if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
+                        // A folded volume set goes in or out whole.
+                        let members = p.collapsed.get(&name).map(|c| c.2.clone()).unwrap_or_default();
+                        if p.selected.remove(&name) {
+                            for m in &members {
+                                p.selected.remove(m);
+                            }
+                        } else {
+                            p.selected.insert(name);
+                            p.selected.extend(members);
+                        }
+                    }
+                }
+                PaneEvent::SortBy(key) => {
+                    if self.cfg.sort == key {
+                        self.run(Cmd::ToggleSortReverse);
+                    } else {
+                        self.cfg.sort_reverse = false;
+                        self.run(Cmd::Sort(key));
+                    }
+                }
                 PaneEvent::Click(i, toggle, range) => {
                     let p = self.pane_mut();
                     p.cursor_hidden = false;
@@ -1136,6 +1159,10 @@ impl App {
 enum PaneEvent {
     /// index, Ctrl (toggle), Shift (range from the cursor)
     Click(usize, bool, bool),
+    /// Its check box: in or out of the selection, the rest as it is.
+    Toggle(usize),
+    /// A column header: sort by it (again: the other way).
+    SortBy(SortKey),
     /// Middle click: a folder in a new tab.
     NewTab(usize),
     Activate(usize),
@@ -1192,27 +1219,55 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     let grid_w = (grid_icon + 44.0).max(96.0).max(grid_font * 7.5);
     let grid_h = grid_icon + 18.0 + 2.0 * grid_font * 1.3;
     let list_row = (list_icon + 8.0).max(list_font + 14.0);
-    let name_x = list_icon + 20.0;
-    // Narrow panes (dual mode, big fonts) drop the date column first, so
-    // names keep room. Column x positions are offsets from the right edge.
+    // A check box, the icon, the name.
+    const CHECK_W: f32 = 22.0;
+    let name_x = CHECK_W + list_icon + 20.0;
+    // Narrow panes (dual mode, big fonts) drop the type column first, then
+    // the date, so names keep room. Column x positions are offsets from the
+    // right edge.
     let show_date = width > 560.0 * k;
+    let show_type = width > 780.0 * k;
     let size_right = if show_date { 160.0 * k } else { 12.0 };
-    let name_room = if show_date { 260.0 * k } else { 100.0 * k };
+    let type_w = 150.0 * k;
+    let type_right = size_right + 100.0 * k + type_w;
+    let name_room = if show_type { type_right + 10.0 } else if show_date { 260.0 * k } else { 100.0 * k };
     let cols = if grid { ((width - 8.0) / grid_w).floor().max(1.0) as usize } else { 1 };
     pane.cols = cols;
     let row_h = if grid { grid_h } else { list_row };
     let rows = pane.entries.len().div_ceil(cols);
 
     if !grid {
-        // Column header.
-        let (r, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
-        let c = ui.visuals().weak_text_color();
+        // Column header: a click sorts by the column, again the other way.
+        let (r, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+        let mut heads = Vec::new();
         let f = FontId::proportional(12.0);
-        ui.painter().text(pos2(r.min.x + name_x, r.center().y), Align2::LEFT_CENTER, tr("Name"), f.clone(), c);
-        ui.painter().text(pos2(r.max.x - size_right, r.center().y), Align2::RIGHT_CENTER, tr("Size"), f.clone(), c);
-        if show_date {
-            ui.painter().text(pos2(r.max.x - 145.0 * k, r.center().y), Align2::LEFT_CENTER, tr("Modified"), f, c);
+        let arrow = if cfg.sort_reverse { " ▼" } else { " ▲" };
+        let mut head = |x0: f32, x1: f32, label: &str, key: SortKey, right: bool| {
+            let cell = Rect::from_min_max(pos2(x0, r.min.y), pos2(x1, r.max.y));
+            let resp = ui.interact(cell, ui.id().with(("sort-head", id, key as u8)), Sense::click());
+            let on = cfg.sort == key;
+            let c = if on || resp.hovered() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
+            if resp.hovered() {
+                ui.painter().rect_filled(cell.shrink2(vec2(0.0, 1.0)), 4.0, ui.visuals().widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
+            }
+            let text = if on { format!("{label}{arrow}") } else { label.to_string() };
+            let (at, align) = if right { (pos2(x1 - 4.0, r.center().y), Align2::RIGHT_CENTER) } else { (pos2(x0 + 4.0, r.center().y), Align2::LEFT_CENTER) };
+            ui.painter().text(at, align, text, f.clone(), c);
+            if resp.clicked() {
+                events.push(PaneEvent::SortBy(key));
+            }
+            heads.push((key, cell));
+        };
+        let name_end = if show_type { r.max.x - type_right } else { r.max.x - size_right - 100.0 * k };
+        head(r.min.x + name_x - 4.0, name_end, tr("Name"), SortKey::Name, false);
+        if show_type {
+            head(r.max.x - type_right, r.max.x - size_right - 100.0 * k, tr("Type"), SortKey::Type, false);
         }
+        head(r.max.x - size_right - 100.0 * k, r.max.x - size_right + 4.0, tr("Size"), SortKey::Size, true);
+        if show_date {
+            head(r.max.x - 149.0 * k, r.max.x, tr("Modified"), SortKey::Date, false);
+        }
+        pane.heads = heads;
     }
 
     let mut sa = egui::ScrollArea::vertical().id_salt(("pane-scroll", id)).auto_shrink([false, false]);
@@ -1319,7 +1374,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                         volume_tag(ui, m, None, at, Align2::RIGHT_TOP, font, in_set, vol_c);
                     }
                 } else {
-                    let ir = Rect::from_min_size(pos2(rect.min.x + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
+                    let ir = Rect::from_min_size(pos2(rect.min.x + CHECK_W + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
@@ -1348,8 +1403,43 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let f = FontId::proportional(list_font - 1.0);
                     let size = if e.is_dir { String::new() } else { human_size(folded.map_or(e.size, |f| f.1)) };
                     ui.painter().text(pos2(rect.max.x - size_right, rect.center().y), Align2::RIGHT_CENTER, size, f.clone(), weak);
+                    if show_type {
+                        let g = elided(ui, &type_name(e, path.as_deref()), f.clone(), weak, type_w - 8.0, 1);
+                        ui.painter().galley(pos2(rect.max.x - type_right, rect.center().y - g.size().y / 2.0), g, weak);
+                    }
                     if let (true, Some(t)) = (show_date, e.mtime) {
                         ui.painter().text(pos2(rect.max.x - 145.0 * k, rect.center().y), Align2::LEFT_CENTER, fmt_time(t), f, weak);
+                    }
+                }
+                // The check box: shown on the selected, under the mouse, and
+                // all along while anything is selected; a click takes the item
+                // in or out, the rest stays (and isn't a click on the row).
+                let mut checked = false;
+                if sel || pointer.is_some_and(|p| rect.contains(p)) || !pane.selected.is_empty() {
+                    let cb = if grid {
+                        Rect::from_min_size(rect.min + vec2(6.0, 6.0), Vec2::splat(16.0))
+                    } else {
+                        Rect::from_center_size(pos2(rect.min.x + 6.0 + CHECK_W / 2.0, rect.center().y), Vec2::splat(15.0))
+                    };
+                    // (Drags too: pressing it never picks the row up.)
+                    let cr = ui.interact(cb.expand(3.0), ui.id().with(("check", i)), Sense::click_and_drag());
+                    let v = ui.visuals();
+                    let a = v.selection.bg_fill;
+                    if sel {
+                        ui.painter().rect_filled(cb, 3.0, a);
+                        let s = Stroke::new(2.0, Color32::WHITE);
+                        let (p0, p1, p2) = (cb.left_center() + vec2(3.5, 0.5), cb.center_bottom() + vec2(-1.0, -4.0), cb.right_top() + vec2(-3.5, 4.0));
+                        ui.painter().line_segment([p0, p1], s);
+                        ui.painter().line_segment([p1, p2], s);
+                    } else {
+                        if grid {
+                            ui.painter().rect_filled(cb, 3.0, v.extreme_bg_color.gamma_multiply(0.85));
+                        }
+                        ui.painter().rect_stroke(cb, 3.0, Stroke::new(1.3, if cr.hovered() { a } else { v.weak_text_color() }), StrokeKind::Inside);
+                    }
+                    if cr.clicked() {
+                        events.push(PaneEvent::Toggle(i));
+                        checked = true;
                     }
                 }
                 pane.drawn.push((i, rect, hot));
@@ -1367,7 +1457,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let a = ui.visuals().selection.bg_fill;
                     ui.painter().rect(rect, 6.0, tint(ui.visuals(), 0.35), Stroke::new(2.0, a), StrokeKind::Inside);
                 }
-                if r.double_clicked() {
+                if checked {
+                } else if r.double_clicked() {
                     events.push(PaneEvent::Activate(i));
                 } else if r.clicked() {
                     let m = ui.input(|i| i.modifiers);
@@ -1550,6 +1641,47 @@ fn package_badge(ui: &Ui, icon: Rect, e: &crate::vfs::Entry, path: Option<&std::
         p.line_segment([c + vec2(-rad * 0.38, 0.0), c + vec2(0.0, rad * 0.38)], st);
         p.line_segment([c + vec2(rad * 0.38, 0.0), c + vec2(0.0, rad * 0.38)], st);
     }
+}
+
+/// What kind of file it is, for the list's type column ("PNG image").
+fn type_name(e: &crate::vfs::Entry, path: Option<&std::path::Path>) -> String {
+    if e.is_dir {
+        return tr("Folder").to_string();
+    }
+    let lower = e.name.to_lowercase();
+    // .tar.gz and the like: the whole compound extension.
+    let (_, ext) = crate::ops::split_ext(&e.name);
+    let ext = ext.trim_start_matches('.').to_uppercase();
+    let mime = mime_guess::from_path(&e.name).first_raw().unwrap_or("");
+    let package = path.zip(e.mtime).and_then(|(p, t)| crate::packages::package(p, &e.name, t));
+    let kind = if package.is_some() {
+        tr("Package")
+    } else if lower.ends_with(".exe") || lower.ends_with(".msi") {
+        tr("Windows program")
+    } else if lower.ends_with(".desktop") {
+        tr("Launcher")
+    } else if lower.ends_with(".appimage") {
+        tr("Program")
+    } else if lower.ends_with(".sh") {
+        tr("Script")
+    } else if crate::vfs::is_archive_name(&e.name) {
+        tr("Archive")
+    } else if mime.starts_with("image/") {
+        tr("Image")
+    } else if mime.starts_with("video/") {
+        tr("Video")
+    } else if mime.starts_with("audio/") {
+        tr("Audio")
+    } else if mime == "application/pdf" || [".doc", ".docx", ".odt", ".rtf", ".epub", ".xls", ".xlsx", ".ods", ".ppt", ".pptx", ".odp"].iter().any(|x| lower.ends_with(x)) {
+        tr("Document")
+    } else if mime.starts_with("text/") || mime.contains("json") || mime.contains("xml") || mime.contains("javascript") || mime.contains("toml") {
+        tr("Text")
+    } else if e.executable() {
+        tr("Program")
+    } else {
+        tr("File")
+    };
+    if ext.is_empty() { kind.to_string() } else { format!("{kind} {ext}") }
 }
 
 /// A small padlock on archives that need a password.

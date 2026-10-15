@@ -1,6 +1,11 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Launcher", "启动器"),
+    ("Package", "软件包"),
+    ("Script", "脚本"),
+    ("Windows program", "Windows 程序"),
+    ("Document", "文档"),
     ("Already in Steam", "已在 Steam 中"),
     ("Add (shows after Steam restarts)", "添加（Steam 重启后显示）"),
     ("Add to Steam", "添加到 Steam"),
