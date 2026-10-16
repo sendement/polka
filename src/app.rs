@@ -416,15 +416,43 @@ fn sort_entries(v: &mut [Entry], cfg: &Config) {
     });
 }
 
+/// A tab is a place. In dual mode each side shows a tab of its own
+/// (`App::tab` the active side's, `other_tab` the other's, never the same),
+/// and switching tabs changes only the active side.
 pub struct Tab {
-    pub panes: [Pane; 2],
-    pub active: usize,
+    pub pane: Pane,
+    /// Opened for the right side as dual mode came on: it goes with it.
+    pub for_right: bool,
     /// A file shown in place of the panes.
     pub viewer: Option<Box<Viewer>>,
     /// The disk usage page (kept while hidden).
     pub usage: Option<Box<crate::usage::Usage>>,
     /// The terminal page (its shells keep running while hidden).
     pub term: Option<Box<crate::terminal::Terminal>>,
+}
+
+/// The panes of two different tabs at once.
+impl Tab {
+    pub fn new(pane: Pane) -> Self {
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None }
+    }
+}
+
+/// Where the right side starts: where it was (if remembering, and it's
+/// still there), else where the left one is.
+fn right_start(cfg: &Config, left: &Location) -> Location {
+    cfg.right_dir.clone().filter(|d| cfg.remember_right && d.is_dir()).map(Location::Local).unwrap_or_else(|| left.clone())
+}
+
+pub fn two_panes(tabs: &mut [Tab], a: usize, b: usize) -> (&mut Pane, &mut Pane) {
+    assert_ne!(a, b, "both sides on one tab");
+    if a < b {
+        let (l, r) = tabs.split_at_mut(b);
+        (&mut l[a].pane, &mut r[0].pane)
+    } else {
+        let (l, r) = tabs.split_at_mut(a);
+        (&mut r[0].pane, &mut l[b].pane)
+    }
 }
 
 // ---------------------------------------------------------------- overlays
@@ -977,7 +1005,7 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = 15;
+pub const SETTINGS_ROWS: usize = row::CLOSE + 1;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
@@ -990,10 +1018,12 @@ pub mod row {
     pub const OPEN_IN: usize = 8;
     pub const VOLUMES: usize = 9;
     pub const WEB_IMAGES: usize = 10;
-    pub const PASSWORDS: usize = 11;
-    pub const LAYOUTS: usize = 12;
-    pub const INSTALL: usize = 13;
-    pub const CLOSE: usize = 14;
+    // In the order they're drawn: ↓ goes to the next number.
+    pub const LAYOUTS: usize = 11;
+    pub const INSTALL: usize = 12;
+    pub const PASSWORDS: usize = 13;
+    pub const REMEMBER_RIGHT: usize = 14;
+    pub const CLOSE: usize = 15;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1109,7 +1139,6 @@ pub enum Focus {
 pub struct IconPick {
     pub folder: PathBuf,
     pub tab: usize,
-    pub pane: usize,
     pub back: Location,
 }
 
@@ -1147,7 +1176,12 @@ pub enum Msg {
 pub struct App {
     pub cfg: Config,
     pub tabs: Vec<Tab>,
+    /// The active side's tab.
     pub tab: usize,
+    /// The other side's tab (dual mode).
+    pub other_tab: usize,
+    /// The active side: 0 left, 1 right (dual mode).
+    pub side: usize,
     pub focus: Focus,
     pub side_cursor: usize,
     pub side_items: Vec<SideItem>,
@@ -1240,7 +1274,13 @@ impl App {
                 first.set_cursor(i);
             }
         }
-        let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None, usage: None, term: None };
+        let mut tabs = vec![Tab::new(first)];
+        // Dual mode: the right side's tab, where it was left (if that's
+        // still there), else beside the left one.
+        if cfg.dual {
+            let right = right_start(&cfg, &tabs[0].pane.loc);
+            tabs.push(Tab { for_right: true, ..Tab::new(Pane::new(right, &cfg)) });
+        }
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         apply_accent(&ctx, &cfg);
         crate::fonts::install_with(&ctx, cfg.viewer.font.as_deref());
@@ -1248,8 +1288,10 @@ impl App {
         crate::packages::set_waker(ctx.clone());
         let mut app = Self {
             cfg,
-            tabs: vec![tab],
+            other_tab: tabs.len() - 1,
+            tabs,
             tab: 0,
+            side: 0,
             focus: Focus::Panes,
             side_cursor: 0,
             side_items: Vec::new(),
@@ -1299,20 +1341,50 @@ impl App {
     pub fn cur_tab(&self) -> &Tab {
         &self.tabs[self.tab]
     }
+    /// The active side: the right pane only in dual mode.
+    pub fn side(&self) -> usize {
+        if self.cfg.dual { self.side } else { 0 }
+    }
+
+    /// The tab a side shows.
+    pub fn tab_of(&self, side: usize) -> usize {
+        if side == self.side() { self.tab } else { self.other_tab.min(self.tabs.len() - 1) }
+    }
+
+    /// A side's pane (0 left, 1 right).
+    pub fn pane_at(&self, side: usize) -> &Pane {
+        &self.tabs[self.tab_of(side)].pane
+    }
+
+    pub fn pane_at_mut(&mut self, side: usize) -> &mut Pane {
+        let t = self.tab_of(side);
+        &mut self.tabs[t].pane
+    }
+
+    /// Make a side the active one (dual mode); its tab becomes `tab`.
+    pub fn set_side(&mut self, side: usize) {
+        if self.cfg.dual && side != self.side {
+            std::mem::swap(&mut self.tab, &mut self.other_tab);
+            self.other_tab = self.other_tab.min(self.tabs.len() - 1);
+            self.side = side;
+        }
+    }
+
     pub fn pane(&self) -> &Pane {
-        let t = self.cur_tab();
-        &t.panes[if self.cfg.dual { t.active } else { 0 }]
+        self.pane_at(self.side())
     }
+
     pub fn pane_mut(&mut self) -> &mut Pane {
-        let dual = self.cfg.dual;
-        let t = &mut self.tabs[self.tab];
-        &mut t.panes[if dual { t.active } else { 0 }]
+        let s = self.side();
+        self.pane_at_mut(s)
     }
-    /// (active pane, other pane) of the current tab.
+
+    /// (active pane, other pane), which may be in different tabs.
     fn pane_pair(&mut self) -> (&mut Pane, &mut Pane) {
-        let t = &mut self.tabs[self.tab];
-        let [a, b] = &mut t.panes;
-        if t.active == 0 { (a, b) } else { (b, a) }
+        let s = self.side();
+        let (ta, tb) = (self.tab_of(s), self.tab_of(1 - s));
+        let (a, b) = two_panes(&mut self.tabs, ta, tb);
+        (a, b)
     }
 
     /// Light or dark as chosen (or as the desktop is, which may change).
@@ -1369,13 +1441,15 @@ impl App {
     pub fn tick(&mut self) {
         self.apply_appearance();
         self.apply_zoom();
+        self.remember_right_pane();
         self.tick_audio();
         self.tick_usage();
         self.tick_terminal();
         self.dnd_tick();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
-            for p in &mut t.panes {
+            {
+            let p = &mut t.pane;
                 p.poll(&cfg);
             }
         }
@@ -1398,7 +1472,7 @@ impl App {
                     if tab < self.tabs.len() {
                         self.show_viewer(tab, path, name, origin, Vec::new());
                         // Saving goes back into the archive, if it can be written.
-                        let writable = self.tabs[tab].panes[origin].loc.dest().is_some();
+                        let writable = self.tabs[tab].pane.loc.dest().is_some();
                         if let Some(v) = self.tabs[tab].viewer.as_mut() {
                             v.source = source;
                             if let crate::viewer::Content::Text(t) = &mut v.content {
@@ -1412,7 +1486,7 @@ impl App {
         // Leaving the folder (sidebar, address bar…) closes the viewer.
         for t in &mut self.tabs {
             if let Some(v) = &t.viewer {
-                if v.folder.as_ref().is_some_and(|f| *f != t.panes[v.origin].loc) {
+                if v.folder.as_ref().is_some_and(|f| *f != t.pane.loc) {
                     t.viewer = None;
                 }
             }
@@ -1459,13 +1533,15 @@ impl App {
             self.ask_password(a, wrong, Retry::Op(op));
         }
         // A listing that needs a password (7z with encrypted names).
-        let need: Vec<(PathBuf, bool)> = self.tabs[self.tab].panes.iter_mut().filter_map(|p| p.need_password.take()).collect();
+        // Both panes shown (each side's tab).
+        let need: Vec<(PathBuf, bool)> = [0, 1].into_iter().filter_map(|s| self.pane_at_mut(s).need_password.take()).collect();
         for (a, wrong) in need {
             self.ask_password(a.clone(), wrong, Retry::Reload(a));
         }
         if !touched.is_empty() {
             for t in &mut self.tabs {
-                for p in &mut t.panes {
+                {
+            let p = &mut t.pane;
                     if touched.iter().any(|t| p.loc.affected_by(t)) {
                         p.reload(&cfg);
                     }
@@ -1498,12 +1574,13 @@ impl App {
             Show::Properties(v) => (group(&v), true),
         };
         let cfg = self.cfg.clone();
+        // Into the left pane: the right one stays as it is.
+        self.set_side(0);
         for (dir, names) in groups {
             let loc = Location::Local(dir);
             if self.dbus_fresh {
                 self.dbus_fresh = false;
                 self.tab = 0;
-                self.tabs[0].active = 0;
                 self.pane_mut().navigate(loc, None, &cfg);
             } else if !(self.pane().loc == loc && self.cur_tab().viewer.is_none() && !self.usage_shown() && !self.term_shown()) {
                 self.run(Cmd::OpenInNewTab(loc));
@@ -1716,8 +1793,8 @@ impl App {
                 let last_col = (p.cursor as isize + 1) % cols == 0 || p.cursor + 1 >= p.entries.len();
                 if grid && !last_col {
                     self.move_and_paint(1);
-                } else if cfg.dual && self.cur_tab().active == 0 && self.range.is_none() {
-                    self.tabs[self.tab].active = 1;
+                } else if cfg.dual && self.side() == 0 && self.range.is_none() {
+                    self.set_side(1);
                 }
             }
             Action::PrevTab | Action::NextTab | Action::View if self.range.is_some() => {}
@@ -1750,7 +1827,7 @@ impl App {
             Action::LeftTrigger | Action::RightTrigger => {
                 let right = a == Action::RightTrigger;
                 if cfg.dual {
-                    self.tabs[self.tab].active = right as usize;
+                    self.set_side(right as usize);
                 } else {
                     let rows = self.pane().page_rows.max(1) as isize * cols;
                     self.move_and_paint(if right { rows } else { -rows });
@@ -1763,8 +1840,8 @@ impl App {
     }
 
     fn focus_left(&mut self) {
-        if self.cfg.dual && self.cur_tab().active == 1 {
-            self.tabs[self.tab].active = 0;
+        if self.cfg.dual && self.side() == 1 {
+            self.set_side(0);
         } else {
             self.focus_sidebar();
         }
@@ -1814,9 +1891,76 @@ impl App {
         }
     }
 
+    /// The right side as dual mode comes on: back on its tab if
+    /// remembering and that's still another tab; else on a tab where it was
+    /// (or where the left one is), a new one if no other tab shows that.
+    fn open_right_pane(&mut self) {
+        let cfg = self.cfg.clone();
+        if cfg.remember_right && self.other_tab != self.tab && self.other_tab < self.tabs.len() {
+            return;
+        }
+        let want = right_start(&cfg, &self.tabs[self.tab].pane.loc);
+        self.other_tab = match (0..self.tabs.len()).find(|&i| i != self.tab && self.tabs[i].pane.loc == want) {
+            Some(i) => i,
+            None => {
+                self.tabs.push(Tab { for_right: true, ..Tab::new(Pane::new(want, &cfg)) });
+                self.tabs.len() - 1
+            }
+        };
+    }
+
+    /// After tabs changed: the sides on two different tabs (dual mode
+    /// needs two; with one left it ends).
+    fn keep_sides_apart(&mut self) {
+        let n = self.tabs.len();
+        self.tab = self.tab.min(n - 1);
+        self.other_tab = self.other_tab.min(n - 1);
+        if !self.cfg.dual || self.other_tab != self.tab {
+            return;
+        }
+        if n < 2 {
+            self.cfg.dual = false;
+            self.side = 0;
+            self.cfg.save();
+        } else {
+            self.other_tab = if self.tab + 1 < n { self.tab + 1 } else { self.tab - 1 };
+        }
+    }
+
+    /// Keep where the right pane is, for the next start.
+    fn remember_right_pane(&mut self) {
+        if !self.cfg.dual || !self.cfg.remember_right {
+            return;
+        }
+        let here = self.pane_at(1).loc.local_path().map(|p| p.to_path_buf());
+        if here.is_some() && here != self.cfg.right_dir {
+            self.cfg.right_dir = here;
+            self.cfg.save();
+        }
+    }
+
+    /// The active side to the next tab; the other side's is stepped over.
     fn switch_tab(&mut self, d: isize) {
         let n = self.tabs.len() as isize;
-        self.tab = (self.tab as isize + d).rem_euclid(n) as usize;
+        let mut t = self.tab as isize;
+        loop {
+            t = (t + d).rem_euclid(n);
+            if !self.cfg.dual || t as usize != self.other_tab || n < 3 {
+                break;
+            }
+        }
+        if !(self.cfg.dual && t as usize == self.other_tab) {
+            self.tab = t as usize;
+        }
+    }
+
+    /// A tab picked (clicked): the other side's makes that side active.
+    pub fn pick_tab(&mut self, i: usize) {
+        if self.cfg.dual && i == self.other_tab {
+            self.set_side(1 - self.side());
+        } else {
+            self.tab = i;
+        }
     }
 
     fn handle_sidebar(&mut self, a: Action) {
@@ -2202,7 +2346,8 @@ impl App {
                     Retry::Activate => self.activate(),
                     Retry::Reload(a) => {
                         for t in &mut self.tabs {
-                            for p in &mut t.panes {
+                            {
+            let p = &mut t.pane;
                                 if p.loc.archive() == Some(a.as_path()) {
                                     p.reload(&cfg);
                                 }
@@ -2348,7 +2493,7 @@ impl App {
                 } else {
                     let (archive, tx) = (archive.clone(), self.msg_tx.clone());
                     let wake = self.wake();
-                    let (tab, origin, name) = (self.tab, self.cur_tab().active, e.name.clone());
+                    let (tab, origin, name) = (self.tab, self.side(), e.name.clone());
                     let open_in = crate::viewer::OpenIn::from(&self.cfg);
                     std::thread::spawn(move || {
                         let msg = match vfs::extract_to_temp(&archive, &inner_path) {
@@ -2399,13 +2544,13 @@ impl App {
         } else {
             Vec::new()
         };
-        let (tab, origin) = (self.tab, self.cur_tab().active);
+        let (tab, origin) = (self.tab, self.side());
         self.show_viewer(tab, path, e.name, origin, siblings);
     }
 
     pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
         let mut v = Viewer::open(path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
-        v.folder = Some(self.tabs[tab].panes[origin].loc.clone());
+        v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
         self.range = None;
     }
@@ -2414,7 +2559,7 @@ impl App {
         let t = &mut self.tabs[self.tab];
         if let Some(v) = t.viewer.take() {
             // Back on the file that was shown last.
-            let p = &mut t.panes[v.origin];
+            let p = &mut t.pane;
             if let Some(i) = p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(v.path.as_path())) {
                 p.set_cursor(i);
             }
@@ -2433,9 +2578,7 @@ impl App {
             crate::viewer::Out::Settings => self.run(Cmd::ViewerSettings),
             crate::viewer::Out::Actions => self.open_actions_menu(),
             crate::viewer::Out::Moved(path) => {
-                let t = &mut self.tabs[self.tab];
-                let origin = t.viewer.as_ref().map_or(0, |v| v.origin);
-                let p = &mut t.panes[origin];
+                let p = &mut self.tabs[self.tab].pane;
                 if let Some(i) = p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(path.as_path())) {
                     p.set_cursor(i);
                 }
@@ -2531,8 +2674,8 @@ impl App {
         let single = targets.len() == 1;
         let any = !targets.is_empty();
         let dual = self.cfg.dual;
-        let other_writable = self.cur_tab().panes[1 - self.cur_tab().active].loc.dest().is_some();
-        let other_local = self.cur_tab().panes[1 - self.cur_tab().active].loc.local_path().is_some();
+        let other = self.pane_at(1 - self.side());
+        let (other_writable, other_local) = (other.loc.dest().is_some(), other.loc.local_path().is_some());
         let one_archive = single && !targets[0].is_dir && vfs::is_archive_name(&targets[0].name);
         let one_dir_local = single && targets[0].is_dir && local;
         let pinned = one_dir_local
@@ -2819,7 +2962,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT => self.settings_step(row, 0.0),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -2995,6 +3138,10 @@ impl App {
                 self.cfg.install_on_open = !self.cfg.install_on_open;
                 self.cfg.save();
             }
+            row::REMEMBER_RIGHT => {
+                self.cfg.remember_right = !self.cfg.remember_right;
+                self.cfg.save();
+            }
             row::LAYOUTS => {
                 if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
                     st.layout_chip = (st.layout_chip as isize + d as isize).clamp(0, crate::keyboard::CODES.len() as isize - 1) as usize;
@@ -3006,7 +3153,8 @@ impl App {
                 self.cfg.save();
                 let cfg = self.cfg.clone();
                 for t in &mut self.tabs {
-                    for p in &mut t.panes {
+                    {
+            let p = &mut t.pane;
                         p.refilter_with(None, &cfg);
                     }
                 }
@@ -3025,7 +3173,8 @@ impl App {
         }
         self.cfg.save();
         for t in &mut self.tabs {
-            for p in &mut t.panes {
+            {
+            let p = &mut t.pane;
                 p.scroll_to_cursor = true;
             }
         }
@@ -3107,7 +3256,7 @@ impl App {
         let Some(pick) = self.icon_pick.take() else { return };
         let cfg = self.cfg.clone();
         if let Some(t) = self.tabs.get_mut(pick.tab) {
-            t.panes[pick.pane].navigate(pick.back, None, &cfg);
+            t.pane.navigate(pick.back, None, &cfg);
         }
         if let Some(image) = image {
             self.run(Cmd::SetPinIconFile { folder: pick.folder, image });
@@ -3171,7 +3320,8 @@ impl App {
     pub(crate) fn reload_all(&mut self) {
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
-            for p in &mut t.panes {
+            {
+            let p = &mut t.pane;
                 p.reload(&cfg);
             }
         }
@@ -3469,8 +3619,7 @@ impl App {
                 self.refresh_sidebar();
             }
             Cmd::OpenInNewTab(loc) => {
-                let other = loc.clone();
-                self.tabs.push(Tab { panes: [Pane::new(loc, &cfg), Pane::new(other, &cfg)], active: 0, viewer: None, usage: None, term: None });
+                self.tabs.push(Tab::new(Pane::new(loc, &cfg)));
                 self.tab = self.tabs.len() - 1;
                 self.focus = Focus::Panes;
             }
@@ -3489,6 +3638,11 @@ impl App {
                         self.tab -= 1;
                     }
                     self.tab = self.tab.min(self.tabs.len() - 1);
+                    // The other side's tab shifts the same way.
+                    if i < self.other_tab {
+                        self.other_tab -= 1;
+                    }
+                    self.keep_sides_apart();
                     self.range = None;
                 }
             }
@@ -3498,7 +3652,27 @@ impl App {
                 }
             }
             Cmd::ToggleDual => {
-                self.cfg.dual = !self.cfg.dual;
+                if self.cfg.dual {
+                    // The left side's tab stays; one opened for the right
+                    // side goes with it (unless something's open in it).
+                    self.set_side(0);
+                    self.remember_right_pane();
+                    let r = self.other_tab;
+                    let t = &self.tabs[r];
+                    let spare = t.for_right && t.viewer.is_none() && t.usage.is_none() && t.term.is_none();
+                    self.cfg.dual = false;
+                    if spare && r != self.tab && self.tabs.len() > 1 {
+                        self.tabs.remove(r);
+                        if r < self.tab {
+                            self.tab -= 1;
+                        }
+                        self.other_tab = self.tab;
+                    }
+                } else {
+                    self.cfg.dual = true;
+                    self.side = 0;
+                    self.open_right_pane();
+                }
                 self.cfg.save();
             }
             Cmd::ToggleHidden => {
@@ -3536,10 +3710,9 @@ impl App {
             }
             Cmd::PickIconFile(folder) => {
                 // Browse in the current pane; it comes back here afterwards.
-                let pane = if self.cfg.dual { self.tabs[self.tab].active } else { 0 };
                 let back = self.pane().loc.clone();
                 let start = dirs::picture_dir().filter(|d| d.is_dir()).or_else(dirs::home_dir).unwrap_or_else(|| "/".into());
-                self.icon_pick = Some(IconPick { folder, tab: self.tab, pane, back });
+                self.icon_pick = Some(IconPick { folder, tab: self.tab, back });
                 self.overlay = None;
                 self.focus = Focus::Panes;
                 self.pane_mut().navigate(Location::Local(start), None, &cfg);
@@ -3591,7 +3764,8 @@ impl App {
                 self.cfg.view = v;
                 self.cfg.save();
                 for t in &mut self.tabs {
-                    for p in &mut t.panes {
+                    {
+            let p = &mut t.pane;
                         p.scroll_to_cursor = true;
                     }
                 }

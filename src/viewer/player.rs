@@ -215,7 +215,7 @@ impl App {
         };
         v.name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         v.path = path.clone();
-        let p = &mut t.panes[v.origin];
+        let p = &mut t.pane;
         if let Some(i) = p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(path.as_path())) {
             p.set_cursor(i);
         }

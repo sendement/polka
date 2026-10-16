@@ -98,7 +98,7 @@ impl eframe::App for App {
         if self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        if !self.jobs.is_empty() || self.toast.is_some() || self.tabs.iter().any(|t| t.panes.iter().any(|p| p.loading.is_some())) {
+        if !self.jobs.is_empty() || self.toast.is_some() || self.tabs.iter().any(|t| t.pane.loading.is_some()) {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -285,8 +285,7 @@ impl App {
             }
             Key::Tab => {
                 if self.cfg.dual && self.overlay.is_none() {
-                    let t = &mut self.tabs[self.tab];
-                    t.active = 1 - t.active;
+                    self.set_side(1 - self.side());
                     self.focus = Focus::Panes;
                 }
                 return;
@@ -320,7 +319,7 @@ impl App {
         let cfg = self.cfg.clone();
         let mut act: Option<TopAction> = None;
         let dual = cfg.dual;
-        let active = self.tabs[self.tab].active;
+        let active = self.side();
         let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
         egui::Panel::top("top").frame(frame).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
@@ -382,7 +381,7 @@ impl App {
                 vec![(0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             };
             for (idx, rect) in fields {
-                let pane = &self.tabs[self.tab].panes[idx];
+                let pane = self.pane_at(idx);
                 let highlight = dual && idx == active && viewing.is_none();
                 let file = viewing.as_ref().map(|(_, n)| n.as_str());
                 if let Some(a) = address_field(ui, rect, pane, highlight, idx, file) {
@@ -417,15 +416,15 @@ impl App {
             }
             TopAction::Focus(i) => {
                 self.focus = Focus::Panes;
-                self.tabs[self.tab].active = i;
+                self.set_side(i);
             }
             TopAction::Go(i, loc) => {
                 self.focus = Focus::Panes;
-                self.tabs[self.tab].active = i;
+                self.set_side(i);
                 self.pane_mut().navigate(loc, None, &cfg);
             }
             TopAction::ClearFilter(i) => {
-                self.tabs[self.tab].active = i;
+                self.set_side(i);
                 self.pane_mut().set_filter(None);
             }
         }
@@ -451,7 +450,7 @@ impl App {
             .tabs
             .iter()
             .map(|t| {
-                let p = &t.panes[if dual { t.active } else { 0 }];
+                let p = &t.pane;
                 let usage = t.usage.as_ref().is_some_and(|u| u.shown);
                 let term = t.term.as_ref().is_some_and(|u| u.shown);
                 let title = t.viewer.as_ref().map_or_else(
@@ -462,7 +461,10 @@ impl App {
             })
             .collect();
         let close_w = if many { 20.0 } else { 0.0 };
-        let widths: Vec<f32> = titles.iter().map(|g| (g.size().x + 28.0 + close_w).max(96.0)).collect();
+        // Dual mode: the tab each side shows wears its L or R.
+        let side_of = |i: usize| if !dual { None } else if i == self.tab_of(0) { Some(0) } else if i == self.tab_of(1) { Some(1) } else { None };
+        const BADGE: f32 = 18.0;
+        let widths: Vec<f32> = titles.iter().enumerate().map(|(i, g)| (g.size().x + 28.0 + close_w + if side_of(i).is_some() { BADGE + 6.0 } else { 0.0 }).max(96.0)).collect();
         let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + 2) as f32;
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
@@ -486,7 +488,16 @@ impl App {
                 (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
             };
             painter.rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
-            painter.galley(pos2(rect.min.x + 14.0, rect.center().y - title.size().y / 2.0), title, v.text_color());
+            let mut tx = rect.min.x + 14.0;
+            if let Some(sd) = side_of(i) {
+                let b = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BADGE / 2.0), Vec2::splat(BADGE));
+                let mine = sd == self.side();
+                painter.rect_filled(b, 4.0, if mine { accent } else { accent.gamma_multiply(0.35) });
+                let fg = if mine { v.strong_text_color() } else { v.text_color() };
+                painter.text(b.center(), Align2::CENTER_CENTER, if sd == 0 { "L" } else { "R" }, FontId::proportional(12.0), fg);
+                tx = b.max.x + 6.0;
+            }
+            painter.galley(pos2(tx, rect.center().y - title.size().y / 2.0), title, v.text_color());
             if many {
                 let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
                 let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
@@ -850,7 +861,9 @@ impl App {
         let dual = self.cfg.dual;
         let tab = self.tab;
         let focused = self.focus == Focus::Panes && self.overlay.is_none();
-        let active = self.tabs[tab].active;
+        let active = self.side();
+        // Each side shows its own tab.
+        let tab_of = [self.tab_of(0), self.tab_of(1)];
         let mut events: Vec<(usize, PaneEvent)> = Vec::new();
         let mut divider = None;
         let mut tab_act = None;
@@ -893,9 +906,9 @@ impl App {
             }
             let dragging = self.drag.is_some();
             let App { tabs, icons, cfg, drag, .. } = self;
-            let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab, pane)).map(|d| &d.names);
-            let [a, b] = &mut tabs[tab].panes;
+            let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
             if dual {
+                let (a, b) = crate::app::two_panes(tabs, tab_of[0], tab_of[1]);
                 let full = ui.available_rect_before_wrap();
                 let gap = 6.0;
                 let w = (full.width() - gap) / 2.0;
@@ -912,12 +925,12 @@ impl App {
                     };
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab, idx), dragging, lifted(idx)) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx)) {
                         events.push((idx, e));
                     }
                 }
             } else {
-                for e in draw_pane(ui, a, icons, cfg, focused, (tab, 0), dragging, lifted(0)) {
+                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0)) {
                     events.push((0, e));
                 }
             }
@@ -950,7 +963,7 @@ impl App {
         }
         for (idx, e) in events {
             self.focus = Focus::Panes;
-            self.tabs[tab].active = idx;
+            self.set_side(idx);
             match e {
                 PaneEvent::Toggle(i) => {
                     let p = self.pane_mut();
@@ -1019,7 +1032,7 @@ impl App {
             }
         }
         match tab_act {
-            Some(TabAct::Switch(i)) => self.tab = i,
+            Some(TabAct::Switch(i)) => self.pick_tab(i),
             Some(TabAct::Close(i)) => self.run(Cmd::CloseTabAt(i)),
             Some(TabAct::New) => self.run(Cmd::NewTab),
             None => {}
@@ -2751,6 +2764,18 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::PASSWORDS));
+    }
+
+    // Dual mode: the right pane where it was.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::REMEMBER_RIGHT, "remember-right");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Right pane opens where it was"), label_font.clone(), v.text_color());
+    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+    if cfg.remember_right {
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+    }
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
     }
 
     // Close.

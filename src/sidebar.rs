@@ -138,7 +138,8 @@ impl App {
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
-            for p in &mut t.panes {
+            {
+            let p = &mut t.pane;
                 if p.loc.local_path().is_some_and(|l| gone.iter().any(|g| l.starts_with(g))) {
                     p.navigate(Location::Local(home.clone()), None, &cfg);
                 }

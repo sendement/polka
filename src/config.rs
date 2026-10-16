@@ -77,6 +77,10 @@ pub struct Config {
     pub osk_layouts: Vec<String>,
     /// ✕ on a package installs it (else archives open as folders).
     pub install_on_open: bool,
+    /// The right pane opens where it was (else beside the left one).
+    pub remember_right: bool,
+    /// Where the right pane was last.
+    pub right_dir: Option<std::path::PathBuf>,
 }
 
 /// The terminal page.
@@ -209,6 +213,8 @@ impl Default for Config {
             password_hidden: false,
             osk_layouts: Vec::new(),
             install_on_open: true,
+            remember_right: true,
+            right_dir: None,
         }
     }
 }

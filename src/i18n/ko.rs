@@ -1,6 +1,7 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Right pane opens where it was", "오른쪽 창을 이전 위치에서 열기"),
     ("The clipboard is empty", "클립보드가 비어 있습니다"),
     ("Launcher", "실행기"),
     ("Package", "패키지"),

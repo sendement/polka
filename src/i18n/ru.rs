@@ -1,6 +1,7 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Right pane opens where it was", "Правая панель открывается там, где была"),
     ("The clipboard is empty", "Буфер обмена пуст"),
     ("Launcher", "Ярлык"),
     ("Package", "Пакет"),

@@ -31,6 +31,12 @@ fn harness_with(dir: PathBuf, size: [f32; 2], tag: &str) -> Harness<'static, App
         let _ = std::fs::create_dir_all(cfg.join("data/Trash/info"));
     }
     kde_test_theme(&cfg.join("data"));
+    // Each test starts from the defaults: what another one saved (dual
+    // mode, say) isn't its business. A tagged config is kept, for a test
+    // that starts again on purpose.
+    if tag.is_empty() {
+        let _ = std::fs::remove_file(cfg.join("polka/config.toml"));
+    }
     Harness::builder()
         .with_size(size)
         .wgpu()
@@ -328,11 +334,13 @@ fn settings(h: &mut Harness<'static, App>) {
     assert!(h.state().overlay.is_none());
     shot(h, "19-big-list-icons");
 
+    // (Dual mode is still on here: the right side has a tab of its own.)
+    let before = h.state().tabs.len();
     h.state_mut().run(Cmd::NewTab);
     h.state_mut().run(Cmd::NewTab);
     settle(h);
     shot(h, "20-tabs");
-    assert_eq!(h.state().tabs.len(), 3);
+    assert_eq!(h.state().tabs.len(), before + 2);
 
     pin_icons(h);
 }
@@ -408,6 +416,10 @@ fn pin_icons(h: &mut Harness<'static, App>) {
 
 fn closing_tabs(h: &mut Harness<'static, App>) {
     use crate::app::Cmd;
+    // Single pane: down to one tab dual mode couldn't stay anyway.
+    if h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
     while h.state().tabs.len() < 3 {
         h.state_mut().run(Cmd::NewTab);
     }
@@ -2014,19 +2026,17 @@ fn mouse(h: &mut Harness<'static, App>) {
     settle(h);
     {
         let cfg = h.state().cfg.clone();
-        let t = h.state_mut().tab;
-        h.state_mut().tabs[t].panes[1].navigate(Location::Local(dir.join("B")), None, &cfg);
-        h.state_mut().tabs[t].active = 0;
+        h.state_mut().pane_at_mut(1).navigate(Location::Local(dir.join("B")), None, &cfg);
+        h.state_mut().set_side(0);
     }
     settle(h);
     // A click in the left pane reaches it (the right pane's background
     // once covered it).
     let (r3, _) = rect_of(h, "f3.txt");
-    let t = h.state().tab;
-    h.state_mut().tabs[t].active = 1;
+    h.state_mut().set_side(1);
     press_at(h, r3.center(), true, Modifiers::NONE);
     press_at(h, r3.center(), false, Modifiers::NONE);
-    assert_eq!(h.state().cur_tab().active, 0);
+    assert_eq!(h.state().side(), 0);
     assert_eq!(h.state().pane().current().map(|e| e.name.as_str()), Some("f3.txt"));
     let (_, hot6) = rect_of(h, "f6.txt");
     // The right half of the window, below the tabs.
@@ -2066,7 +2076,7 @@ fn mouse(h: &mut Harness<'static, App>) {
     let (ra, _) = rect_of(h, "A");
     click(h, ra.center(), PointerButton::Middle, Modifiers::NONE);
     assert_eq!((h.state().tabs.len(), h.state().tab), (tabs + 1, here));
-    assert_eq!(h.state().tabs[tabs].panes[0].loc, Location::Local(dir.join("A")));
+    assert_eq!(h.state().tabs[tabs].pane.loc, Location::Local(dir.join("A")));
     // A double click: kittest runs a frame per queued event and its clock
     // jumps between frames, so the four go into one frame directly (well
     // after the middle click, or egui counts a triple click).
@@ -4130,4 +4140,109 @@ fn game_scale_screens() {
     h.state_mut().game_mode = false;
     settle(&mut h);
     assert!((h.state().ctx.pixels_per_point() - 2.25).abs() < 0.01);
+}
+
+/// Dual mode: each side on a tab of its own (marked L and R), switching
+/// tabs moves only the active side and steps over the other's; "Show in
+/// folder" opens on the left; the right side comes back where it was
+/// (across starts too), or beside the left one if that's gone or not
+/// remembered.
+#[test]
+#[ignore]
+fn dual_tabs_screens() {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    // Its own config (XDG_CONFIG_HOME is the whole process's).
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("dualtabs");
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B", "C"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+        std::fs::write(dir.join(d).join(format!("{d}.txt")), d).unwrap();
+    }
+    let (a, b, c) = (Location::Local(dir.join("A")), Location::Local(dir.join("B")), Location::Local(dir.join("C")));
+    let mut h = harness_with(dir.join("A"), [1100.0, 680.0], "-dual");
+    settle(&mut h);
+    h.state_mut().cfg.dual = false;
+    h.state_mut().cfg.remember_right = true;
+    h.state_mut().cfg.right_dir = None;
+    // On: the right side gets a tab beside the left one.
+    h.state_mut().run(Cmd::ToggleDual);
+    assert_eq!(h.state().tabs.len(), 2);
+    assert_ne!(h.state().tab_of(0), h.state().tab_of(1));
+    assert_eq!(h.state().pane_at(1).loc, a);
+    let cfg = h.state().cfg.clone();
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(b.clone(), None, &cfg);
+    h.state_mut().set_side(0);
+    // A new tab on the left; tabs back and forth leave the right alone and
+    // step over its tab.
+    h.state_mut().run(Cmd::OpenInNewTab(c.clone()));
+    assert_eq!((h.state().tabs.len(), h.state().tab_of(0), h.state().tab_of(1)), (3, 2, 1));
+    press(&mut h, &[Action::PrevTab]);
+    assert_eq!(h.state().tab_of(0), 0, "the right side's tab wasn't stepped over");
+    assert_eq!(h.state().pane_at(0).loc, a);
+    assert_eq!(h.state().pane_at(1).loc, b);
+    settle(&mut h);
+    shot(&mut h, "dt0-left-and-right");
+    // On the right: its tabs change, the left stays.
+    h.state_mut().set_side(1);
+    press(&mut h, &[Action::NextTab]);
+    assert_eq!((h.state().tab_of(0), h.state().tab_of(1)), (0, 2));
+    assert_eq!(h.state().pane_at(1).loc, c);
+    assert_eq!(h.state().pane_at(0).loc, a);
+    // The other side's tab clicked: that side becomes the active one.
+    h.state_mut().pick_tab(0);
+    assert_eq!(h.state().side(), 0);
+    assert_eq!((h.state().tab_of(0), h.state().tab_of(1)), (0, 2));
+    // "Show in folder", the right side active: a new tab on the left.
+    h.state_mut().set_side(1);
+    h.state_mut().show_from_dbus(crate::fm1::Show::Items(vec![dir.join("B/B.txt")]), "");
+    assert_eq!(h.state().side(), 0);
+    assert_eq!(h.state().pane_at(0).loc, b);
+    assert_eq!(h.state().pane_at(1).loc, c, "the right pane moved");
+    settle(&mut h);
+    shot(&mut h, "dt1-shown-on-the-left");
+    // Back to two tabs: the right side on its own one, at B.
+    while h.state().tabs.len() > 1 {
+        let n = h.state().tabs.len();
+        h.state_mut().run(Cmd::CloseTabAt(n - 1));
+    }
+    assert!(!h.state().cfg.dual, "dual mode with one tab");
+    h.state_mut().run(Cmd::ToggleDual);
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(b.clone(), None, &cfg);
+    h.state_mut().set_side(0);
+    settle(&mut h);
+    assert_eq!(h.state().cfg.right_dir.as_deref(), Some(dir.join("B").as_path()));
+    // Off: the tab opened for the right side goes; on: it's back at B.
+    h.state_mut().run(Cmd::ToggleDual);
+    assert_eq!(h.state().tabs.len(), 1);
+    h.state_mut().run(Cmd::ToggleDual);
+    assert_eq!(h.state().pane_at(1).loc, b);
+    // Next start: the same.
+    h.state_mut().cfg.save();
+    drop(h);
+    let mut h = harness_with(dir.join("A"), [1100.0, 680.0], "-dual");
+    settle(&mut h);
+    assert!(h.state().cfg.dual);
+    assert_eq!((h.state().pane_at(0).loc.clone(), h.state().pane_at(1).loc.clone()), (a.clone(), b.clone()));
+    // Gone: beside the left one.
+    h.state_mut().run(Cmd::ToggleDual);
+    std::fs::remove_dir_all(dir.join("B")).unwrap();
+    h.state_mut().run(Cmd::ToggleDual);
+    assert_eq!(h.state().pane_at(1).loc, a);
+    // Not remembered: beside the left one too.
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(c.clone(), None, &cfg);
+    h.state_mut().set_side(0);
+    h.state_mut().cfg.remember_right = false;
+    h.state_mut().run(Cmd::ToggleDual);
+    h.state_mut().run(Cmd::ToggleDual);
+    assert_eq!(h.state().pane_at(1).loc, a);
+    // Leave the config as tests expect it.
+    h.state_mut().cfg.remember_right = true;
+    h.state_mut().cfg.dual = false;
+    h.state_mut().cfg.right_dir = None;
+    h.state_mut().cfg.save();
 }

@@ -76,10 +76,10 @@ pub fn drop_target(e: &crate::vfs::Entry, local: bool) -> bool {
 
 impl App {
     pub fn drag_start(&mut self, pane: usize, i: usize) {
-        let tab = self.tab;
-        self.tabs[tab].active = pane;
+        self.set_side(pane);
+        let tab = self.tab_of(pane);
         self.focus = Focus::Panes;
-        let p = &mut self.tabs[tab].panes[pane];
+        let p = &mut self.tabs[tab].pane;
         let Some(name) = p.entries.get(i).map(|e| e.name.clone()) else { return };
         // Dragging something unselected drags just that.
         if !p.selected.contains(&name) {
@@ -102,7 +102,7 @@ impl App {
 
     /// Dropped on a pane: onto one of its entries, or anywhere else in it.
     pub fn drop_on_pane(&mut self, pane: usize, entry: Option<usize>) {
-        let p = &self.tabs[self.tab].panes[pane];
+        let p = self.pane_at(pane);
         let local = p.loc.local_path().is_some();
         let target = entry.and_then(|i| p.entries.get(i)).filter(|e| drop_target(e, local));
         // A program, script or launcher takes the files as they are; the
@@ -113,7 +113,7 @@ impl App {
             Some(e) if app.is_none() => (p.entry_path(e).and_then(|a| Location::Archive { archive: a, inner: String::new() }.dest()), e.name.clone()),
             _ => (p.loc.dest(), p.loc.title()),
         };
-        self.tabs[self.tab].active = pane;
+        self.set_side(pane);
         match (dest, app) {
             (None, None) => {
                 self.drag = None;
@@ -202,7 +202,8 @@ impl App {
     /// Dropped: the selection is done with, and the cursor stays hidden
     /// instead of jumping to the top of the list in the items' place.
     pub(crate) fn drop_done(&mut self) {
-        for p in &mut self.tabs[self.tab].panes {
+        for side in [0, 1] {
+            let p = self.pane_at_mut(side);
             p.selected.clear();
             p.cursor_hidden = true;
         }
@@ -280,7 +281,7 @@ impl App {
             return;
         }
         self.drag = Some(Drag::external(files));
-        let pane = self.tabs[self.tab].active;
+        let pane = self.side();
         self.drop_on_pane(pane, None);
     }
 

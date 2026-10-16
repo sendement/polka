@@ -18,7 +18,8 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 <sub>Screenshots are rendered offscreen by a test (`demo_shots` in `src/view_tests.rs`) from a made-up home folder.</sub>
 
 - Classic layout: collapsible sidebar (places, pinned folders, drives), path bar, tabs
-- List and grid views, dual-pane mode
+- List and grid views, dual-pane mode: each side shows a tab of its own (marked L and R), and
+  switching tabs moves only the active side; the right pane opens where it was (a setting)
 - Archives work like folders (libarchive): browse zip, 7z, rar, tar.*, iso…; copy, move, rename,
   delete and create folders inside zip, 7z and tar.* (rar/iso are read-only)
 - Built-in archiver: zip, tar.zst, tar.gz, tar.xz; smart extract
