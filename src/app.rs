@@ -1968,6 +1968,7 @@ impl App {
                 crate::keyboard::set_last_layout(k.layout);
                 k.prev = None;
             }
+            OskKey::Paste => self.osk_paste(None),
             // Into the terminal as it's pressed.
             _ if k.live() => {
                 let mods = Mods { ctrl: k.ctrl, alt: k.alt, shift: false };
@@ -2036,6 +2037,25 @@ impl App {
                 k.prev = None;
             }
         }
+    }
+
+    /// Text from the clipboard (or `text`, pasted on a real keyboard) into
+    /// what's being typed: into the terminal as a paste, else at the caret,
+    /// on one line (but a password's as it is, less a final newline).
+    pub fn osk_paste(&mut self, text: Option<String>) {
+        let Some(text) = text.or_else(|| self.clipboard_text()).filter(|t| !t.is_empty()) else {
+            self.toast(tr("The clipboard is empty"), false);
+            return;
+        };
+        let Some(Overlay::Osk(k)) = self.overlay.as_mut() else { return };
+        k.prev = None;
+        if k.live() {
+            self.with_session(|s| s.paste(&text));
+            return;
+        }
+        let text = text.trim_end_matches(['\r', '\n']);
+        let line = if k.secret { text.to_string() } else { text.split(['\r', '\n', '\t']).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") };
+        k.insert(&line);
     }
 
     pub fn osk_cancel(&mut self) {

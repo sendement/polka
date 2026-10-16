@@ -4024,3 +4024,64 @@ fn kde_icon_screens() {
         shot(&mut h, "kde-real-theme");
     }
 }
+
+
+/// Pasting into what's typed on the pad's keyboard: its own key, one line
+/// in a field; into a terminal window as it's typed. Typing into a small
+/// screen's terminal window leaves the terminal most of the lines.
+#[test]
+#[ignore]
+fn osk_paste_screens() {
+    use crate::app::{Cmd, Overlay, OskKey};
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness_with(dir.clone(), [960.0, 600.0], "");
+    settle(&mut h);
+    h.state_mut().sys_clip = None;
+    // A field: lines joined, at the caret.
+    h.state_mut().text_clip = Some("two\nlines\n".into());
+    h.state_mut().run(Cmd::NewFolder);
+    settle(&mut h);
+    h.state_mut().osk_key(OskKey::Char('a'));
+    h.state_mut().osk_key(OskKey::Paste);
+    let text = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Osk(k)) => k.string(),
+        _ => panic!("no keyboard"),
+    };
+    assert_eq!(text(&h), "atwo lines");
+    shot(&mut h, "kp0-pasted");
+    // Nothing to paste: said so, nothing typed.
+    h.state_mut().text_clip = None;
+    h.state_mut().osk_key(OskKey::Paste);
+    assert_eq!(text(&h), "atwo lines");
+    assert!(h.state().toast.is_some());
+    press(&mut h, &[Action::Back]);
+    // A command's window, typed into live: the paste goes in as typed.
+    let cfg = h.state().cfg.clone();
+    let t = crate::terminal::Terminal::with_command(&cfg.terminal, &dir, &h.state().ctx, "seq 1 60; printf 'Name? '; read a; echo \"got:$a\"; read b", "x").unwrap();
+    h.state_mut().term_window = Some(Box::new(t));
+    for _ in 0..150 {
+        settle(&mut h);
+        if window_screen(&h).contains("Name?") {
+            break;
+        }
+    }
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if k.live()));
+    // Most of the screen stays the terminal's.
+    let rows = window_screen(&h).lines().count();
+    assert!(rows >= 12, "only {rows} lines while typing");
+    h.state_mut().text_clip = Some("polka".into());
+    h.state_mut().osk_key(OskKey::Paste);
+    h.state_mut().osk_key(OskKey::Enter);
+    for _ in 0..100 {
+        settle(&mut h);
+        if window_screen(&h).contains("got:polka") {
+            break;
+        }
+    }
+    assert!(window_screen(&h).contains("got:polka"), "{}", window_screen(&h));
+    shot(&mut h, "kp1-window-typing");
+    h.state_mut().overlay = None;
+    h.state_mut().term_window = None;
+}

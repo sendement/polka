@@ -144,6 +144,8 @@ impl App {
                         k.insert(&t);
                     }
                 }
+                // Ctrl+V on a real keyboard.
+                egui::Event::Paste(t) if osk => self.osk_paste(Some(t)),
                 egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
                     if osk {
                         self.osk_keyboard(key);
@@ -166,7 +168,9 @@ impl App {
         let typing = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live());
         let bottom = if typing { self.osk_top.unwrap_or(screen.max.y) - 8.0 } else { screen.max.y - 40.0 };
         let w = (screen.width() * 0.86).min(1200.0);
-        let rect = Rect::from_min_max(pos2(screen.center().x - w / 2.0, screen.min.y + 30.0), pos2(screen.center().x + w / 2.0, bottom.max(screen.min.y + 220.0)));
+        // Typing: up to the top, every line counts.
+        let top = screen.min.y + if typing { 6.0 } else { 30.0 };
+        let rect = Rect::from_min_max(pos2(screen.center().x - w / 2.0, top), pos2(screen.center().x + w / 2.0, bottom.max(top + 140.0)));
         let dark = ctx.global_style().visuals.dark_mode;
         let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, dark);
         let size = self.cfg.terminal.font_size;
@@ -178,10 +182,13 @@ impl App {
             egui::Frame::popup(ui.style()).inner_margin(12.0).corner_radius(10.0).show(ui, |ui| {
                 ui.set_min_size(rect.size() - vec2(24.0, 24.0));
                 ui.set_max_size(rect.size() - vec2(24.0, 24.0));
-                ui.label(egui::RichText::new(&title).strong().size(16.0));
-                ui.add_space(4.0);
+                // Typing on the pad's keyboard: the lines matter more.
+                if !typing {
+                    ui.label(egui::RichText::new(&title).strong().size(16.0));
+                    ui.add_space(4.0);
+                }
                 if let Some(t) = self.term_window.as_deref_mut() {
-                    act = crate::terminal::draw::draw(ui, t, &scheme, size, &mut self.icons, !typing);
+                    act = crate::terminal::draw::draw(ui, t, &scheme, size, &mut self.icons, !typing, !typing);
                 }
             });
         });
@@ -877,9 +884,9 @@ impl App {
                 if let Some(y) = above {
                     let r = ui.available_rect_before_wrap();
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(r.min, pos2(r.max.x, (y - 8.0).max(r.min.y + 120.0)))));
-                    term_act = crate::terminal::draw::draw(&mut child, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused || typing);
+                    term_act = crate::terminal::draw::draw(&mut child, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused || typing, !typing);
                 } else {
-                    term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused);
+                    term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused, true);
                 }
                 return;
             }
@@ -1084,7 +1091,8 @@ impl App {
         let dark = ctx.global_style().visuals.dark_mode;
         let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
         let (anchor, offset) = if bottom {
-            (Align2::CENTER_BOTTOM, vec2(0.0, -56.0))
+            // Just above the hints bar.
+            (Align2::CENTER_BOTTOM, vec2(0.0, -36.0))
         } else if side {
             (Align2::RIGHT_TOP, vec2(-16.0, 110.0))
         } else {
@@ -1103,9 +1111,9 @@ impl App {
             .order(Order::Foreground)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(14.0).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
+                egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
-                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden),
+                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live())),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
@@ -1886,20 +1894,39 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
     click
 }
 
-fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool) -> Option<OskKey> {
+/// How much of the keys' full size fits `screen`: typing into a terminal
+/// leaves it most of the height (the keys take at most 40%), other typing
+/// 60%; never wider than the screen.
+pub(crate) fn osk_scale(screen: Rect, live: bool) -> f32 {
+    let keys_h = keyboard_keys_height(1.0);
+    let chrome = if live { 40.0 + 16.0 } else { 40.0 + 46.0 + 30.0 + 56.0 };
+    let by_h = (screen.height() * if live { 0.4 } else { 0.6 } - chrome + 40.0) / keys_h;
+    let by_w = (screen.width() - 60.0) / (15.0 * 46.0);
+    by_h.min(by_w).clamp(0.55, 1.0)
+}
+
+fn keyboard_keys_height(s: f32) -> f32 {
+    crate::keyboard::ROWS as f32 * (40.0 + 4.0) * s - 4.0 * s
+}
+
+fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32) -> Option<OskKey> {
     use crate::keyboard::{self, Slot};
     let mut pressed = None;
-    let unit = 46.0;
-    let gap = 4.0;
+    let unit = 46.0 * scale;
+    let gap = (4.0 * scale).max(2.0);
+    let key_h = 40.0 * scale;
     let width = 15.0 * unit;
     ui.set_width(width);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&k.title).strong().size(16.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(keyboard::LAYOUTS[k.layout].name).strong().color(ui.visuals().selection.bg_fill));
+    // Typing into a terminal: no title, the terminal shows where it goes.
+    if !k.live() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&k.title).strong().size(16.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(keyboard::LAYOUTS[k.layout].name).strong().color(ui.visuals().selection.bg_fill));
+            });
         });
-    });
-    ui.add_space(6.0);
+        ui.add_space(6.0);
+    }
 
     // Text field with caret (none when typing straight into the terminal).
     if !k.live() {
@@ -1931,12 +1958,12 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool) -> Option<OskKey> {
         ui.add_space(10.0);
     }
 
-    let (area, _) = ui.allocate_exact_size(vec2(width, keyboard::ROWS as f32 * (40.0 + gap) - gap), Sense::hover());
+    let (area, _) = ui.allocate_exact_size(vec2(width, keyboard::ROWS as f32 * (key_h + gap) - gap), Sense::hover());
     for r in 0..keyboard::ROWS {
         let mut x = area.min.x;
-        let y = area.min.y + r as f32 * (40.0 + gap);
+        let y = area.min.y + r as f32 * (key_h + gap);
         for (col, (slot, w)) in keyboard::row(r).into_iter().enumerate() {
-            let rect = Rect::from_min_size(pos2(x + gap / 2.0, y), vec2(w * unit - gap, 40.0));
+            let rect = Rect::from_min_size(pos2(x + gap / 2.0, y), vec2(w * unit - gap, key_h));
             x += w * unit;
             let key = k.key_at(r, col);
             let resp = ui.interact(rect, ui.id().with(("osk", r, col)), Sense::click());
@@ -1985,14 +2012,15 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool) -> Option<OskKey> {
                 OskKey::Up => "↑".into(),
                 OskKey::Down => "↓".into(),
                 OskKey::Right => "→".into(),
+                OskKey::Paste => tr("Paste").into(),
                 OskKey::Ok => tr("OK").into(),
             };
-            let size = if special { 14.0 } else { 18.0 };
+            let size = if special { (14.0 * scale).max(10.0) } else { (18.0 * scale).max(12.0) };
             ui.painter().text(rect.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, label, FontId::proportional(size), color);
             // The other symbol on the key, small in its corner.
             if let Slot::Ch(i) = slot {
                 if let Some(alt) = keyboard::alt_at(k.layout, r, i, k.shift) {
-                    ui.painter().text(rect.min + vec2(5.0, 3.0), Align2::LEFT_TOP, alt.to_string(), FontId::proportional(11.0), v.weak_text_color());
+                    ui.painter().text(rect.min + vec2(5.0, 3.0) * scale, Align2::LEFT_TOP, alt.to_string(), FontId::proportional((11.0 * scale).max(8.0)), v.weak_text_color());
                 }
             }
             if resp.clicked() {

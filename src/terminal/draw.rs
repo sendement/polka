@@ -38,71 +38,75 @@ pub fn font(size: f32) -> FontId {
 
 const STRIP_H: f32 = 38.0;
 
-pub fn draw(ui: &mut Ui, t: &mut Terminal, scheme: &Scheme, size: f32, icons: &mut Icons, focused: bool) -> Option<Act> {
+/// `strip`: the tab strip and its tools (left out while the pad's keyboard
+/// types into a small window, for more lines).
+pub fn draw(ui: &mut Ui, t: &mut Terminal, scheme: &Scheme, size: f32, icons: &mut Icons, focused: bool, strip_shown: bool) -> Option<Act> {
     let mut act = None;
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, Sense::hover());
     let vis = ui.visuals().clone();
 
-    // ---- tab strip
-    let strip = Rect::from_min_size(full.min, vec2(full.width(), STRIP_H));
-    let mut x = strip.min.x;
-    let btn = |x: f32| Rect::from_min_size(pos2(x, strip.min.y + 3.0), Vec2::splat(STRIP_H - 6.0));
-    // Right side: settings, saved, history, keys.
-    let mut rx = strip.max.x - (STRIP_H - 6.0);
-    let tools: [(&[&str], &str, &str, fn() -> Act); 4] = [
-        (&["preferences-system", "configure", "settings", "emblem-system"], "⚙", tr("Terminal settings"), || Act::Settings),
-        (&["bookmarks", "bookmark-new", "starred"], "★", tr("Saved commands"), || Act::Saved),
-        (&["document-open-recent", "history", "appointment-soon"], "⟲", tr("Command history"), || Act::History),
-        (&["input-keyboard", "keyboard", "preferences-desktop-keyboard"], "⌨", tr("Quick keys"), || Act::Keys),
-    ];
-    for (names, fb, tip, a) in tools {
-        if crate::view::tool_button(ui, btn(rx), icons, names, fb, tip, false).clicked() {
-            act = Some(a());
+    let strip = Rect::from_min_size(full.min, vec2(full.width(), if strip_shown { STRIP_H } else { 0.0 }));
+    if strip_shown {
+        // ---- tab strip
+        let mut x = strip.min.x;
+        let btn = |x: f32| Rect::from_min_size(pos2(x, strip.min.y + 3.0), Vec2::splat(STRIP_H - 6.0));
+        // Right side: settings, saved, history, keys.
+        let mut rx = strip.max.x - (STRIP_H - 6.0);
+        let tools: [(&[&str], &str, &str, fn() -> Act); 4] = [
+            (&["preferences-system", "configure", "settings", "emblem-system"], "⚙", tr("Terminal settings"), || Act::Settings),
+            (&["bookmarks", "bookmark-new", "starred"], "★", tr("Saved commands"), || Act::Saved),
+            (&["document-open-recent", "history", "appointment-soon"], "⟲", tr("Command history"), || Act::History),
+            (&["input-keyboard", "keyboard", "preferences-desktop-keyboard"], "⌨", tr("Quick keys"), || Act::Keys),
+        ];
+        for (names, fb, tip, a) in tools {
+            if crate::view::tool_button(ui, btn(rx), icons, names, fb, tip, false).clicked() {
+                act = Some(a());
+            }
+            rx -= STRIP_H - 2.0;
         }
-        rx -= STRIP_H - 2.0;
-    }
-    let tabs_end = rx + (STRIP_H - 6.0) - 8.0;
-    let n = t.sessions.len().max(1);
-    let plus_w = STRIP_H - 6.0;
-    let tab_w = ((tabs_end - x - plus_w - 6.0) / n as f32).clamp(60.0, 240.0);
-    for (i, s) in t.sessions.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x, strip.min.y + 3.0), vec2(tab_w - 4.0, STRIP_H - 6.0));
-        let resp = ui.interact(r, ui.id().with(("term-tab", i)), Sense::click());
-        let cur = i == t.active;
-        let ringing = s.bell.is_some_and(|b| b.elapsed().as_secs_f32() < 0.6);
-        if cur {
-            ui.painter().rect(r, 8.0, crate::view::tint(&vis, 0.35), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
-        } else if resp.hovered() || ringing {
-            ui.painter().rect_filled(r, 8.0, vis.widgets.hovered.weak_bg_fill);
-        } else {
-            ui.painter().rect_stroke(r, 8.0, vis.widgets.noninteractive.bg_stroke, StrokeKind::Inside);
+        let tabs_end = rx + (STRIP_H - 6.0) - 8.0;
+        let n = t.sessions.len().max(1);
+        let plus_w = STRIP_H - 6.0;
+        let tab_w = ((tabs_end - x - plus_w - 6.0) / n as f32).clamp(60.0, 240.0);
+        for (i, s) in t.sessions.iter().enumerate() {
+            let r = Rect::from_min_size(pos2(x, strip.min.y + 3.0), vec2(tab_w - 4.0, STRIP_H - 6.0));
+            let resp = ui.interact(r, ui.id().with(("term-tab", i)), Sense::click());
+            let cur = i == t.active;
+            let ringing = s.bell.is_some_and(|b| b.elapsed().as_secs_f32() < 0.6);
+            if cur {
+                ui.painter().rect(r, 8.0, crate::view::tint(&vis, 0.35), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
+            } else if resp.hovered() || ringing {
+                ui.painter().rect_filled(r, 8.0, vis.widgets.hovered.weak_bg_fill);
+            } else {
+                ui.painter().rect_stroke(r, 8.0, vis.widgets.noninteractive.bg_stroke, StrokeKind::Inside);
+            }
+            let close = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), Vec2::splat(20.0));
+            let title = if s.exited { format!("{} — {}", s.title, tr("finished")) } else if s.title.is_empty() { tr("Terminal").to_string() } else { s.title.clone() };
+            let g = crate::view::elided_text(ui, &title, FontId::proportional(14.0), if cur { vis.strong_text_color() } else { vis.text_color() }, r.width() - 40.0);
+            ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y / 2.0), g, vis.text_color());
+            let cr = ui.interact(close, ui.id().with(("term-tab-close", i)), Sense::click());
+            if cr.hovered() {
+                ui.painter().rect_filled(close, 5.0, vis.widgets.active.weak_bg_fill);
+            }
+            ui.painter().text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(16.0), vis.weak_text_color());
+            if cr.clicked() {
+                act = Some(Act::CloseTab(i));
+            } else if resp.clicked() {
+                act = Some(Act::Tab(i));
+            } else if resp.middle_clicked() {
+                act = Some(Act::CloseTab(i));
+            }
+            x += tab_w;
         }
-        let close = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), Vec2::splat(20.0));
-        let title = if s.exited { format!("{} — {}", s.title, tr("finished")) } else if s.title.is_empty() { tr("Terminal").to_string() } else { s.title.clone() };
-        let g = crate::view::elided_text(ui, &title, FontId::proportional(14.0), if cur { vis.strong_text_color() } else { vis.text_color() }, r.width() - 40.0);
-        ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y / 2.0), g, vis.text_color());
-        let cr = ui.interact(close, ui.id().with(("term-tab-close", i)), Sense::click());
-        if cr.hovered() {
-            ui.painter().rect_filled(close, 5.0, vis.widgets.active.weak_bg_fill);
+        let plus = btn(x);
+        if crate::view::tool_button(ui, plus, icons, &["list-add", "tab-new"], "+", tr("New terminal tab"), false).clicked() {
+            act = Some(Act::New);
         }
-        ui.painter().text(close.center(), Align2::CENTER_CENTER, "×", FontId::proportional(16.0), vis.weak_text_color());
-        if cr.clicked() {
-            act = Some(Act::CloseTab(i));
-        } else if resp.clicked() {
-            act = Some(Act::Tab(i));
-        } else if resp.middle_clicked() {
-            act = Some(Act::CloseTab(i));
-        }
-        x += tab_w;
-    }
-    let plus = btn(x);
-    if crate::view::tool_button(ui, plus, icons, &["list-add", "tab-new"], "+", tr("New terminal tab"), false).clicked() {
-        act = Some(Act::New);
-    }
 
-    // ---- the grid
-    let area = Rect::from_min_max(pos2(full.min.x, strip.max.y + 4.0), full.max);
+        // ---- the grid
+    }
+    let area = Rect::from_min_max(pos2(full.min.x, strip.max.y + if strip_shown { 4.0 } else { 0.0 }), full.max);
     let bg = c32(scheme.bg);
     ui.painter().rect_filled(area, 8.0, bg);
     let stroke = if focused { Stroke::new(1.5, vis.selection.bg_fill) } else { Stroke::new(1.0, vis.widgets.noninteractive.bg_stroke.color) };

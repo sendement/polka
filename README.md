@@ -32,7 +32,8 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Image and video thumbnails, shared with other file managers via `~/.cache/thumbnails`
 - Icons from the current icon theme, `.desktop` files and Windows `.exe`/`.dll` resources
 - The on-screen keyboard is a real keyboard's main block with what Shift gives on every key (`!`
-  on 1, `№` on 3 in Russian…), Caps Lock, and for the terminal Ctrl, Alt, Tab and arrows. Layouts:
+  on 1, `№` on 3 in Russian…), Caps Lock, a Paste key (the clipboard, on one line in a field), and for the terminal Ctrl, Alt, Tab and
+  arrows; it fits small screens, and typing into a terminal leaves it most of the height. Layouts:
   EN, RU, UK, DE (QWERTZ), FR (AZERTY), ES with dead keys for accents, Korean (두벌식, jamo build
   syllables) and Japanese kana (JIS; ゛ ゜ voice the kana before, Caps writes katakana); which ones ⇄
   goes through is chosen in the settings. (Chinese would need a dictionary IME.)

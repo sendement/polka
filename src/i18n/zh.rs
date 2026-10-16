@@ -1,6 +1,7 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("The clipboard is empty", "剪贴板为空"),
     ("Launcher", "启动器"),
     ("Package", "软件包"),
     ("Script", "脚本"),

@@ -1,6 +1,7 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("The clipboard is empty", "クリップボードは空です"),
     ("Launcher", "ランチャー"),
     ("Package", "パッケージ"),
     ("Script", "スクリプト"),

@@ -1,6 +1,7 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("The clipboard is empty", "클립보드가 비어 있습니다"),
     ("Launcher", "실행기"),
     ("Package", "패키지"),
     ("Script", "스크립트"),

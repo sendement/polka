@@ -1,6 +1,7 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("The clipboard is empty", "Буфер обміну порожній"),
     ("Launcher", "Ярлик"),
     ("Package", "Пакет"),
     ("Script", "Скрипт"),

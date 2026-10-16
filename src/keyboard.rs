@@ -19,6 +19,8 @@ pub enum OskKey {
     Up,
     Down,
     Right,
+    /// Text from the clipboard.
+    Paste,
     Ok,
 }
 
@@ -124,12 +126,13 @@ pub fn row(r: usize) -> Vec<(Slot, f32)> {
             k(OskKey::Ctrl, 1.25),
             k(OskKey::Alt, 1.25),
             k(OskKey::Lang, 1.5),
-            k(OskKey::Space, 4.5),
+            k(OskKey::Space, 3.5),
+            k(OskKey::Paste, 1.5),
             k(OskKey::Left, 1.0),
             k(OskKey::Up, 1.0),
             k(OskKey::Down, 1.0),
             k(OskKey::Right, 1.0),
-            k(OskKey::Ok, 2.5),
+            k(OskKey::Ok, 2.0),
         ],
     }
 }

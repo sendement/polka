@@ -84,7 +84,7 @@ impl App {
         }
     }
 
-    fn with_session(&mut self, f: impl FnOnce(&mut super::Session)) {
+    pub(crate) fn with_session(&mut self, f: impl FnOnce(&mut super::Session)) {
         if let Some(s) = self.term_mut().and_then(|t| t.cur_mut()) {
             f(s);
         }
@@ -235,7 +235,7 @@ impl App {
         }
     }
 
-    fn clipboard_text(&mut self) -> Option<String> {
+    pub(crate) fn clipboard_text(&mut self) -> Option<String> {
         let sys = self.sys_clip.as_mut().and_then(|c| c.get()).filter(|s| !s.is_empty());
         sys.or_else(|| self.text_clip.clone())
     }

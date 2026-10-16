@@ -1,6 +1,7 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("The clipboard is empty", "Die Zwischenablage ist leer"),
     ("Launcher", "Starter"),
     ("Package", "Paket"),
     ("Script", "Skript"),
