@@ -212,9 +212,16 @@ From the [releases](https://github.com/sendement/polka/releases):
 
 - Arch Linux and derivatives: `sudo pacman -U polka-<version>-1-x86_64.pkg.tar.zst`, or build the
   attached `PKGBUILD` with `makepkg -si`
-- Anywhere with Flatpak, Steam Deck included:
-  `flatpak install --user polka-<version>-x86_64.flatpak` (pulls org.freedesktop.Platform 25.08
-  from Flathub)
+- Anywhere with Flatpak, Steam Deck included, from Polka's own repository (updates come with
+  `flatpak update` or Discover as releases come out; the runtime comes from Flathub):
+
+  ```sh
+  flatpak install --user https://sendement.github.io/polka/polka.flatpakref
+  ```
+
+  or a release's `polka-<version>-x86_64.flatpak` bundle (no updates):
+  `flatpak install --user polka-<version>-x86_64.flatpak`. The repository is signed with
+  [this key](packaging/flatpak/repo-key.asc) (`8BE1 1114 515B 69AE 8141 26C1 6244 0DA1 D1F1 20BB`).
 
 ## "Show in folder"
 

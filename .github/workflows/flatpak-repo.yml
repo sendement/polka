@@ -1,0 +1,112 @@
+# Polka's own Flatpak repository on GitHub Pages: every release tag builds
+# the app, signs it and publishes https://sendement.github.io/polka/, so a
+# Flatpak installed from there updates with the releases.
+#   flatpak install --user https://sendement.github.io/polka/polka.flatpakref
+name: Flatpak repository
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE: https://sendement.github.io/polka
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Flatpak tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Runtime and SDK
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Signing key
+        env:
+          KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s\n' "$KEY" | gpg --batch --import
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --default-branch=stable \
+            --gpg-sign="$KEY_ID" --gpg-homedir="$GNUPGHOME" \
+            --repo=site/repo build-dir packaging/flatpak/io.github.sendement.Polka.yml
+
+      - name: Repository files
+        run: |
+          flatpak build-update-repo --generate-static-deltas --prune \
+            --gpg-sign="$KEY_ID" --gpg-homedir="$GNUPGHOME" \
+            --title=Polka --default-branch=stable site/repo
+          key=$(gpg --export "$KEY_ID" | base64 -w0)
+          cp packaging/polka.svg site/polka.svg
+          cp packaging/flatpak/repo-key.asc site/polka.asc
+          {
+            echo '[Flatpak Repo]'
+            echo 'Title=Polka'
+            echo "Url=$SITE/repo/"
+            echo 'Homepage=https://github.com/sendement/polka'
+            echo 'Comment=Gamepad-first file manager'
+            echo "Icon=$SITE/polka.svg"
+            echo "GPGKey=$key"
+          } > site/polka.flatpakrepo
+          {
+            echo '[Flatpak Ref]'
+            echo 'Name=io.github.sendement.Polka'
+            echo 'Branch=stable'
+            echo 'Title=Polka'
+            echo "Url=$SITE/repo/"
+            echo 'SuggestRemoteName=polka'
+            echo 'Homepage=https://github.com/sendement/polka'
+            echo "Icon=$SITE/polka.svg"
+            echo 'RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo'
+            echo 'IsRuntime=false'
+            echo "GPGKey=$key"
+          } > site/polka.flatpakref
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          cat > site/index.html <<HTML
+          <!doctype html><meta charset="utf-8"><title>Polka Flatpak repository</title>
+          <style>body{font:16px/1.5 sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem}code,pre{background:#8882;padding:.1em .3em;border-radius:4px}pre{padding:.8em}</style>
+          <h1>Polka</h1>
+          <p>Flatpak repository of <a href="https://github.com/sendement/polka">Polka</a>, the gamepad-first file manager. Version $version.</p>
+          <pre>flatpak install --user $SITE/polka.flatpakref</pre>
+          <p>Updates then come with <code>flatpak update</code> (or Discover). Signing key: <a href="polka.asc">polka.asc</a>.</p>
+          HTML
+          du -sh site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
