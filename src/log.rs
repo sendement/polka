@@ -32,7 +32,7 @@ pub fn startup() {
     if crate::sandbox::flatpak() {
         parts.push("flatpak".into());
     }
-    for k in ["XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY", "SteamDeck", "SteamGameId", "LANG", "LC_ALL", "LC_CTYPE"] {
+    for k in ["XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY", "SteamGamepadUI", "XDG_CURRENT_DESKTOP", "SteamDeck", "SteamGameId", "LANG", "LC_ALL", "LC_CTYPE"] {
         if let Some(v) = env(k) {
             parts.push(format!("{k}={v}"));
         }

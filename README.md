@@ -249,6 +249,8 @@ music in formats Symphonia can't decode.
 
 Settings live in `~/.config/polka/config.toml` (pinned folders, view, sort,
 `icon_theme` override, `zoom` for TV use; Ctrl+= / Ctrl+- also zoom).
+In Steam's game mode (gamescope) the interface is sized as for a screen 800 points tall, whatever
+scale X11 reports there, and its zoom (`zoom_game`) is kept apart from the desktop's.
 `POLKA_NO_GAMEPAD=1` disables controller input.
 
 ## Flatpak

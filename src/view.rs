@@ -231,9 +231,9 @@ impl App {
                 Key::N if m.shift => Some(Cmd::NewFolder),
                 Key::Tab | Key::PageDown => return press(self, if m.shift && key == Key::Tab { Action::PrevTab } else { Action::NextTab }),
                 Key::PageUp => return press(self, Action::PrevTab),
-                Key::Plus | Key::Equals => return self.zoom(0.1),
-                Key::Minus => return self.zoom(-0.1),
-                Key::Num0 => return self.zoom(1.0 - self.cfg.zoom),
+                Key::Plus | Key::Equals => return self.zoom_by(0.1),
+                Key::Minus => return self.zoom_by(-0.1),
+                Key::Num0 => return self.zoom_by(1.0 - self.zoom()),
                 _ => None,
             };
             if let Some(c) = cmd {
@@ -307,9 +307,10 @@ impl App {
         press(self, a);
     }
 
-    fn zoom(&mut self, d: f32) {
-        self.cfg.zoom = (self.cfg.zoom + d).clamp(0.6, 3.0);
-        self.ctx.set_zoom_factor(self.cfg.zoom);
+    fn zoom_by(&mut self, d: f32) {
+        let z = self.zoom_mut();
+        *z = (*z + d).clamp(0.6, 3.0);
+        self.apply_zoom();
         self.cfg.save();
     }
 
@@ -2015,7 +2016,14 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32) -> Option<OskKey
                 OskKey::Paste => tr("Paste").into(),
                 OskKey::Ok => tr("OK").into(),
             };
-            let size = if special { (14.0 * scale).max(10.0) } else { (18.0 * scale).max(12.0) };
+            let mut size = if special { (14.0 * scale).max(10.0) } else { (18.0 * scale).max(12.0) };
+            // Some room at the sides: a long word ("Вставить") gets smaller
+            // rather than touching the edges.
+            let room = rect.width() - 16.0 * scale.max(0.75);
+            let w = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(size), color).size().x;
+            if w > room {
+                size = (size * room / w).max(8.0);
+            }
             ui.painter().text(rect.center() + vec2(0.0, 1.0), Align2::CENTER_CENTER, label, FontId::proportional(size), color);
             // The other symbol on the key, small in its corner.
             if let Slot::Ch(i) = slot {
@@ -2618,7 +2626,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         (row::SIDE_ICON, tr("Sidebar icons"), format!("{} px", cfg.side_icon)),
         (row::LIST_ICON, tr("List icons"), format!("{} px", cfg.list_icon)),
         (row::GRID_ICON, tr("Grid icons"), format!("{} px", cfg.grid_icon)),
-        (row::ZOOM, tr("Interface scale"), format!("{:.0}%", cfg.zoom * 100.0)),
+        (row::ZOOM, tr("Interface scale"), format!("{:.0}%", if crate::steam_add::game_mode() { cfg.zoom_game } else { cfg.zoom } * 100.0)),
     ];
     for (r_i, label, value) in steppers {
         let (rect, r) = settings_row(ui, 44.0, st.row == r_i, r_i);

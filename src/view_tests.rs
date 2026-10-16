@@ -4049,6 +4049,7 @@ fn osk_paste_screens() {
         _ => panic!("no keyboard"),
     };
     assert_eq!(text(&h), "atwo lines");
+    settle(&mut h);
     shot(&mut h, "kp0-pasted");
     // Nothing to paste: said so, nothing typed.
     h.state_mut().text_clip = None;
@@ -4084,4 +4085,49 @@ fn osk_paste_screens() {
     shot(&mut h, "kp1-window-typing");
     h.state_mut().overlay = None;
     h.state_mut().term_window = None;
+}
+
+
+/// The game mode: X11 in gamescope reports a handheld's scale from its
+/// millimetres (2.25 for 1920x1200 here), which made everything huge; the
+/// screen is made to look 800 points tall, and the zoom set there is the
+/// game mode's own.
+#[test]
+#[ignore]
+fn game_scale_screens() {
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let _ = harness(dir.clone());
+    let mut h = Harness::builder()
+        .with_size([1920.0 / 2.25, 1200.0 / 2.25])
+        .with_pixels_per_point(2.25)
+        .wgpu()
+        .build_eframe(move |cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            crate::fonts::install(&cc.egui_ctx);
+            App::new(cc.egui_ctx.clone(), Some(dir))
+        });
+    h.state_mut().game_mode = true;
+    h.state_mut().cfg.zoom = 1.0;
+    h.state_mut().cfg.zoom_game = 1.0;
+    settle(&mut h);
+    let ppp = h.state().ctx.pixels_per_point();
+    assert!((ppp - 1.5).abs() < 0.01, "{ppp} pixels per point");
+    let r = h.state().ctx.content_rect();
+    assert!((r.height() - 800.0).abs() < 2.0 && (r.width() - 1280.0).abs() < 2.0, "{r:?}");
+    shot(&mut h, "gs0-game-mode");
+    // Its own zoom; the desktop's stays.
+    h.state_mut().run(crate::app::Cmd::Settings);
+    if let Some(crate::app::Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = crate::app::row::ZOOM;
+    }
+    press(&mut h, &[Action::Right]);
+    assert!(h.state().cfg.zoom_game > 1.0 && h.state().cfg.zoom == 1.0);
+    settle(&mut h);
+    assert!(h.state().ctx.pixels_per_point() > 1.55);
+    press(&mut h, &[Action::Left, Action::Back]);
+    // Not in the game mode: the desktop's scale as it is.
+    h.state_mut().game_mode = false;
+    settle(&mut h);
+    assert!((h.state().ctx.pixels_per_point() - 2.25).abs() < 0.01);
 }

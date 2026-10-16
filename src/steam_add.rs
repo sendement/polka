@@ -317,7 +317,7 @@ pub fn running() -> bool {
 /// In Steam's game mode (Steam is the whole session: restarting it would
 /// close everything, this too).
 pub fn game_mode() -> bool {
-    std::env::var_os("SteamGamepadUI").is_some() || std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.eq_ignore_ascii_case("gamescope"))
+    std::env::var_os("SteamGamepadUI").is_some() || std::env::var_os("GAMESCOPE_WAYLAND_DISPLAY").is_some() || std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.eq_ignore_ascii_case("gamescope"))
 }
 
 /// The command that starts this Steam (a Flatpak one too).

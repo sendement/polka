@@ -1204,6 +1204,11 @@ pub struct App {
     pub dnd_release: Option<Instant>,
     /// Light/dark last set on the context.
     pub dark_applied: Option<bool>,
+    /// Running in gamescope (the game mode): its X11 scale, worked out from
+    /// the panel's millimetres, makes a handheld's interface huge.
+    pub game_mode: bool,
+    /// The zoom factor set last (the user's, times the game mode's base).
+    zoom_applied: f32,
     /// Template folders for the "New document" submenus.
     pub templates: Vec<PathBuf>,
 }
@@ -1237,7 +1242,6 @@ impl App {
         }
         let tab = Tab { panes: [first, Pane::new(Location::Local(home), &cfg)], active: 0, viewer: None, usage: None, term: None };
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
-        ctx.set_zoom_factor(cfg.zoom);
         apply_accent(&ctx, &cfg);
         crate::fonts::install_with(&ctx, cfg.viewer.font.as_deref());
         crate::locks::set_waker(ctx.clone());
@@ -1276,6 +1280,8 @@ impl App {
             sudo_pw: None,
             sys_clip: None,
             dark_applied: None,
+            game_mode: crate::steam_add::game_mode(),
+            zoom_applied: 0.0,
             dnd: None,
             dnd_inject: Vec::new(),
             dnd_pos: None,
@@ -1322,6 +1328,38 @@ impl App {
         }
     }
 
+    /// The zoom chosen for where Polka runs (game mode or desktop).
+    pub fn zoom_mut(&mut self) -> &mut f32 {
+        if self.game_mode { &mut self.cfg.zoom_game } else { &mut self.cfg.zoom }
+    }
+
+    pub fn zoom(&self) -> f32 {
+        if self.game_mode { self.cfg.zoom_game } else { self.cfg.zoom }
+    }
+
+    /// The user's zoom; in the game mode on top of a base that makes the
+    /// screen look 800 points tall (what the layout is made for) whatever
+    /// scale X11 reports. The desktop's own scale is kept.
+    pub fn apply_zoom(&mut self) {
+        let base = if self.game_mode {
+            // gamescope shows the window full screen: its height in pixels
+            // (the same whatever the zoom) is the screen's.
+            let (native, px) = self.ctx.input(|i| (i.viewport().native_pixels_per_point.unwrap_or(1.0), i.content_rect().height() * i.pixels_per_point()));
+            if px > 0.0 { (px / 800.0).max(1.0) / native } else { 1.0 }
+        } else {
+            1.0
+        };
+        let z = base * self.zoom();
+        if (z - self.zoom_applied).abs() > 1e-3 {
+            if self.zoom_applied == 0.0 || self.game_mode {
+                let native = self.ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.0));
+                crate::log::line(format!("scale: native {native:.2}, zoom {:.2} → {:.2} pixels per point{}", self.zoom(), z * native, if self.game_mode { " (game mode)" } else { "" }));
+            }
+            self.zoom_applied = z;
+            self.ctx.set_zoom_factor(z);
+        }
+    }
+
     pub fn toast(&mut self, s: impl Into<String>, err: bool) {
         self.toast = Some((s.into(), err, Instant::now()));
     }
@@ -1330,6 +1368,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.apply_appearance();
+        self.apply_zoom();
         self.tick_audio();
         self.tick_usage();
         self.tick_terminal();
@@ -2977,9 +3016,10 @@ impl App {
             row::LIST_ICON => step(&mut self.cfg.list_icon, LIST_ICON),
             row::GRID_ICON => step(&mut self.cfg.grid_icon, GRID_ICON),
             row::ZOOM => {
-                step(&mut self.cfg.zoom, ZOOM);
-                self.cfg.zoom = (self.cfg.zoom * 10.0).round() / 10.0;
-                self.ctx.set_zoom_factor(self.cfg.zoom);
+                let z = self.zoom_mut();
+                step(z, ZOOM);
+                *z = (*z * 10.0).round() / 10.0;
+                self.apply_zoom();
             }
             _ => return,
         }

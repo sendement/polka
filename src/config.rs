@@ -42,6 +42,9 @@ pub struct Config {
     pub icon_theme: Option<String>,
     /// UI zoom; bump it up for couch use.
     pub zoom: f32,
+    /// The same in the game mode (gamescope), where the screen is often a
+    /// handheld's: kept apart so neither spoils the other.
+    pub zoom_game: f32,
     /// Highlight colour; None = the built-in default.
     pub accent: Option<[u8; 3]>,
     /// Colours the user mixed and saved.
@@ -186,6 +189,7 @@ impl Default for Config {
             thumbnails: true,
             icon_theme: None,
             zoom: 1.0,
+            zoom_game: 1.0,
             accent: None,
             custom_colors: Vec::new(),
             side_icon: 20.0,
