@@ -51,6 +51,7 @@ jobs:
 
       - name: Build
         run: |
+          mkdir -p site
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
             --default-branch=stable \
             --gpg-sign="$KEY_ID" --gpg-homedir="$GNUPGHOME" \
