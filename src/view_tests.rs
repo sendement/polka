@@ -1916,6 +1916,7 @@ fn mouse(h: &mut Harness<'static, App>) {
     cfg.view = crate::config::ViewMode::List;
     h.state_mut().cfg = cfg.clone();
     h.state_mut().overlay = None;
+    h.state_mut().spring_off = true;
     h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
     settle(h);
     let rect_of = |h: &Harness<'static, App>, name: &str| {
@@ -4262,7 +4263,10 @@ fn spring_screens() {
     std::fs::write(deep.join("lib.rs"), "fn main() {}\n").unwrap();
     std::fs::create_dir_all(dir.join("Inbox")).unwrap();
     std::fs::write(dir.join("Inbox/report.txt"), "hi\n").unwrap();
-    std::fs::create_dir_all(dir.join("Pinned")).unwrap();
+    std::fs::create_dir_all(dir.join("Pinned/Sub")).unwrap();
+    std::fs::write(dir.join("Pinned/Sub/old.txt"), "old\n").unwrap();
+    let zip = std::process::Command::new("python3").args(["-c", "import sys, zipfile; zipfile.ZipFile(sys.argv[1], 'w').write(sys.argv[2], 'old.txt')"]).arg(dir.join("Pinned/Sub/box.zip")).arg(dir.join("Pinned/Sub/old.txt")).status().unwrap();
+    assert!(zip.success());
     let mut h = harness(deep.clone());
     settle(&mut h);
     let mut cfg = h.state().cfg.clone();
@@ -4337,6 +4341,48 @@ fn spring_screens() {
     wait(&mut h, 800);
     assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.join("Pinned")));
     assert_eq!(h.state().pane_at(1).loc, Location::Local(dir.join("Inbox")));
+    // Into a folder of the list, then into an archive there.
+    let rest_on = |h: &mut Harness<'static, App>, name: &str| {
+        let p = h.state().pane_at(0);
+        let i = p.entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("no {name}: {:?} {:?}", p.loc, p.entries.iter().map(|e| &e.name).collect::<Vec<_>>()));
+        let row = p.drawn.iter().find(|d| d.0 == i).unwrap().1;
+        move_to(h, row.center());
+    };
+    rest_on(&mut h, "Sub");
+    wait(&mut h, 300);
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.join("Pinned")), "opened before the wait");
+    shot(&mut h, "sp2-resting-on-a-folder");
+    // Off the list as soon as it opens: box.zip comes up under the pointer
+    // and would open in turn.
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    while h.state().pane_at(0).loc != Location::Local(dir.join("Pinned/Sub")) && std::time::Instant::now() < end {
+        wait(&mut h, 20);
+    }
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.join("Pinned/Sub")));
+    move_to(&mut h, pos2(300.0, 660.0));
+    settle(&mut h);
+    rest_on(&mut h, "box.zip");
+    wait(&mut h, 800);
+    assert_eq!(h.state().pane_at(0).loc, crate::vfs::archive_loc(dir.join("Pinned/Sub/box.zip")));
+    assert_eq!(h.state().pane_at(1).loc, Location::Local(dir.join("Inbox")));
+    // A third tab: held over it, the left side switches to it.
+    let left = h.state().tab;
+    h.state_mut().run(crate::app::Cmd::NewTab);
+    h.state_mut().pane_mut().navigate(Location::Local(dir.join("Projects")), None, &cfg);
+    let third = h.state().tab;
+    h.state_mut().pick_tab(left);
+    settle(&mut h);
+    assert_eq!(h.state().tab, left);
+    let r = h.state().tab_rects[third];
+    move_to(&mut h, r.center());
+    wait(&mut h, 300);
+    assert_eq!(h.state().tab, left, "switched before the wait");
+    shot(&mut h, "sp3-resting-on-a-tab");
+    wait(&mut h, 500);
+    assert_eq!(h.state().tab, third);
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.join("Projects")));
+    assert_eq!(h.state().pane_at(1).loc, Location::Local(dir.join("Inbox")));
+    assert!(h.state().drag.is_some(), "the drag ended");
     // Let go over nothing in particular: the drag just ends.
     h.state_mut().drag = None;
     button(&mut h, pos2(600.0, 660.0), false);

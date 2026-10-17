@@ -189,8 +189,8 @@ adds to the selection. Drag items by their icon or name onto a folder, the other
 sidebar place, then pick Move here / Copy here (the usual one is preselected: a move on the
 same disk, else a copy; Ctrl or Shift held skips the question). Dropped on a program, script or
 launcher they can also be opened with it. Onto the trash they're trashed. A drag resting a moment on
-a folder of the address bar's path, or on a sidebar place, opens it in the pane (a line fills up
-meanwhile), so the target can be reached without letting go. In dual mode an address bar held a
+a folder or archive in the list, a folder of the address bar's path, a sidebar place or a tab opens
+it (a line fills up meanwhile), so the target can be reached without letting go. In dual mode an address bar held a
 moment (at once while dragging) widens to show the whole path. Files dragged in from other programs land
 the same way, and items pulled out of the window go to other programs (Wayland; X11 takes drops
 into the panel). A folded multi-volume

@@ -517,16 +517,28 @@ impl App {
         let mut x = (row.center().x - total / 2.0).max(row.min.x);
         let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
+        let dragging = self.drag.is_some();
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        let mut resting = None;
+        let mut rects = Vec::new();
 
         shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
         x += shoulder_w + gap;
         for (i, (title, w)) in titles.into_iter().zip(widths).enumerate() {
             let rect = at(x, w);
             x += w + gap;
+            rects.push(rect);
             let is_active = i == self.tab;
             let r = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
             let accent = v.selection.bg_fill;
-            let (fill, stroke) = if is_active {
+            // Dragged items held over another tab switch to it in a moment.
+            let under = dragging && !is_active && pointer.is_some_and(|p| rect.contains(p));
+            if under {
+                resting = Some(i);
+            }
+            let (fill, stroke) = if under {
+                (v.widgets.hovered.weak_bg_fill, Stroke::new(2.0, accent))
+            } else if is_active {
                 (tint(&v, 0.35), Stroke::new(1.5, accent))
             } else if r.hovered() {
                 (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
@@ -544,6 +556,9 @@ impl App {
                 tx = b.max.x + 6.0;
             }
             painter.galley(pos2(tx, rect.center().y - title.size().y / 2.0), title, v.text_color());
+            if under && let Some(t) = spring_progress(&self.spring, &crate::app::SpringAt::Tab(i)) {
+                spring_bar(ui, rect, t);
+            }
             if many {
                 let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
                 let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
@@ -581,6 +596,10 @@ impl App {
         }
         shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
         ui.add_space(6.0);
+        self.tab_rects = rects;
+        if let Some(i) = resting {
+            self.spring_rest(crate::app::SpringAt::Tab(i));
+        }
 
         if let Some(i) = close {
             Some(TabAct::Close(i))
@@ -963,8 +982,14 @@ impl App {
                 return;
             }
             let dragging = self.drag.is_some();
-            let App { tabs, icons, cfg, drag, .. } = self;
+            let App { tabs, icons, cfg, drag, spring, .. } = self;
             let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
+            // The entry a drag rests on in this side, and how long it has.
+            let spring = &*spring;
+            let springing = |pane: usize, shown: &crate::vfs::Location| match spring {
+                Some((at @ crate::app::SpringAt::Entry(s, l, n), _, _)) if *s == pane && l == shown => spring_progress(spring, at).map(|t| (n.as_str(), t)),
+                _ => None,
+            };
             if dual {
                 let (a, b) = crate::app::two_panes(tabs, tab_of[0], tab_of[1]);
                 let full = ui.available_rect_before_wrap();
@@ -983,12 +1008,14 @@ impl App {
                     };
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx)) {
+                    let shown = pane.loc.clone();
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown)) {
                         events.push((idx, e));
                     }
                 }
             } else {
-                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0)) {
+                let shown = tabs[tab].pane.loc.clone();
+                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown)) {
                     events.push((0, e));
                 }
             }
@@ -1020,6 +1047,14 @@ impl App {
             ui.ctx().request_repaint();
         }
         for (idx, e) in events {
+            // Only resting there: the drag goes on, the sides stay as they are.
+            if let PaneEvent::Rest(i) = e {
+                let p = self.pane_at(idx);
+                if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
+                    self.spring_rest(crate::app::SpringAt::Entry(idx, p.loc.clone(), name));
+                }
+                continue;
+            }
             self.focus = Focus::Panes;
             self.set_side(idx);
             match e {
@@ -1077,6 +1112,7 @@ impl App {
                 }
                 PaneEvent::DragStart(i) => self.drag_start(idx, i),
                 PaneEvent::Drop(i) => self.drop_on_pane(idx, i),
+                PaneEvent::Rest(_) => {}
                 PaneEvent::ClearSelection => self.pane_mut().selected.clear(),
                 PaneEvent::NewTab(i) => {
                     let p = self.pane();
@@ -1256,11 +1292,14 @@ enum PaneEvent {
     DragStart(usize),
     /// Dragged items let go over this pane (onto an entry, or not).
     Drop(Option<usize>),
+    /// Dragged items held over a folder or archive: it opens after a moment.
+    Rest(usize),
     /// A click on empty space.
     ClearSelection,
 }
 
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>) -> Vec<PaneEvent> {
+#[allow(clippy::too_many_arguments)]
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>) -> Vec<PaneEvent> {
     let mut events = Vec::new();
     // Dragged items over this pane: dropped on release.
     let whole = ui.max_rect();
@@ -1541,6 +1580,9 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     drop_entry = Some(i);
                     let a = ui.visuals().selection.bg_fill;
                     ui.painter().rect(rect, 6.0, tint(ui.visuals(), 0.35), Stroke::new(2.0, a), StrokeKind::Inside);
+                    if let Some((_, t)) = springing.filter(|(n, _)| *n == e.name) {
+                        spring_bar(ui, rect, t);
+                    }
                 }
                 if checked {
                 } else if r.double_clicked() {
@@ -1602,6 +1644,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         }
         if released {
             events.push(PaneEvent::Drop(drop_entry));
+        } else if let Some(i) = drop_entry.filter(|&i| pane.entries.get(i).is_some_and(|e| e.is_dir || crate::vfs::is_archive_name(&e.name))) {
+            events.push(PaneEvent::Rest(i));
         }
     }
     // Sets under the mouse or the cursor unfold (from the next frame) — not

@@ -432,11 +432,14 @@ pub struct Tab {
 }
 
 /// Where a drag rests to open something: a crumb of a side's address
-/// (which folder), or a sidebar place.
+/// (which folder), a sidebar place, a folder or archive in a side's list
+/// (the folder shown, the entry's name), or a tab.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpringAt {
     Crumb(usize, Location),
     Side(usize),
+    Entry(usize, Location, String),
+    Tab(usize),
 }
 
 /// How long a drag rests before the place opens.
@@ -1227,10 +1230,14 @@ pub struct App {
     pub spring: Option<(SpringAt, Instant, bool)>,
     /// Something reported resting under a drag this frame.
     pub spring_seen: bool,
+    /// Tests of plain drops, slower than a person, turn it off.
+    pub spring_off: bool,
     /// Last frame's layout, for tests (and pointer logic): the crumbs
-    /// (side, rect, folder), the sidebar rows, where the two addresses meet.
+    /// (side, rect, folder), the sidebar rows, the tabs, where the two
+    /// addresses meet.
     pub crumb_rects: Vec<(usize, egui::Rect, Location)>,
     pub side_rects: Vec<egui::Rect>,
+    pub tab_rects: Vec<egui::Rect>,
     pub addr_mid: Option<f32>,
     /// □ held while editing text: Some(moved since).
     pub edit_hold: Option<bool>,
@@ -1352,8 +1359,10 @@ impl App {
             addr_hover: None,
             spring: None,
             spring_seen: false,
+            spring_off: false,
             crumb_rects: Vec::new(),
             side_rects: Vec::new(),
+            tab_rects: Vec::new(),
             addr_mid: None,
             game_mode: crate::steam_add::game_mode(),
             zoom_applied: 0.0,
@@ -1468,6 +1477,9 @@ impl App {
     /// A drag rests on `at` this frame: how far along the wait is (0..1;
     /// it opens the place once at 1).
     pub fn spring_rest(&mut self, at: SpringAt) -> f32 {
+        if self.spring_off {
+            return 0.0;
+        }
         self.spring_seen = true;
         let now = Instant::now();
         let fresh = !matches!(&self.spring, Some((a, _, _)) if *a == at);
@@ -1504,6 +1516,26 @@ impl App {
                 Some(it) if !it.usage && !it.term && it.drive.as_ref().is_none_or(|d| d.mount.is_some()) => it.loc.clone(),
                 _ => return,
             },
+            SpringAt::Entry(side, shown, name) => {
+                let p = self.pane_at(side);
+                let Some(e) = p.entries.iter().find(|e| e.name == name).filter(|_| p.loc == shown) else { return };
+                let loc = if e.is_dir {
+                    p.entry_loc(e)
+                } else {
+                    match p.entry_path(e).filter(|_| vfs::is_archive_name(&name)) {
+                        Some(path) => vfs::archive_loc(path),
+                        None => return,
+                    }
+                };
+                self.set_side(side);
+                loc
+            }
+            SpringAt::Tab(i) => {
+                if i < self.tabs.len() {
+                    self.pick_tab(i);
+                }
+                return;
+            }
         };
         // The panes come back in front of a page.
         if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
