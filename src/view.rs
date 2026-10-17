@@ -92,6 +92,7 @@ impl eframe::App for App {
         self.draw_center(ui);
         self.draw_term_window(&ctx);
         self.draw_drag(&ctx);
+        self.spring_frame_end();
         if !full {
             self.draw_jobs(&ctx);
         }
@@ -327,6 +328,7 @@ impl App {
     fn draw_top(&mut self, ui: &mut Ui) {
         let cfg = self.cfg.clone();
         let mut act: Option<TopAction> = None;
+        let mut resting: Option<(usize, crate::vfs::Location)> = None;
         let dual = cfg.dual;
         let active = self.side();
         let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
@@ -378,10 +380,36 @@ impl App {
             let fields: Vec<(usize, Rect)> = if let Some((origin, _)) = &viewing {
                 vec![(*origin, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             } else if dual {
-                let mid = self
+                let even = self
                     .divider_x
                     .filter(|d| *d > addr_start + 120.0 && *d < addr_end - 120.0)
                     .unwrap_or((addr_start + addr_end) / 2.0);
+                // Resting on one field a moment widens it to show the
+                // whole path; the other keeps a strip to come back to.
+                let id = ui.id().with("addr-mid");
+                let now_mid = ui.ctx().animate_value_with_time(id, ui.ctx().data(|d| d.get_temp::<f32>(id.with("target"))).unwrap_or(even), 0.15);
+                let over = ui.input(|i| i.pointer.hover_pos()).filter(|p| row.contains(*p) && p.x >= addr_start && p.x <= addr_end).map(|p| (p.x > now_mid) as usize);
+                match (over, self.addr_hover) {
+                    (Some(i), Some((h, _))) if i == h => {}
+                    (Some(i), _) => self.addr_hover = Some((i, std::time::Instant::now())),
+                    (None, _) => self.addr_hover = None,
+                }
+                // Dragging, it widens at once: the crumbs move once, before
+                // the drag rests on one of them, not during the wait.
+                let rest_for = if self.drag.is_some() { 0.0 } else { 0.35 };
+                let wide = self.addr_hover.filter(|(_, t)| t.elapsed().as_secs_f32() >= rest_for).map(|(i, _)| i);
+                if let Some((_, t)) = self.addr_hover.filter(|_| wide.is_none()) {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32((rest_for - t.elapsed().as_secs_f32()).max(0.0)));
+                }
+                let strip = 140.0_f32.min((addr_end - addr_start) / 4.0);
+                let target = match wide {
+                    Some(0) => addr_end - strip,
+                    Some(_) => addr_start + strip,
+                    None => even,
+                };
+                ui.ctx().data_mut(|d| d.insert_temp(id.with("target"), target));
+                let mid = now_mid;
+                self.addr_mid = Some(mid);
                 vec![
                     (0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(mid - 4.0, row.max.y))),
                     (1, Rect::from_min_max(pos2(mid + 4.0, row.min.y), pos2(addr_end, row.max.y))),
@@ -389,16 +417,25 @@ impl App {
             } else {
                 vec![(0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             };
+            let mut drawn = Vec::new();
             for (idx, rect) in fields {
                 let pane = self.pane_at(idx);
                 let highlight = dual && idx == active && viewing.is_none();
                 let file = viewing.as_ref().map(|(_, n)| n.as_str());
-                if let Some(a) = address_field(ui, rect, pane, highlight, idx, file) {
+                let (a, rest) = address_field(ui, rect, pane, highlight, idx, file, self.drag.is_some(), &self.spring, &mut drawn);
+                if let Some(a) = a {
                     act = Some(a);
                 }
+                if rest.is_some() {
+                    resting = rest;
+                }
             }
+            self.crumb_rects = drawn;
         });
 
+        if let Some((side, loc)) = resting {
+            self.spring_rest(crate::app::SpringAt::Crumb(side, loc));
+        }
         let Some(act) = act else { return };
         match act {
             TopAction::Sidebar => self.run(Cmd::ToggleSidebar),
@@ -784,6 +821,8 @@ impl App {
         let mut dropped = None;
         let mut clicked = None;
         let mut actions = None;
+        let mut resting = None;
+        let mut rows = Vec::new();
         let side_icon = self.cfg.side_icon;
         let side_font = side_font(side_icon);
         egui::Panel::left("sidebar")
@@ -804,6 +843,7 @@ impl App {
                             }
                         }
                         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
+                        rows.push(rect);
                         let is_cursor = focused && i == self.side_cursor;
                         let here = if it.usage {
                             usage_here
@@ -817,6 +857,12 @@ impl App {
                             ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
                             if released {
                                 dropped = Some(i);
+                            } else {
+                                // Resting here opens it (a line fills up meanwhile).
+                                resting = Some(i);
+                                if let Some(t) = spring_progress(&self.spring, &crate::app::SpringAt::Side(i)) {
+                                    spring_bar(ui, rect, t);
+                                }
                             }
                         }
                         let under = dragging && !it.usage && !it.term && pointer.is_some_and(|p| rect.contains(p));
@@ -849,8 +895,11 @@ impl App {
                     }
                 });
             });
+        self.side_rects = rows;
         if let Some(i) = dropped {
             self.drop_on_side(i);
+        } else if let Some(i) = resting {
+            self.spring_rest(crate::app::SpringAt::Side(i));
         }
         if let Some(i) = clicked {
             self.side_cursor = i;
@@ -2362,7 +2411,21 @@ pub(crate) fn tool_button(ui: &mut Ui, rect: Rect, icons: &mut Icons, names: &[&
 
 /// One address field: breadcrumbs (trimmed from the left when long), a
 /// read-only lock and the filter chip.
-fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usize, file: Option<&str>) -> Option<TopAction> {
+/// One side's address: crumbs to click. While something is dragged, the
+/// crumb it rests on is returned (it opens after a moment).
+#[allow(clippy::too_many_arguments)]
+fn address_field(
+    ui: &mut Ui,
+    rect: Rect,
+    pane: &Pane,
+    highlight: bool,
+    idx: usize,
+    file: Option<&str>,
+    dragging: bool,
+    spring: &Option<(crate::app::SpringAt, std::time::Instant, bool)>,
+    drawn: &mut Vec<(usize, Rect, crate::vfs::Location)>,
+) -> (Option<TopAction>, Option<(usize, crate::vfs::Location)>) {
+    let mut rest = None;
     let mut act = None;
     let bg = ui.interact(rect, ui.id().with(("addr", idx)), Sense::click());
     let v = ui.visuals().clone();
@@ -2398,6 +2461,7 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
 
     // Breadcrumbs: keep the last ones that fit.
     let mut crumbs = pane.loc.crumbs();
+    let folders = crumbs.len();
     // The viewed file ends the path.
     if let Some(f) = file {
         crumbs.push((f.to_string(), pane.loc.clone()));
@@ -2437,6 +2501,19 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
         if resp.hovered() {
             painter.rect_filled(r, 6.0, v.widgets.hovered.weak_bg_fill);
         }
+        if i < folders {
+            drawn.push((idx, r, crumbs[i].1.clone()));
+        }
+        // A drag resting on a folder of the path (not the one shown).
+        let under = dragging && i < folders && crumbs[i].1 != pane.loc && ui.input(|inp| inp.pointer.hover_pos()).is_some_and(|p| r.contains(p));
+        if under {
+            painter.rect(r, 6.0, tint(&v, 0.35), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+            let at = crate::app::SpringAt::Crumb(idx, crumbs[i].1.clone());
+            if let Some(t) = spring_progress(spring, &at) {
+                spring_bar(ui, r, t);
+            }
+            rest = Some((idx, crumbs[i].1.clone()));
+        }
         painter.galley(pos2(r.min.x + pad / 2.0, r.center().y - g.size().y / 2.0), g, v.text_color());
         if resp.clicked() {
             act = Some(TopAction::Go(idx, crumbs[i].1.clone()));
@@ -2447,7 +2524,24 @@ fn address_field(ui: &mut Ui, rect: Rect, pane: &Pane, highlight: bool, idx: usi
             x += sep;
         }
     }
-    act
+    (act, rest)
+}
+
+/// How far a drag resting on `at` is from opening it (None: it isn't).
+fn spring_progress(spring: &Option<(crate::app::SpringAt, std::time::Instant, bool)>, at: &crate::app::SpringAt) -> Option<f32> {
+    match spring {
+        Some((a, since, false)) if a == at => Some((since.elapsed().as_secs_f32() / crate::app::SPRING.as_secs_f32()).min(1.0)),
+        _ => None,
+    }
+}
+
+/// The wait before a place opens under a drag: a line filling along the
+/// bottom of `rect`.
+fn spring_bar(ui: &Ui, rect: Rect, t: f32) {
+    let y = rect.max.y - 3.0;
+    let x0 = rect.min.x + 6.0;
+    let x1 = x0 + (rect.width() - 12.0) * t;
+    ui.painter().line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(3.0, ui.visuals().selection.bg_fill));
 }
 
 // ---------------------------------------------------------------- settings

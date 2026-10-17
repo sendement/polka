@@ -431,6 +431,17 @@ pub struct Tab {
     pub term: Option<Box<crate::terminal::Terminal>>,
 }
 
+/// Where a drag rests to open something: a crumb of a side's address
+/// (which folder), or a sidebar place.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpringAt {
+    Crumb(usize, Location),
+    Side(usize),
+}
+
+/// How long a drag rests before the place opens.
+pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
@@ -1208,6 +1219,19 @@ pub struct App {
     /// x of the line between the two panes (last frame), to split the
     /// address bar at the same place.
     pub divider_x: Option<f32>,
+    /// Dual mode: the address field the pointer rests on, and since when
+    /// (held a moment, it widens to show the whole path).
+    pub addr_hover: Option<(usize, Instant)>,
+    /// Dragging and resting on a path crumb or a sidebar place: it opens
+    /// after a moment ("spring-loaded"); whether it already did.
+    pub spring: Option<(SpringAt, Instant, bool)>,
+    /// Something reported resting under a drag this frame.
+    pub spring_seen: bool,
+    /// Last frame's layout, for tests (and pointer logic): the crumbs
+    /// (side, rect, folder), the sidebar rows, where the two addresses meet.
+    pub crumb_rects: Vec<(usize, egui::Rect, Location)>,
+    pub side_rects: Vec<egui::Rect>,
+    pub addr_mid: Option<f32>,
     /// □ held while editing text: Some(moved since).
     pub edit_hold: Option<bool>,
     /// Text copied in the viewer (when the system clipboard can't be read).
@@ -1325,6 +1349,12 @@ impl App {
             sys_clip: None,
             dark_applied: None,
             last_frame: None,
+            addr_hover: None,
+            spring: None,
+            spring_seen: false,
+            crumb_rects: Vec::new(),
+            side_rects: Vec::new(),
+            addr_mid: None,
             game_mode: crate::steam_add::game_mode(),
             zoom_applied: 0.0,
             dnd: None,
@@ -1433,6 +1463,65 @@ impl App {
             self.zoom_applied = z;
             self.ctx.set_zoom_factor(z);
         }
+    }
+
+    /// A drag rests on `at` this frame: how far along the wait is (0..1;
+    /// it opens the place once at 1).
+    pub fn spring_rest(&mut self, at: SpringAt) -> f32 {
+        self.spring_seen = true;
+        let now = Instant::now();
+        let fresh = !matches!(&self.spring, Some((a, _, _)) if *a == at);
+        if fresh {
+            self.spring = Some((at, now, false));
+            self.ctx.request_repaint();
+            return 0.0;
+        }
+        let Some((at, since, fired)) = self.spring.clone() else { return 0.0 };
+        let t = since.elapsed().as_secs_f32() / SPRING.as_secs_f32();
+        if fired {
+            return 0.0;
+        }
+        if t < 1.0 {
+            self.ctx.request_repaint();
+            return t;
+        }
+        if let Some(s) = self.spring.as_mut() {
+            s.2 = true;
+        }
+        self.spring_open(at);
+        0.0
+    }
+
+    fn spring_open(&mut self, at: SpringAt) {
+        let cfg = self.cfg.clone();
+        let loc = match at {
+            SpringAt::Crumb(side, loc) => {
+                self.set_side(side);
+                loc
+            }
+            SpringAt::Side(i) => match self.side_items.get(i) {
+                // Unmounted drives and tools aren't folders yet.
+                Some(it) if !it.usage && !it.term && it.drive.as_ref().is_none_or(|d| d.mount.is_some()) => it.loc.clone(),
+                _ => return,
+            },
+        };
+        // The panes come back in front of a page.
+        if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
+            u.shown = false;
+        }
+        if let Some(t) = self.tabs[self.tab].term.as_deref_mut() {
+            t.shown = false;
+        }
+        self.focus = Focus::Panes;
+        self.pane_mut().navigate(loc, None, &cfg);
+    }
+
+    /// End of a frame: no drag resting anywhere forgets the wait.
+    pub fn spring_frame_end(&mut self) {
+        if !self.spring_seen || self.drag.is_none() {
+            self.spring = None;
+        }
+        self.spring_seen = false;
     }
 
     pub fn toast(&mut self, s: impl Into<String>, err: bool) {

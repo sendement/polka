@@ -4246,3 +4246,100 @@ fn dual_tabs_screens() {
     h.state_mut().cfg.right_dir = None;
     h.state_mut().cfg.save();
 }
+
+/// The mouse in dual mode: an address field held a moment widens; a drag
+/// resting on a crumb of the path or on a sidebar place opens it there.
+#[test]
+#[ignore]
+fn spring_screens() {
+    use crate::vfs::Location;
+    use egui::{Event, PointerButton, Pos2, pos2, vec2};
+    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("spring");
+    let _ = std::fs::remove_dir_all(&dir);
+    let deep = dir.join("Projects/alpha/src/module");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("lib.rs"), "fn main() {}\n").unwrap();
+    std::fs::create_dir_all(dir.join("Inbox")).unwrap();
+    std::fs::write(dir.join("Inbox/report.txt"), "hi\n").unwrap();
+    std::fs::create_dir_all(dir.join("Pinned")).unwrap();
+    let mut h = harness(deep.clone());
+    settle(&mut h);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    cfg.pinned = vec![dir.join("Pinned")];
+    h.state_mut().cfg = cfg.clone();
+    h.state_mut().refresh_sidebar();
+    h.state_mut().run(crate::app::Cmd::ToggleDual);
+    h.state_mut().pane_at_mut(1).navigate(Location::Local(dir.join("Inbox")), None, &cfg);
+    settle(&mut h);
+    let wait = |h: &mut Harness<'static, App>, ms: u64| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    };
+    let move_to = |h: &mut Harness<'static, App>, p: Pos2| {
+        h.event(Event::PointerMoved(p));
+        h.step();
+    };
+    let button = |h: &mut Harness<'static, App>, p: Pos2, down: bool| {
+        h.event(Event::PointerMoved(p));
+        h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: egui::Modifiers::NONE });
+        h.step();
+    };
+    // Held on the left address a moment: it widens; away, it's back.
+    let even = h.state().addr_mid.expect("no split address");
+    let on_left = h.state().crumb_rects.iter().filter(|c| c.0 == 0).map(|c| c.1).last().unwrap();
+    move_to(&mut h, on_left.center());
+    wait(&mut h, 150);
+    assert!((h.state().addr_mid.unwrap() - even).abs() < 2.0, "widened at once");
+    wait(&mut h, 600);
+    let wide = h.state().addr_mid.unwrap();
+    assert!(wide > even + 150.0, "{wide} vs {even}");
+    shot(&mut h, "sp0-address-widened");
+    move_to(&mut h, pos2(on_left.center().x, 400.0));
+    wait(&mut h, 400);
+    assert!((h.state().addr_mid.unwrap() - even).abs() < 2.0, "didn't come back");
+    // Drag report.txt from the right pane; rest it on the left "alpha".
+    h.state_mut().set_side(1);
+    settle(&mut h);
+    let p = h.state().pane();
+    let i = p.entries.iter().position(|e| e.name == "report.txt").unwrap();
+    let (_, row, _) = *p.drawn.iter().find(|d| d.0 == i).unwrap();
+    let from = pos2(row.min.x + 40.0, row.center().y);
+    button(&mut h, from, true);
+    for k in 1..6 {
+        move_to(&mut h, from + vec2(k as f32 * 12.0, k as f32 * 6.0));
+    }
+    assert!(h.state().drag.is_some(), "no drag");
+    // Onto the left address: dragging, it widens at once, so the crumbs
+    // are still by the time the drag rests on one.
+    let alpha = Location::Local(dir.join("Projects/alpha"));
+    move_to(&mut h, on_left.center());
+    wait(&mut h, 300);
+    assert!(h.state().addr_mid.unwrap() > even + 150.0, "not widened for the drag");
+    let crumb = h.state().crumb_rects.iter().find(|c| c.0 == 0 && c.2 == alpha).map(|c| c.1).expect("no alpha crumb");
+    move_to(&mut h, crumb.center());
+    wait(&mut h, 300);
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(deep.clone()), "opened before the wait");
+    shot(&mut h, "sp1-resting-on-a-crumb");
+    wait(&mut h, 500);
+    assert_eq!(h.state().pane_at(0).loc, alpha);
+    assert_eq!(h.state().side(), 0);
+    assert!(h.state().drag.is_some(), "the drag ended");
+    // On to a sidebar place: the active (left) pane goes there.
+    let pinned = h.state().side_items.iter().position(|s| s.loc == Location::Local(dir.join("Pinned"))).unwrap();
+    let row = h.state().side_rects[pinned];
+    move_to(&mut h, row.center());
+    wait(&mut h, 800);
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.join("Pinned")));
+    assert_eq!(h.state().pane_at(1).loc, Location::Local(dir.join("Inbox")));
+    // Let go over nothing in particular: the drag just ends.
+    h.state_mut().drag = None;
+    button(&mut h, pos2(600.0, 660.0), false);
+    settle(&mut h);
+    assert!(std::fs::metadata(dir.join("Inbox/report.txt")).is_ok());
+}
