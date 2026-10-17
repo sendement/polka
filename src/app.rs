@@ -1238,6 +1238,8 @@ pub struct App {
     pub dnd_release: Option<Instant>,
     /// Light/dark last set on the context.
     pub dark_applied: Option<bool>,
+    /// When the last frame began (frames are paced by hand: see main.rs).
+    pub last_frame: Option<Instant>,
     /// Running in gamescope (the game mode): its X11 scale, worked out from
     /// the panel's millimetres, makes a handheld's interface huge.
     pub game_mode: bool,
@@ -1322,6 +1324,7 @@ impl App {
             sudo_pw: None,
             sys_clip: None,
             dark_applied: None,
+            last_frame: None,
             game_mode: crate::steam_add::game_mode(),
             zoom_applied: 0.0,
             dnd: None,

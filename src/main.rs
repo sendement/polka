@@ -76,6 +76,11 @@ fn main() -> eframe::Result {
             .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "polka".into()))
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([520.0, 360.0]),
+        // No waiting for the display in eglSwapBuffers: on Wayland a window
+        // the compositor doesn't show (behind a full-screen game) gets no
+        // frame callbacks, so the wait never ended and Polka stopped
+        // answering ("not responding"). Frames are paced in App::ui.
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
     eframe::run_native(

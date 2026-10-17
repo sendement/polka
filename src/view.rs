@@ -55,6 +55,15 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        // At most ~120 frames a second when they come back to back
+        // (animations, video): without vsync nothing else holds them.
+        const FRAME: std::time::Duration = std::time::Duration::from_micros(8_333);
+        if let Some(t) = self.last_frame {
+            if let Some(rest) = FRAME.checked_sub(t.elapsed()) {
+                std::thread::sleep(rest);
+            }
+        }
+        self.last_frame = Some(std::time::Instant::now());
         let ctx = ui.ctx().clone();
         let inputs: Vec<Input> = self.pad_rx.try_iter().collect();
         // The pad is read globally; never act on it while another window
