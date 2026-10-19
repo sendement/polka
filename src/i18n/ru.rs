@@ -1,6 +1,9 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Restore", "Восстановить"),
+    ("Restoring", "Восстановление"),
+    ("No record of where it came from: %n", "Неизвестно, откуда удалено: %n"),
     ("Right pane opens where it was", "Правая панель открывается там, где была"),
     ("The clipboard is empty", "Буфер обмена пуст"),
     ("Launcher", "Ярлык"),

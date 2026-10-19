@@ -1,6 +1,9 @@
 //! Español.
 
 pub const T: &[(&str, &str)] = &[
+    ("Restore", "Restaurar"),
+    ("Restoring", "Restaurando"),
+    ("No record of where it came from: %n", "Origen desconocido: %n"),
     ("Right pane opens where it was", "El panel derecho se abre donde estaba"),
     ("The clipboard is empty", "El portapapeles está vacío"),
     ("Launcher", "Lanzador"),

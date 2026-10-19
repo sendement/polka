@@ -1,7 +1,7 @@
 //! The trash (freedesktop.org layout): how full it is, and emptying it —
 //! the home trash and the ones on other mounted disks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Trash folders (each with files/ and info/) that exist.
 pub fn roots() -> Vec<PathBuf> {
@@ -49,4 +49,56 @@ pub fn empty() -> (usize, usize) {
         let _ = std::fs::remove_file(r.join("directorysizes"));
     }
     (done, failed)
+}
+
+/// Whether `dir` is the files/ folder of a trash, where things can be put
+/// back.
+pub fn is_files_dir(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n == "files") && dir.parent().is_some_and(|r| r.join("info").is_dir())
+}
+
+/// The .trashinfo of an item in a trash's files/ folder.
+pub fn info_of(item: &Path) -> Option<PathBuf> {
+    let files = item.parent().filter(|d| is_files_dir(d))?;
+    let mut name = item.file_name()?.to_os_string();
+    name.push(".trashinfo");
+    Some(files.parent()?.join("info").join(name))
+}
+
+/// Where a trashed item came from. A disk's own trash keeps paths relative
+/// to the disk (.Trash-1000 or .Trash/1000 at its top).
+pub fn origin(item: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(info_of(item)?).ok()?;
+    let raw = text.lines().map(str::trim).find_map(|l| l.strip_prefix("Path="))?;
+    let p = crate::app::percent_decoded(raw);
+    if p.is_absolute() {
+        return Some(p);
+    }
+    let root = item.parent()?.parent()?;
+    let top = if root.parent().is_some_and(|d| d.file_name().is_some_and(|n| n == ".Trash")) { root.parent()?.parent()? } else { root.parent()? };
+    Some(top.join(p))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn origins() {
+        let t = std::env::temp_dir().join(format!("polka-trash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        for (root, info) in [
+            (t.join("home/Trash"), "Path=/home/me/My%20File.txt"),
+            (t.join("disk/.Trash-1000"), "Path=docs/a.txt"),
+            (t.join("disk2/.Trash/1000"), "Path=b.txt"),
+        ] {
+            std::fs::create_dir_all(root.join("files")).unwrap();
+            std::fs::create_dir_all(root.join("info")).unwrap();
+            std::fs::write(root.join("files/x"), "").unwrap();
+            std::fs::write(root.join("info/x.trashinfo"), format!("[Trash Info]\n{info}\nDeletionDate=2026-10-19T10:00:00\n")).unwrap();
+        }
+        assert_eq!(super::origin(&t.join("home/Trash/files/x")), Some("/home/me/My File.txt".into()));
+        assert_eq!(super::origin(&t.join("disk/.Trash-1000/files/x")), Some(t.join("disk/docs/a.txt")));
+        assert_eq!(super::origin(&t.join("disk2/.Trash/1000/files/x")), Some(t.join("disk2/b.txt")));
+        assert_eq!(super::origin(&t.join("elsewhere/x")), None);
+        let _ = std::fs::remove_dir_all(&t);
+    }
 }

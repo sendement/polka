@@ -26,6 +26,8 @@ pub struct Icons {
     thumbs: crate::thumbs::Thumbs,
     /// Thumbnail textures handed to egui, to free them in bulk.
     thumb_uris: HashSet<String>,
+    /// The theme's own empty / half-full / full trash icons, per theme.
+    trash: Option<(String, Option<[String; 3]>)>,
 }
 
 impl Icons {
@@ -35,6 +37,7 @@ impl Icons {
         let mut icons = Self {
             thumbs: crate::thumbs::Thumbs::new(move || w()),
             thumb_uris: HashSet::new(),
+            trash: None,
             theme: String::new(),
             chosen: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
             dark: true,
@@ -116,6 +119,33 @@ impl Icons {
             }
         }
         group_by_color(names.into_iter().collect())
+    }
+
+    /// A trash icon for how full it is (0 empty, 1 half, 2 full), when the
+    /// theme (or one it inherits) draws all three — gnome-stock-trash-empty,
+    /// gnome-stock-trash, gnome-stock-trash-full; else None, and
+    /// user-trash(-full) serve.
+    pub fn trash_level(&mut self, level: usize) -> Option<String> {
+        if self.trash.as_ref().is_none_or(|(t, _)| *t != self.theme) {
+            let mut names = HashMap::new();
+            let mut queue = vec![self.theme.clone()];
+            let mut seen = HashSet::new();
+            while let Some(t) = queue.pop() {
+                if t == "hicolor" || !seen.insert(t.clone()) {
+                    continue;
+                }
+                for dir in theme_dirs(&t) {
+                    collect_trash(&dir, 0, &mut names);
+                    if let Ok(idx) = std::fs::read_to_string(dir.join("index.theme")) {
+                        if let Some(inh) = idx.lines().find_map(|l| l.strip_prefix("Inherits=")) {
+                            queue.extend(inh.split(',').map(|s| s.trim().to_string()));
+                        }
+                    }
+                }
+            }
+            self.trash = Some((self.theme.clone(), trash_set(&names)));
+        }
+        self.trash.as_ref().and_then(|(_, set)| set.as_ref()).map(|set| set[level.min(2)].clone())
     }
 
     /// Switch themes; None follows the desktop's setting.
@@ -412,6 +442,42 @@ fn collect_places(dir: &Path, depth: usize, in_places: bool, out: &mut std::coll
     }
 }
 
+/// Trash icon names anywhere in a theme folder, with the files they are
+/// (links followed: themes often point all of them at one picture).
+fn collect_trash(dir: &Path, depth: usize, out: &mut HashMap<String, HashSet<PathBuf>>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if p.is_dir() {
+            if depth < 3 {
+                collect_trash(&p, depth + 1, out);
+            }
+        } else if TRASH_FAMILIES.iter().any(|f| name.starts_with(f)) {
+            let stem = name.strip_suffix(".svg").or_else(|| name.strip_suffix(".png"));
+            if let (Some(stem), Ok(real)) = (stem, p.canonicalize()) {
+                out.entry(stem.to_string()).or_default().insert(real);
+            }
+        }
+    }
+}
+
+/// Old GNOME names that come as empty, half-full (the bare name) and full.
+const TRASH_FAMILIES: [&str; 2] = ["gnome-stock-trash", "gnome-trash"];
+
+/// Empty, half-full and full trash icons, when a family has all three and
+/// the half-full one is a picture of its own.
+fn trash_set(names: &HashMap<String, HashSet<PathBuf>>) -> Option<[String; 3]> {
+    TRASH_FAMILIES.iter().find_map(|f| {
+        let empty = names.get_key_value(&format!("{f}-empty"))?;
+        let full = names.get_key_value(&format!("{f}-full"))?;
+        let half = [f.to_string(), format!("{f}-half"), format!("{f}-half-full")].into_iter().find_map(|n| names.get_key_value(&n))?;
+        half.1.is_disjoint(empty.1).then_some(())?;
+        half.1.is_disjoint(full.1).then_some(())?;
+        Some([empty.0.clone(), half.0.clone(), full.0.clone()])
+    })
+}
+
 /// Split `folder-<colour>-<kind>` variants into groups. A segment counts as a
 /// colour when `folder-<c>` exists and at least five `folder-<c>-*` do.
 fn group_by_color(names: Vec<String>) -> Vec<IconGroup> {
@@ -659,6 +725,18 @@ fn decode_icon_image(data: &[u8]) -> Option<image::DynamicImage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trash_families() {
+        let set = |a: &[(&str, &str)]| a.iter().map(|(n, f)| (n.to_string(), HashSet::from([PathBuf::from(f)]))).collect::<HashMap<_, _>>();
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        let own = set(&[("gnome-stock-trash", "half.svg"), ("gnome-stock-trash-empty", "e.svg"), ("gnome-stock-trash-full", "f.svg")]);
+        assert_eq!(super::trash_set(&own), Some(["gnome-stock-trash-empty".into(), "gnome-stock-trash".into(), "gnome-stock-trash-full".into()]));
+        // Papirus and Win11 here: the bare name is the empty bin again.
+        let linked = set(&[("gnome-stock-trash", "user-trash.svg"), ("gnome-stock-trash-empty", "user-trash.svg"), ("gnome-stock-trash-full", "user-trash-full.svg")]);
+        assert_eq!(super::trash_set(&linked), None);
+    }
+
     #[test]
     #[ignore]
     fn exe_icon_extracts() {

@@ -1,6 +1,9 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Restore", "복원"),
+    ("Restoring", "복원 중"),
+    ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),
     ("Right pane opens where it was", "오른쪽 창을 이전 위치에서 열기"),
     ("The clipboard is empty", "클립보드가 비어 있습니다"),
     ("Launcher", "실행기"),

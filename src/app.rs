@@ -507,6 +507,10 @@ pub enum Cmd {
     TrashAsk,
     DeleteAsk,
     TrashNow(Vec<PathBuf>),
+    /// Put the targets in the trash back where they came from (asking
+    /// first if something is there now).
+    RestoreAsk,
+    Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     DeleteNow(Vec<PathBuf>),
     /// Copy/move with a decided conflict policy.
     Transfer { sources: Vec<Location>, dest: Dest, mv: bool, policy: Conflict },
@@ -1766,9 +1770,14 @@ impl App {
         }
         v.push(place(tr("File system").into(), &["drive-harddisk-root", "drive-harddisk", "folder-root", "folder"], crate::sandbox::root(), "Places", &self.cfg));
         if let Some(t) = trash_files().filter(|t| t.is_dir()) {
-            // A full bin looks full.
-            let icon: &'static [&'static str] = if crate::trashbin::count() > 0 { &["user-trash-full", "user-trash"] } else { &["user-trash", "user-trash-full"] };
-            v.push(place(tr("Trash").into(), icon, t, "Places", &self.cfg));
+            // A full bin looks full; half full, if the theme draws that.
+            let n = crate::trashbin::count();
+            let icon: &'static [&'static str] = if n > 0 { &["user-trash-full", "user-trash"] } else { &["user-trash", "user-trash-full"] };
+            let mut it = place(tr("Trash").into(), icon, t, "Places", &self.cfg);
+            if it.custom_icon.is_none() {
+                it.custom_icon = self.icons.trash_level(trash_level(n));
+            }
+            v.push(it);
         }
         v.push(SideItem {
             label: tr("Terminal").into(),
@@ -2855,6 +2864,9 @@ impl App {
         }
         add(tr("Delete permanently"), Cmd::DeleteAsk, any && editable);
         add(tr("Compress…"), Cmd::CompressAsk, any && local);
+        if p.loc.local_path().is_some_and(crate::trashbin::is_files_dir) {
+            add(tr("Restore"), Cmd::RestoreAsk, any);
+        }
         if p.loc.local_path().is_some() && p.loc.local_path() == trash_files().as_deref() {
             add(tr("Empty trash…"), Cmd::EmptyTrashAsk, !p.entries.is_empty());
         }
@@ -3562,6 +3574,46 @@ impl App {
                 let items = vec![item(tr("Cancel"), Cmd::Nothing), item(if perm { tr("Delete") } else { tr("Move to trash") }, go)];
                 self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
             }
+            Cmd::RestoreAsk => {
+                let mut items = Vec::new();
+                let mut unknown = 0;
+                for from in self.local_targets() {
+                    match crate::trashbin::origin(&from) {
+                        Some(to) => items.push((from, to)),
+                        None => unknown += 1,
+                    }
+                }
+                if unknown > 0 {
+                    self.toast(trn("No record of where it came from: %n", unknown), true);
+                }
+                let clashes: Vec<String> = items
+                    .iter()
+                    .filter(|(_, to)| to.symlink_metadata().is_ok())
+                    .map(|(_, to)| to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                    .collect();
+                if items.is_empty() {
+                } else if clashes.is_empty() {
+                    self.run(Cmd::Restore { items, policy: Conflict::Rename });
+                } else {
+                    let title = if clashes.len() == 1 {
+                        format!("«{}» {}", clashes[0], tr("already exists"))
+                    } else {
+                        trn("%n item(s) already exist", clashes.len())
+                    };
+                    let go = |policy| Cmd::Restore { items: items.clone(), policy };
+                    let choices = vec![
+                        item(tr("Keep both"), go(Conflict::Rename)),
+                        item(tr("Replace"), go(Conflict::Overwrite)),
+                        item(tr("Skip"), go(Conflict::Skip)),
+                        item(tr("Cancel"), Cmd::Nothing),
+                    ];
+                    self.overlay = Some(Overlay::Menu(Menu::new(title, choices)));
+                }
+            }
+            Cmd::Restore { items, policy } => {
+                self.pane_mut().selected.clear();
+                self.start(Op::Restore { items, policy });
+            }
             Cmd::TrashNow(paths) => {
                 self.pane_mut().selected.clear();
                 self.start(Op::Trash { paths });
@@ -3986,11 +4038,15 @@ fn start_location(p: &Path) -> Option<(Location, Option<String>)> {
 
 /// A path from argv, which may be a file:// URI (from .desktop %U).
 pub fn arg_path(arg: &std::ffi::OsStr) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
     let s = arg.to_string_lossy();
     let Some(rest) = s.strip_prefix("file://") else { return PathBuf::from(arg) };
     // Skip an optional host part ("file://localhost/...").
-    let rest = &rest[rest.find('/').unwrap_or(0)..];
+    percent_decoded(&rest[rest.find('/').unwrap_or(0)..])
+}
+
+/// A path with %XX escapes (URIs, .trashinfo files) as it is on disk.
+pub fn percent_decoded(rest: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -4053,6 +4109,19 @@ fn mounts() -> Vec<(String, PathBuf)> {
     }
     out
 }
+
+/// Items in the trash to the look of its icon: 0 empty, 1 half full (a
+/// few), 2 full.
+pub fn trash_level(items: usize) -> usize {
+    match items {
+        0 => 0,
+        1..TRASH_FULL => 1,
+        _ => 2,
+    }
+}
+
+/// From this many items in the trash on, it looks full.
+pub const TRASH_FULL: usize = 10;
 
 /// The home trash's files folder.
 pub fn trash_files() -> Option<PathBuf> {

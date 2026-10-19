@@ -4001,6 +4001,10 @@ fn kde_test_theme(data: &std::path::Path) {
         r#"<svg width="22" height="22" xmlns="http://www.w3.org/2000/svg"><defs><style id="current-color-scheme" type="text/css">.ColorScheme-Text { color:#363636; }</style></defs><rect class="ColorScheme-Text" x="5" y="4" width="12" height="15" fill="currentColor"/></svg>"#,
     )
     .unwrap();
+    // An old GNOME trash family that draws a half-full bin too.
+    for (n, c) in [("gnome-stock-trash-empty", "#3a3"), ("gnome-stock-trash", "#ca3"), ("gnome-stock-trash-full", "#c33")] {
+        std::fs::write(theme.join(format!("places/22/{n}.svg")), format!(r#"<svg width="22" height="22" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="4" width="12" height="15" fill="{c}"/></svg>"#)).unwrap();
+    }
     std::fs::write(theme.join("index.theme"), "[Icon Theme]\nName=PolkaKdeTest\nInherits=hicolor\nDirectories=places/22\n\n[places/22]\nSize=22\nContext=Places\nType=Fixed\n").unwrap();
 }
 
@@ -4388,4 +4392,93 @@ fn spring_screens() {
     button(&mut h, pos2(600.0, 660.0), false);
     settle(&mut h);
     assert!(std::fs::metadata(dir.join("Inbox/report.txt")).is_ok());
+}
+
+/// Out of the trash: back where it came from (a folder made again if it's
+/// gone), asking when something is there now. The bin's icon on a theme
+/// with an empty, a half-full and a full one.
+#[test]
+#[ignore]
+fn trash_restore_screens() {
+    use crate::app::Cmd;
+    use crate::i18n::tr;
+    use crate::vfs::Location;
+    // The trash is the process's own, as is the one other tests empty.
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("restore");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut h = harness(dir.clone());
+    let trash = dirs::data_dir().unwrap().join("Trash");
+    assert!(trash.starts_with(std::env::temp_dir()), "not the test's own trash: {trash:?}");
+    for sub in ["files", "info"] {
+        let _ = std::fs::remove_dir_all(trash.join(sub));
+        std::fs::create_dir_all(trash.join(sub)).unwrap();
+    }
+    // The icon: empty, a few items, many.
+    h.state_mut().cfg.icon_theme = Some("PolkaKdeTest".into());
+    h.state_mut().icons.set_theme(Some("PolkaKdeTest".into()));
+    let bin_icon = |h: &mut Harness<'static, App>| {
+        h.state_mut().refresh_sidebar();
+        let it = h.state().side_items.iter().find(|s| s.label == tr("Trash")).expect("no trash");
+        it.custom_icon.clone()
+    };
+    assert_eq!(bin_icon(&mut h).as_deref(), Some("gnome-stock-trash-empty"));
+    let put = |name: &str, from: &str| {
+        std::fs::write(trash.join("files").join(name), name).unwrap();
+        std::fs::write(trash.join("info").join(format!("{name}.trashinfo")), format!("[Trash Info]\nPath={from}\nDeletionDate=2026-10-19T10:00:00\n")).unwrap();
+    };
+    let enc = |p: &std::path::Path| p.to_string_lossy().replace(' ', "%20");
+    put("my note.txt", &enc(&dir.join("my note.txt")));
+    put("b.txt", &enc(&dir.join("b.txt")));
+    put("c.txt", &enc(&dir.join("gone/c.txt")));
+    assert_eq!(bin_icon(&mut h).as_deref(), Some("gnome-stock-trash"));
+    settle(&mut h);
+    shot(&mut h, "tr0-half-full");
+    for i in 0..crate::app::TRASH_FULL {
+        put(&format!("junk{i}"), &format!("/nowhere/junk{i}"));
+    }
+    assert_eq!(bin_icon(&mut h).as_deref(), Some("gnome-stock-trash-full"));
+    for i in 0..crate::app::TRASH_FULL {
+        let _ = std::fs::remove_file(trash.join(format!("files/junk{i}")));
+        let _ = std::fs::remove_file(trash.join(format!("info/junk{i}.trashinfo")));
+    }
+    // b.txt is back already: restoring asks.
+    std::fs::write(dir.join("b.txt"), "a new one").unwrap();
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().navigate(Location::Local(trash.join("files")), None, &cfg);
+    settle(&mut h);
+    {
+        let p = h.state_mut().pane_mut();
+        for n in ["my note.txt", "b.txt", "c.txt"] {
+            p.selected.insert(n.into());
+        }
+    }
+    h.state_mut().handle(Input::Press(Action::Actions));
+    let items: Vec<String> = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    assert!(items.iter().any(|l| l == tr("Restore")), "{items:?}");
+    h.state_mut().overlay = None;
+    h.state_mut().run(Cmd::RestoreAsk);
+    let (title, labels) = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => (m.title.clone(), m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()),
+        _ => panic!("no question"),
+    };
+    assert!(title.contains("b.txt"), "{title}");
+    assert_eq!(labels, [tr("Keep both"), tr("Replace"), tr("Skip"), tr("Cancel")]);
+    settle(&mut h);
+    shot(&mut h, "tr1-restore-clash");
+    press(&mut h, &[Action::Accept]);
+    wait_jobs(&mut h);
+    assert_eq!(std::fs::read_to_string(dir.join("my note.txt")).unwrap(), "my note.txt");
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "a new one");
+    assert_eq!(std::fs::read_to_string(dir.join("b (2).txt")).unwrap(), "b.txt");
+    assert_eq!(std::fs::read_to_string(dir.join("gone/c.txt")).unwrap(), "c.txt");
+    assert_eq!(std::fs::read_dir(trash.join("files")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(trash.join("info")).unwrap().count(), 0);
+    settle(&mut h);
+    assert_eq!(bin_icon(&mut h).as_deref(), Some("gnome-stock-trash-empty"));
+    shot(&mut h, "tr2-restored");
 }

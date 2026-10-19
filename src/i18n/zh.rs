@@ -1,6 +1,9 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Restore", "还原"),
+    ("Restoring", "正在还原"),
+    ("No record of where it came from: %n", "无法得知原位置：%n"),
     ("Right pane opens where it was", "右侧面板在上次的位置打开"),
     ("The clipboard is empty", "剪贴板为空"),
     ("Launcher", "启动器"),

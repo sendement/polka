@@ -249,6 +249,8 @@ pub enum Op {
     Copy { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Trash { paths: Vec<PathBuf> },
+    /// Out of the trash: (item in it, where it came from).
+    Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     Delete { paths: Vec<PathBuf> },
     Compress { sources: Vec<PathBuf>, out: PathBuf, opts: CompressOpts },
     Extract { archive: PathBuf, dest: PathBuf },
@@ -264,6 +266,11 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             tr("Deleting"),
             touched(&paths.iter().cloned().map(Location::Local).collect::<Vec<_>>(), None),
         ),
+        Op::Restore { items, .. } => {
+            let mut t: Vec<Location> = items.iter().map(|(from, _)| Location::Local(from.clone())).collect();
+            t.extend(items.iter().filter_map(|(_, to)| to.parent()).map(|d| Location::Local(d.to_path_buf())));
+            (tr("Restoring"), t)
+        }
         Op::Compress { out, .. } => {
             (tr("Compressing"), vec![Location::Local(out.parent().unwrap_or(Path::new("/")).into())])
         }
@@ -295,6 +302,10 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         Op::Extract { dest, .. } => name_of(dest),
         Op::ArchiveEdit { archive, .. } => name_of(archive),
         Op::Trash { .. } => tr("Trash").to_string(),
+        Op::Restore { items, .. } => match items.as_slice() {
+            [(_, to)] => to.parent().map(name_of).unwrap_or_default(),
+            _ => String::new(),
+        },
         Op::Delete { .. } | Op::Elevated { .. } => String::new(),
     };
     let job = Arc::new(Job {
@@ -349,6 +360,24 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             job.total.store(paths.len() as u64, Ordering::Relaxed);
             trash::delete_all(&paths).map_err(|e| io::Error::other(e.to_string()))?;
             job.done.store(paths.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+        Op::Restore { items, policy } => {
+            job.total.store(items.iter().map(|(from, _)| tree_size(from)).sum(), Ordering::Relaxed);
+            for (from, to) in items {
+                job.now_on(&to);
+                let (Some(dir), Some(name)) = (to.parent(), to.file_name()) else { continue };
+                // Its folder may have gone since.
+                std::fs::create_dir_all(dir)?;
+                let Some(target) = resolve(dir, &name.to_string_lossy(), policy) else {
+                    job.tick(tree_size(&from))?;
+                    continue;
+                };
+                move_path(&from, &target, job)?;
+                if let Some(info) = crate::trashbin::info_of(&from) {
+                    let _ = std::fs::remove_file(info);
+                }
+            }
             Ok(())
         }
         Op::Delete { paths } => {

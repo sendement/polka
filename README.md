@@ -201,7 +201,11 @@ set is selected whole; an unfolded one volume by volume. Running operations show
 it. Places, pinned folders, **drives** (every partition that isn't the system's, mounted
 or not: ✕ mounts and opens one, △ has Mount / Unmount / Eject through udisks, which asks polkit for
 a password when needed) and tools. △ on any entry chooses its icon (a theme icon or your own
-picture); on the trash it also empties it (after asking).
+picture); on the trash it also empties it (after asking). The trash looks empty, half full (a few
+items) or full, when the icon theme draws all three (`gnome-stock-trash-empty`, `gnome-stock-trash`,
+`gnome-stock-trash-full`); else empty or full. In the trash, △ → Restore puts items back where they
+were (their folder made again if it's gone); if something is there now it asks: keep both, replace
+or skip.
 
 **Languages.** English, Русский, Українська, Deutsch, Español, Français, 中文, 日本語, 한국어 —
 the system's by default (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`), English when it isn't one
