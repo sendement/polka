@@ -1,7 +1,6 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
-    ("No folder colours in this theme", "이 테마에는 폴더 색상이 없습니다"),
     ("Restore", "복원"),
     ("Restoring", "복원 중"),
     ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),

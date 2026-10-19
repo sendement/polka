@@ -1,7 +1,6 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
-    ("No folder colours in this theme", "此主题没有文件夹颜色"),
     ("Restore", "还原"),
     ("Restoring", "正在还原"),
     ("No record of where it came from: %n", "无法得知原位置：%n"),

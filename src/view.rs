@@ -2241,15 +2241,12 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
             let theme = t.preview[t.cursor].clone();
             ui.label(egui::RichText::new(&t.items[t.cursor].1).weak());
             ui.add_space(4.0);
-            // Folder colours, where the theme comes in several (L1/R1). The
-            // room is kept for every theme, so the window keeps its size.
+            // Folder colours, where the theme comes in several. The column
+            // keeps its height either way, so the window keeps its size.
             let colors = icons.folder_colors(&theme);
             t.colors = colors.clone();
-            let (room, _) = ui.allocate_exact_size(vec2(crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0, THEME_CHIPS_H), Sense::hover());
-            if colors.is_empty() {
-                let c = ui.visuals().weak_text_color();
-                ui.painter().text(room.center(), Align2::CENTER_CENTER, tr("No folder colours in this theme"), FontId::proportional(13.0), c);
-            } else {
+            if !colors.is_empty() {
+                let (room, _) = ui.allocate_exact_size(vec2(crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0, THEME_CHIPS_H), Sense::hover());
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(Align::Min).with_main_wrap(true)));
                 let ui = &mut ui;
                 {
