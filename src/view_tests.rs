@@ -4567,16 +4567,50 @@ fn folder_color_screens() {
         _ => unreachable!(),
     };
     let green = colors.iter().position(|c| c == "green").expect("no green") + 1;
+    // The pad: → into the colours, along to green; ○ back to the themes
+    // with the colour kept.
+    press(&mut h, &[Action::Right]);
     for _ in 0..green {
-        press(&mut h, &[Action::NextTab]);
+        press(&mut h, &[Action::Right]);
     }
-    match &h.state().overlay {
-        Some(Overlay::Themes(t)) => assert_eq!(t.color.as_deref(), Some("green")),
-        _ => unreachable!(),
-    }
+    let picked = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Themes(t)) => (t.color.clone(), t.in_colors, t.cursor),
+        _ => panic!("picker closed"),
+    };
+    assert_eq!(picked(&h), (Some("green".into()), true, at));
+    settle(&mut h);
+    shot(&mut h, "fc0b-pad-in-colours");
+    press(&mut h, &[Action::Back]);
+    assert_eq!(picked(&h), (Some("green".into()), false, at));
     settle(&mut h);
     shot(&mut h, "fc0-theme-green");
-    press(&mut h, &[Action::Accept]);
+    // Only a preview so far.
+    assert_eq!(h.state().cfg.folder_color, None);
+    assert!(h.state().overlay.is_some());
+    // Cancel leaves everything as it was.
+    {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_role_and_label(egui::accesskit::Role::Button, crate::i18n::tr("Cancel")).click();
+    }
+    settle(&mut h);
+    assert!(h.state().overlay.is_none());
+    assert_eq!(h.state().cfg.folder_color, None);
+    assert!(!h.state_mut().icons.named(&["folder"], 64).unwrap().contains("green"));
+    // Again, and Apply (the mouse's way).
+    h.state_mut().run(Cmd::IconThemes);
+    if let Some(Overlay::Themes(t)) = h.state_mut().overlay.as_mut() {
+        t.cursor = at;
+    }
+    if let Some(Overlay::Themes(t)) = h.state_mut().overlay.as_mut() {
+        t.color = Some("green".into());
+    }
+    settle(&mut h);
+    {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_role_and_label(egui::accesskit::Role::Button, crate::i18n::tr("OK")).click();
+    }
+    settle(&mut h);
+    assert!(h.state().overlay.is_none());
     assert_eq!(h.state().cfg.folder_color.as_deref(), Some("green"));
     let u = h.state_mut().icons.named(&["folder"], 64).unwrap();
     assert!(u.contains("folder-green"), "{u}");

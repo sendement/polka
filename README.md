@@ -215,8 +215,10 @@ of these; Settings → Language switches on the fly. CJK text needs a CJK font (
 
 **Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
 live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along. Themes
-whose folders come in colours (Papirus) offer them in the icon theme picker (L1 / R1, or a click):
-folders, home and desktop take that colour in Polka only, the theme itself is left as it is.
+whose folders come in colours (Papirus) offer them in the icon theme picker: on the pad → goes
+over to the colours (○ back to the themes, ✕ applies); with the mouse a click picks and OK applies.
+Nothing changes before that, the preview shows the pick. Folders, home and desktop take the colour
+in Polka only; the theme itself is left as it is.
 
 ## Install
 

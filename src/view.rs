@@ -762,12 +762,15 @@ impl App {
                 (Action::Menu, tr("Create")),
                 (Action::Back, tr("Cancel")),
             ],
-            Some(Overlay::Themes(t)) if !t.colors.is_empty() => vec![
-                (Action::Up, tr("Move")),
-                (Action::PrevTab, tr("Color")),
-                (Action::Accept, tr("OK")),
-                (Action::Back, tr("Cancel")),
-            ],
+            Some(Overlay::Themes(t)) if t.in_colors => vec![(Action::Up, tr("Color")), (Action::Accept, tr("OK")), (Action::Back, tr("Back"))],
+            Some(Overlay::Themes(t)) => {
+                let mut v = vec![(Action::Up, tr("Move"))];
+                if !t.colors.is_empty() {
+                    v.push((Action::Right, tr("Color")));
+                }
+                v.extend([(Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]);
+                v
+            }
             Some(Overlay::IconPicker(_)) => vec![
                 (Action::PrevTab, tr("Color")),
                 (Action::Accept, tr("OK")),
@@ -2185,6 +2188,8 @@ const THEME_SAMPLES: [(&str, &[&str]); 16] = [
 /// Room for three rows of folder colours (Papirus has 28) in the theme picker.
 const THEME_CHIPS_H: f32 = 3.0 * 33.0 + 6.0;
 
+/// Nothing changes until Apply (or a double click): the preview shows the
+/// pick first.
 fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) -> Option<Cmd> {
     let mut run = None;
     ui.label(egui::RichText::new(tr("Icon theme")).strong().size(18.0));
@@ -2198,14 +2203,16 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (i, (id, label)) in t.items.iter().enumerate() {
                     let (rect, r) = ui.allocate_exact_size(vec2(240.0, 34.0), Sense::click());
-                    if r.hovered() && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
-                        t.cursor = i;
-                    }
                     let cur = i == t.cursor;
                     let v = ui.visuals();
-                    if cur {
+                    if cur && t.in_colors {
+                        // The pad is over in the colours: the theme stays marked.
+                        ui.painter().rect_filled(rect, 6.0, tint(&v, 0.3));
+                    } else if cur {
                         ui.painter().rect_filled(rect, 6.0, tint(&v, 0.55));
                         ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
+                    } else if r.hovered() {
+                        ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill);
                     }
                     // Each row shows its own folder icon.
                     let ir = Rect::from_min_size(rect.min + vec2(8.0, 5.0), Vec2::splat(24.0));
@@ -2217,8 +2224,10 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                     if scroll_to == Some(i) {
                         r.scroll_to_me(None);
                     }
-                    if r.clicked() {
+                    if r.double_clicked() {
                         run = Some(Cmd::SetIconLook(id.clone(), t.color.clone()));
+                    } else if r.clicked() {
+                        t.cursor = i;
                     }
                 }
             });
@@ -2236,7 +2245,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
             // room is kept for every theme, so the window keeps its size.
             let colors = icons.folder_colors(&theme);
             t.colors = colors.clone();
-            let (room, _) = ui.allocate_exact_size(vec2(4.0 * 84.0, THEME_CHIPS_H), Sense::hover());
+            let (room, _) = ui.allocate_exact_size(vec2(crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0, THEME_CHIPS_H), Sense::hover());
             if colors.is_empty() {
                 let c = ui.visuals().weak_text_color();
                 ui.painter().text(room.center(), Align2::CENTER_CENTER, tr("No folder colours in this theme"), FontId::proportional(13.0), c);
@@ -2249,7 +2258,9 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                         let (rect, r) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
                         let on = t.color.as_ref() == c;
                         let v = ui.visuals();
-                        if on {
+                        if on && t.in_colors {
+                            ui.painter().rect(rect, 6.0, tint(v, 0.55), Stroke::new(2.5, v.strong_text_color()), StrokeKind::Inside);
+                        } else if on {
                             ui.painter().rect(rect, 6.0, tint(v, 0.4), Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
                         } else if r.hovered() {
                             ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill);
@@ -2261,7 +2272,6 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                         let r = r.on_hover_text(c.cloned().unwrap_or_else(|| tr("Standard").to_string()));
                         if r.clicked() {
                             t.color = c.cloned();
-                            run = Some(Cmd::SetIconLook(t.items[t.cursor].0.clone(), t.color.clone()));
                         }
                     }
                 }
@@ -2284,6 +2294,17 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
         });
     });
     ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+            // For the mouse; the pad has its keys in the hints below.
+            if ui.button(tr("Cancel")).clicked() {
+                run = Some(Cmd::Nothing);
+            }
+            if ui.button(egui::RichText::new(tr("OK")).strong()).clicked() {
+                run = Some(Cmd::SetIconLook(t.items[t.cursor].0.clone(), t.color.clone()));
+            }
+        });
+    });
     run
 }
 

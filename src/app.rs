@@ -1157,9 +1157,14 @@ pub struct ThemePicker {
     pub color: Option<String>,
     /// The colours the highlighted theme has (last frame), for the hints.
     pub colors: Vec<String>,
+    /// The pad is in the colours rather than the list of themes.
+    pub in_colors: bool,
 }
 
 impl ThemePicker {
+    /// Colours a row of the picker holds (the drawing wraps at as many).
+    pub const COLOR_COLS: usize = 10;
+
     /// The cursor row, once per cursor change, for scrolling it into view.
     pub fn take_scroll(&mut self) -> Option<usize> {
         (self.scrolled != Some(self.cursor)).then(|| {
@@ -2286,19 +2291,45 @@ impl App {
                 Action::Menu | Action::RightTrigger => self.osk_key(OskKey::Ok),
                 _ => {}
             },
+            // The pad: → over to the highlighted theme's folder colours,
+            // ○ back to the themes; ✕ applies from either.
+            Overlay::Themes(t) if t.in_colors => {
+                let colors = self.icons.folder_colors(&t.preview[t.cursor]);
+                let all: Vec<Option<String>> = std::iter::once(None).chain(colors.into_iter().map(Some)).collect();
+                let at = all.iter().position(|c| *c == t.color).unwrap_or(0) as isize;
+                let row = ThemePicker::COLOR_COLS as isize;
+                let to = match a {
+                    Action::Left if at % row == 0 => {
+                        t.in_colors = false;
+                        return;
+                    }
+                    Action::Left => at - 1,
+                    Action::Right => at + 1,
+                    Action::Up => at - row,
+                    Action::Down => at + row,
+                    Action::Back => {
+                        t.in_colors = false;
+                        return;
+                    }
+                    Action::Accept => {
+                        let (id, color) = (t.items[t.cursor].0.clone(), t.color.clone());
+                        self.overlay = None;
+                        return self.run(Cmd::SetIconLook(id, color));
+                    }
+                    Action::Menu => {
+                        self.overlay = None;
+                        return;
+                    }
+                    _ => return,
+                };
+                t.color = all[to.clamp(0, all.len() as isize - 1) as usize].clone();
+            }
             Overlay::Themes(t) => match a {
                 Action::Up => t.cursor = t.cursor.saturating_sub(1),
                 Action::Down => t.cursor = (t.cursor + 1).min(t.items.len().saturating_sub(1)),
                 Action::LeftTrigger => t.cursor = t.cursor.saturating_sub(8),
                 Action::RightTrigger => t.cursor = (t.cursor + 8).min(t.items.len().saturating_sub(1)),
-                // The folder colour, among those the highlighted theme has.
-                Action::PrevTab | Action::NextTab => {
-                    let colors = self.icons.folder_colors(&t.preview[t.cursor]);
-                    let all: Vec<Option<String>> = std::iter::once(None).chain(colors.into_iter().map(Some)).collect();
-                    let at = all.iter().position(|c| *c == t.color).unwrap_or(0) as isize;
-                    let d = if a == Action::NextTab { 1 } else { -1 };
-                    t.color = all[(at + d).rem_euclid(all.len() as isize) as usize].clone();
-                }
+                Action::Right => t.in_colors = !self.icons.folder_colors(&t.preview[t.cursor]).is_empty(),
                 Action::Accept => {
                     let (id, color) = (t.items[t.cursor].0.clone(), t.color.clone());
                     self.overlay = None;
@@ -4032,7 +4063,7 @@ impl App {
                 }
                 let cursor = items.iter().position(|(id, _)| *id == self.cfg.icon_theme).unwrap_or(0);
                 let color = self.cfg.folder_color.clone();
-                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new() }));
+                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new(), in_colors: false }));
             }
             Cmd::SetIconLook(id, color) => {
                 self.icons.folder_color = color.clone();
