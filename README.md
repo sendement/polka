@@ -195,7 +195,9 @@ moment (at once while dragging) widens to show the whole path. Files dragged in 
 the same way, and items pulled out of the window go to other programs (Wayland; X11 takes drops
 into the panel). A folded multi-volume
 set is selected whole; an unfolded one volume by volume. Running operations show a progress card
-(item, amount, speed, time left, cancel; also App menu → Cancel operations).
+(item, amount, speed, time left, cancel; also App menu → Cancel operations). Folders on screen follow
+changes made by other programs (looked at every couple of seconds): what's added or removed shows
+up, the cursor and selection stay put.
 
 **Sidebar.** ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to
 it. Places, pinned folders, **drives** (every partition that isn't the system's, mounted

@@ -4259,7 +4259,8 @@ fn dual_tabs_screens() {
 fn spring_screens() {
     use crate::vfs::Location;
     use egui::{Event, PointerButton, Pos2, pos2, vec2};
-    let _shared = GLOBALS.read().unwrap_or_else(|e| e.into_inner());
+    // Dual mode gets saved: others must not start meanwhile.
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
     let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("spring");
     let _ = std::fs::remove_dir_all(&dir);
     let deep = dir.join("Projects/alpha/src/module");
@@ -4481,4 +4482,59 @@ fn trash_restore_screens() {
     settle(&mut h);
     assert_eq!(bin_icon(&mut h).as_deref(), Some("gnome-stock-trash-empty"));
     shot(&mut h, "tr2-restored");
+}
+
+/// Changes made by other programs show up on their own: a file added, the
+/// one under the cursor removed (the cursor keeps its place), the
+/// selection kept; the trash's look follows it too.
+#[test]
+#[ignore]
+fn outside_change_screens() {
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("outside");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for n in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(dir.join(n), n).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+    let wait = |h: &mut Harness<'static, App>| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while std::time::Instant::now() < end {
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    h.state_mut().pane_mut().cursor = 2;
+    h.state_mut().pane_mut().selected.insert("a.txt".into());
+    // The stamp has a coarse clock on some filesystems: be sure it moves.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(dir.join("aa.txt"), "new").unwrap();
+    wait(&mut h);
+    assert_eq!(names(&h), ["a.txt", "aa.txt", "b.txt", "c.txt", "d.txt"]);
+    assert_eq!(h.state().pane().current().unwrap().name, "c.txt", "the cursor left its item");
+    assert!(h.state().pane().selected.contains("a.txt"));
+    shot(&mut h, "oc0-added");
+    // The item under the cursor goes: the cursor stays in its place.
+    std::fs::remove_file(dir.join("c.txt")).unwrap();
+    wait(&mut h);
+    assert_eq!(names(&h), ["a.txt", "aa.txt", "b.txt", "d.txt"]);
+    assert_eq!(h.state().pane().cursor, 3);
+    assert!(h.state().pane().selected.contains("a.txt"));
+    // Something put in the trash elsewhere: its icon fills.
+    let trash = dirs::data_dir().unwrap().join("Trash");
+    assert!(trash.starts_with(std::env::temp_dir()));
+    for sub in ["files", "info"] {
+        let _ = std::fs::remove_dir_all(trash.join(sub));
+        std::fs::create_dir_all(trash.join(sub)).unwrap();
+    }
+    wait(&mut h);
+    let bin = |h: &Harness<'static, App>| h.state().side_items.iter().find(|s| s.label == crate::i18n::tr("Trash")).unwrap().icon[0];
+    assert_eq!(bin(&h), "user-trash");
+    std::fs::write(trash.join("files/x"), "x").unwrap();
+    wait(&mut h);
+    assert_eq!(bin(&h), "user-trash-full");
+    let _ = std::fs::remove_file(trash.join("files/x"));
 }

@@ -64,6 +64,14 @@ pub struct Pane {
     pub expanded: Vec<String>,
     /// Collapsed sets on screen: head entry name → (set, total size, names).
     pub collapsed: HashMap<String, (crate::volumes::Member, u64, Vec<String>)>,
+    /// The folder's modification time when listed: another program adding,
+    /// removing or renaming something in it changes that.
+    pub stamp: Option<std::time::SystemTime>,
+}
+
+/// A folder's modification time (None: it isn't there).
+pub fn dir_stamp(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).ok()?.modified().ok()
 }
 
 impl Pane {
@@ -96,6 +104,7 @@ impl Pane {
             collapse: cfg.collapse_volumes,
             expanded: Vec::new(),
             collapsed: HashMap::new(),
+            stamp: None,
         };
         p.load(loc, None, cfg);
         p
@@ -180,6 +189,8 @@ impl Pane {
         self.expanded.clear();
         self.selected.clear();
         self.error = None;
+        // Taken before listing: a change meanwhile shows up next time.
+        self.stamp = loc.local_path().and_then(dir_stamp);
         if !matches!(loc, Location::Local(_)) {
             // Archive indexing can take a while (tar has no index), and so
             // can searching, so they run off the UI thread.
@@ -298,6 +309,30 @@ impl Pane {
             self.filter = f;
             self.refilter(None);
         }
+    }
+
+    /// Changed on disk since it was listed (a real folder only).
+    pub fn stale(&self) -> bool {
+        matches!(&self.loc, Location::Local(p) if self.loading.is_none() && dir_stamp(p) != self.stamp)
+    }
+
+    /// List it again quietly, after a change from outside: the cursor stays
+    /// on its item (or in its place, if that went), and so do the
+    /// selection, open volume sets and the scrolling.
+    pub fn refresh(&mut self, cfg: &Config) {
+        let Location::Local(p) = &self.loc else { return };
+        self.stamp = dir_stamp(p);
+        let r = vfs::list(&self.loc);
+        let (cursor, scroll) = (self.cursor, self.scroll_to_cursor);
+        let keep = std::mem::take(&mut self.selected);
+        let focus = self.current().map(|e| e.name.clone());
+        self.apply(r, focus.clone(), cfg);
+        let names: HashSet<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+        self.selected = keep.into_iter().filter(|n| names.contains(n.as_str())).collect();
+        if focus.is_none_or(|n| !names.contains(n.as_str())) {
+            self.cursor = cursor.min(self.entries.len().saturating_sub(1));
+        }
+        self.scroll_to_cursor = scroll;
     }
 
     /// Re-list the current location, keeping cursor and selection.
@@ -1204,6 +1239,11 @@ pub struct App {
     pub side_cursor: usize,
     pub side_items: Vec<SideItem>,
     side_refreshed: Instant,
+    /// Folders on screen (and the trash) with their stamps, for the thread
+    /// that wakes the window when one changes; when they were last checked.
+    watched: Arc<std::sync::Mutex<Vec<(PathBuf, Option<std::time::SystemTime>)>>>,
+    watch_checked: Instant,
+    trash_stamp: Option<std::time::SystemTime>,
     pub overlay: Option<Overlay>,
     pub icons: Icons,
     pub pad_rx: Receiver<Input>,
@@ -1333,6 +1373,9 @@ impl App {
             side_cursor: 0,
             side_items: Vec::new(),
             side_refreshed: Instant::now(),
+            watched: Default::default(),
+            watch_checked: Instant::now(),
+            trash_stamp: None,
             overlay: None,
             icons,
             pad_rx,
@@ -1381,7 +1424,59 @@ impl App {
             templates: Vec::new(),
         };
         app.refresh_sidebar();
+        app.watch();
         app
+    }
+
+    /// Look at the folders on screen every couple of seconds; wake the
+    /// window only when one changed (an idle window draws nothing).
+    fn watch(&self) {
+        let watched = self.watched.clone();
+        let wake = self.wake();
+        let _ = std::thread::Builder::new().name("polka-watch".into()).spawn(move || {
+            loop {
+                std::thread::sleep(WATCH_EVERY);
+                // The window is gone (tests make many).
+                if Arc::strong_count(&watched) == 1 {
+                    return;
+                }
+                let list = watched.lock().map(|l| l.clone()).unwrap_or_default();
+                if list.iter().any(|(p, stamp)| dir_stamp(p) != *stamp) {
+                    wake();
+                }
+            }
+        });
+    }
+
+    /// Changes from outside: the folders shown listed again, the trash's
+    /// look brought up to date; and what the thread watches now.
+    fn check_folders(&mut self) {
+        if self.watch_checked.elapsed() < Duration::from_secs(1) {
+            return;
+        }
+        self.watch_checked = Instant::now();
+        let sides: &[usize] = if self.cfg.dual { &[0, 1] } else { &[0] };
+        // Not under a held button: a selection rectangle or a drag.
+        if !self.ctx.input(|i| i.pointer.any_down()) {
+            let cfg = self.cfg.clone();
+            for &s in sides {
+                if self.pane_at(s).stale() {
+                    self.pane_at_mut(s).refresh(&cfg);
+                }
+            }
+        }
+        let trash = trash_files();
+        let ts = trash.as_deref().and_then(dir_stamp);
+        if ts != self.trash_stamp {
+            self.trash_stamp = ts;
+            self.refresh_sidebar();
+        }
+        let mut list: Vec<(PathBuf, Option<std::time::SystemTime>)> =
+            sides.iter().filter_map(|&s| self.pane_at(s).loc.local_path().map(|p| (p.to_path_buf(), self.pane_at(s).stamp))).collect();
+        list.extend(trash.map(|t| (t, ts)));
+        if let Ok(mut w) = self.watched.lock() {
+            *w = list;
+        }
     }
 
     pub fn cur_tab(&self) -> &Tab {
@@ -1679,6 +1774,7 @@ impl App {
         if self.side_refreshed.elapsed() > Duration::from_secs(3) {
             self.refresh_sidebar();
         }
+        self.check_folders();
         if let Some((_, _, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(4) {
                 self.toast = None;
@@ -4122,6 +4218,9 @@ pub fn trash_level(items: usize) -> usize {
 
 /// From this many items in the trash on, it looks full.
 pub const TRASH_FULL: usize = 10;
+
+/// How often the folders on screen are looked at for outside changes.
+pub const WATCH_EVERY: Duration = Duration::from_secs(2);
 
 /// The home trash's files folder.
 pub fn trash_files() -> Option<PathBuf> {
