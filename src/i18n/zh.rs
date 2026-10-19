@@ -1,6 +1,15 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Your own schemes (JSON)", "自定义方案（JSON）"),
+    ("Color scheme", "配色方案"),
+    ("New Year", "新年"),
+    ("Christmas", "圣诞节"),
+    ("Lunar New Year", "农历新年"),
+    ("Valentine's Day", "情人节"),
+    ("St. Patrick's Day", "圣帕特里克节"),
+    ("Easter", "复活节"),
+    ("Halloween", "万圣节"),
     ("Restore", "还原"),
     ("Restoring", "正在还原"),
     ("No record of where it came from: %n", "无法得知原位置：%n"),

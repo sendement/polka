@@ -1,6 +1,15 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Your own schemes (JSON)", "내 색 구성표 (JSON)"),
+    ("Color scheme", "색 구성표"),
+    ("New Year", "새해"),
+    ("Christmas", "크리스마스"),
+    ("Lunar New Year", "설날"),
+    ("Valentine's Day", "밸런타인데이"),
+    ("St. Patrick's Day", "성 패트릭의 날"),
+    ("Easter", "부활절"),
+    ("Halloween", "핼러윈"),
     ("Restore", "복원"),
     ("Restoring", "복원 중"),
     ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),

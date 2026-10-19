@@ -1,6 +1,15 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("Your own schemes (JSON)", "Eigene Schemata (JSON)"),
+    ("Color scheme", "Farbschema"),
+    ("New Year", "Neujahr"),
+    ("Christmas", "Weihnachten"),
+    ("Lunar New Year", "Mondneujahr"),
+    ("Valentine's Day", "Valentinstag"),
+    ("St. Patrick's Day", "St. Patrick's Day"),
+    ("Easter", "Ostern"),
+    ("Halloween", "Halloween"),
     ("Restore", "Wiederherstellen"),
     ("Restoring", "Wiederherstellung"),
     ("No record of where it came from: %n", "Herkunft unbekannt: %n"),

@@ -220,6 +220,31 @@ over to the colours (○ back to the themes, ✕ applies); with the mouse a clic
 Nothing changes before that, the preview shows the pick. Folders, home and desktop take the colour
 in Polka only; the theme itself is left as it is.
 
+**Colour schemes.** Settings → Color scheme (‹ ›, or ← → on the pad): Standard (dark or light, as
+set above), the classics — Nord, Dracula, Gruvbox Dark / Light, Solarized Dark / Light, Catppuccin
+Mocha / Latte, Tokyo Night, One Dark, Monokai, Rosé Pine — and some for the holidays: New Year,
+Christmas, Lunar New Year, Valentine's Day, St. Patrick's Day, Easter, Halloween. A scheme brings its
+own highlight unless you picked one. Your own go in `~/.config/polka/schemes/` as JSON files (the
+folder button on that row, or △, opens it, with an example to rename):
+
+```json
+{
+  "name": "My scheme",
+  "dark": true,
+  "background": "#1e1e2e",
+  "surface": "#313244",
+  "field": "#181825",
+  "text": "#cdd6f4",
+  "border": "#45475a",
+  "accent": "#cba6f7"
+}
+```
+
+`background`, `surface` (buttons) and `text` are needed; `field` (text fields), `border`, `accent`
+and `dark` follow from them when left out. In the Flatpak the folder is
+`~/.var/app/io.github.sendement.Polka/config/polka/schemes/`. Files are read again each time the
+settings open.
+
 ## Install
 
 From the [releases](https://github.com/sendement/polka/releases):

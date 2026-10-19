@@ -1,6 +1,15 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("Your own schemes (JSON)", "Власні схеми (JSON)"),
+    ("Color scheme", "Колірна схема"),
+    ("New Year", "Новий рік"),
+    ("Christmas", "Різдво"),
+    ("Lunar New Year", "Місячний Новий рік"),
+    ("Valentine's Day", "День святого Валентина"),
+    ("St. Patrick's Day", "День святого Патрика"),
+    ("Easter", "Великдень"),
+    ("Halloween", "Гелловін"),
     ("Restore", "Відновити"),
     ("Restoring", "Відновлення"),
     ("No record of where it came from: %n", "Невідомо, звідки видалено: %n"),

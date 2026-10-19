@@ -119,7 +119,7 @@ impl App {
     }
 
     pub fn tick_terminal(&mut self) {
-        let dark = self.dark_applied.unwrap_or(true);
+        let dark = self.dark_applied.as_ref().is_none_or(|d| d.0);
         let scheme = super::scheme::resolve(&self.cfg.terminal.scheme, dark);
         let mut outs = Vec::new();
         let mut held = None;

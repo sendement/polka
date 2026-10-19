@@ -4626,3 +4626,55 @@ fn folder_color_screens() {
     assert!(!h.state_mut().icons.named(&["folder"], 64).unwrap().contains("green"));
     h.state_mut().run(Cmd::SetIconTheme(None));
 }
+
+/// Polka's own colour schemes: stepping through them in the settings, a
+/// few shot whole, the folder for one's own (with an example) and one
+/// read from there.
+#[test]
+#[ignore]
+fn scheme_screens() {
+    use crate::app::{Cmd, row};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir.clone());
+    let own = crate::schemes::dir().unwrap();
+    assert!(own.starts_with(std::env::temp_dir()), "not the test's config: {own:?}");
+    let _ = std::fs::remove_dir_all(&own);
+    // The folder: made, with an example that isn't picked up as it is.
+    h.state_mut().run(Cmd::SchemesFolder);
+    settle(&mut h);
+    assert!(own.join("example.json.off").exists());
+    assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(own.clone()));
+    std::fs::write(own.join("mine.json"), r##"{"name": "Mine", "background": "#202830", "surface": "#34404c", "text": "#e0f0ff", "accent": "#ff9040"}"##).unwrap();
+    h.state_mut().run(Cmd::CloseTab);
+    // Opening the settings reads them again.
+    h.state_mut().run(Cmd::Settings);
+    let ids: Vec<String> = h.state().schemes.iter().map(|s| s.id.clone()).collect();
+    assert!(ids.contains(&"file:mine".to_string()) && !ids.iter().any(|i| i.contains("example")), "{ids:?}");
+    if let Some(crate::app::Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.row = row::SCHEME;
+    }
+    press(&mut h, &[Action::Right]);
+    assert_eq!(h.state().cfg.scheme.as_deref(), Some("nord"));
+    settle(&mut h);
+    let panel = |h: &Harness<'static, App>| h.state().ctx.global_style().visuals.panel_fill;
+    assert_eq!(panel(&h), egui::Color32::from_rgb(0x2e, 0x34, 0x40));
+    shot(&mut h, "sc0-settings-nord");
+    press(&mut h, &[Action::Back]);
+    for id in ["gruvbox-light", "new-year", "halloween", "easter", "file:mine"] {
+        h.state_mut().cfg.scheme = Some(id.into());
+        h.state_mut().apply_appearance();
+        settle(&mut h);
+        let s = h.state().schemes.iter().find(|s| s.id == id).unwrap().clone();
+        assert_eq!(panel(&h), s.background, "{id}");
+        assert_eq!(h.state().ctx.global_style().visuals.dark_mode, s.dark, "{id}");
+        // The highlight is the scheme's unless one was picked.
+        assert_eq!(h.state().ctx.global_style().visuals.selection.bg_fill, s.accent, "{id}");
+        shot(&mut h, &format!("sc1-{}", id.replace("file:", "own-")));
+    }
+    // Back to the standard look.
+    h.state_mut().cfg.scheme = None;
+    h.state_mut().apply_appearance();
+    settle(&mut h);
+    assert_eq!(panel(&h), egui::Visuals::dark().panel_fill);
+}

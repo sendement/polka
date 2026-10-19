@@ -608,6 +608,9 @@ pub enum Cmd {
     SetIconTheme(Option<String>),
     /// A theme and the colour of its folders (the theme picker).
     SetIconLook(Option<String>, Option<String>),
+    /// The folder for one's own colour schemes, in a new tab (made, with an
+    /// example, the first time).
+    SchemesFolder,
     Settings,
     ChooseIcon(PathBuf),
     SetPinIconFile { folder: PathBuf, image: PathBuf },
@@ -1064,21 +1067,22 @@ pub const SETTINGS_ROWS: usize = row::CLOSE + 1;
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
-    pub const LANGUAGE: usize = 2;
-    pub const SIDE_ICON: usize = 3;
-    pub const LIST_ICON: usize = 4;
-    pub const GRID_ICON: usize = 5;
-    pub const ZOOM: usize = 6;
-    pub const THEME: usize = 7;
-    pub const OPEN_IN: usize = 8;
-    pub const VOLUMES: usize = 9;
-    pub const WEB_IMAGES: usize = 10;
+    pub const SCHEME: usize = 2;
+    pub const LANGUAGE: usize = 3;
+    pub const SIDE_ICON: usize = 4;
+    pub const LIST_ICON: usize = 5;
+    pub const GRID_ICON: usize = 6;
+    pub const ZOOM: usize = 7;
+    pub const THEME: usize = 8;
+    pub const OPEN_IN: usize = 9;
+    pub const VOLUMES: usize = 10;
+    pub const WEB_IMAGES: usize = 11;
     // In the order they're drawn: ↓ goes to the next number.
-    pub const LAYOUTS: usize = 11;
-    pub const INSTALL: usize = 12;
-    pub const PASSWORDS: usize = 13;
-    pub const REMEMBER_RIGHT: usize = 14;
-    pub const CLOSE: usize = 15;
+    pub const LAYOUTS: usize = 12;
+    pub const INSTALL: usize = 13;
+    pub const PASSWORDS: usize = 14;
+    pub const REMEMBER_RIGHT: usize = 15;
+    pub const CLOSE: usize = 16;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1323,7 +1327,10 @@ pub struct App {
     /// A drop's release is on its way to egui (keep the drag till then).
     pub dnd_release: Option<Instant>,
     /// Light/dark last set on the context.
-    pub dark_applied: Option<bool>,
+    /// The look in effect: dark or not, and the colour scheme.
+    pub dark_applied: Option<(bool, Option<String>)>,
+    /// Colour schemes to choose from (read again with the settings).
+    pub schemes: Vec<crate::schemes::Scheme>,
     /// When the last frame began (frames are paced by hand: see main.rs).
     pub last_frame: Option<Instant>,
     /// Running in gamescope (the game mode): its X11 scale, worked out from
@@ -1414,6 +1421,7 @@ impl App {
             sudo_pw: None,
             sys_clip: None,
             dark_applied: None,
+            schemes: crate::schemes::all(),
             last_frame: None,
             addr_hover: None,
             spring: None,
@@ -1541,10 +1549,27 @@ impl App {
     }
 
     /// Light or dark as chosen (or as the desktop is, which may change).
+    /// The chosen colour scheme, if it's there.
+    pub fn scheme(&self) -> Option<&crate::schemes::Scheme> {
+        self.cfg.scheme.as_ref().and_then(|id| self.schemes.iter().find(|s| s.id == *id))
+    }
+
     pub fn apply_appearance(&mut self) {
-        let dark = crate::appearance::is_dark(self.cfg.appearance);
-        if self.dark_applied != Some(dark) {
-            self.dark_applied = Some(dark);
+        let scheme = self.scheme().cloned();
+        // A scheme is dark or light of itself; else the setting (or the
+        // desktop) decides.
+        let dark = scheme.as_ref().map_or_else(|| crate::appearance::is_dark(self.cfg.appearance), |s| s.dark);
+        let key = (dark, scheme.as_ref().map(|s| s.id.clone()));
+        if self.dark_applied.as_ref() != Some(&key) {
+            self.dark_applied = Some(key);
+            match &scheme {
+                Some(s) => self.ctx.set_visuals_of(if dark { egui::Theme::Dark } else { egui::Theme::Light }, s.visuals()),
+                None => {
+                    self.ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+                    self.ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+                }
+            }
+            crate::schemes::set_default_accent(scheme.as_ref().map(|s| s.accent));
             self.ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
             self.icons.set_dark(dark);
             let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
@@ -3248,12 +3273,13 @@ impl App {
                         };
                         self.settings_toggle_layout(i);
                     }
-                    row::APPEARANCE | row::LANGUAGE => self.settings_step(row, 1.0),
+                    row::APPEARANCE | row::SCHEME | row::LANGUAGE => self.settings_step(row, 1.0),
                     row::CLOSE => self.overlay = None,
                     _ => {}
                 }
             }
             // Delete a saved colour.
+            Action::Actions if st.row == row::SCHEME => self.run(Cmd::SchemesFolder),
             Action::Actions if st.row == row::ACCENT => {
                 let i = st.swatch;
                 let first_custom = crate::config::ACCENT_PRESETS.len();
@@ -3398,6 +3424,15 @@ impl App {
                 self.cfg.save();
                 crate::i18n::set(self.cfg.language.as_deref());
                 self.refresh_sidebar();
+            }
+            row::SCHEME => {
+                // The standard look, then each scheme.
+                let n = self.schemes.len() as isize + 1;
+                let at = self.scheme().and_then(|s| self.schemes.iter().position(|x| x.id == s.id)).map_or(0, |i| i as isize + 1);
+                let next = (at + d as isize).rem_euclid(n);
+                self.cfg.scheme = (next > 0).then(|| self.schemes[next as usize - 1].id.clone());
+                self.cfg.save();
+                self.apply_appearance();
             }
             row::APPEARANCE => {
                 self.cfg.appearance = (self.cfg.appearance as isize + d as isize).rem_euclid(3) as u8;
@@ -4049,6 +4084,10 @@ impl App {
                 self.refresh_sidebar();
             }
             Cmd::Settings => {
+                // Schemes added or edited meanwhile show up.
+                self.schemes = crate::schemes::all();
+                self.dark_applied = None;
+                self.apply_appearance();
                 let sw = swatches(&self.cfg);
                 let swatch = sw.iter().position(|c| *c == self.cfg.accent).unwrap_or(0);
                 self.overlay = Some(Overlay::Settings(Settings { row: 0, chip: 0, layout_chip: 0, swatch, editor: None }));
@@ -4064,6 +4103,15 @@ impl App {
                 let cursor = items.iter().position(|(id, _)| *id == self.cfg.icon_theme).unwrap_or(0);
                 let color = self.cfg.folder_color.clone();
                 self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new(), in_colors: false }));
+            }
+            Cmd::SchemesFolder => {
+                let Some(dir) = crate::schemes::dir() else { return };
+                if let Err(e) = crate::schemes::prepare(&dir) {
+                    return self.toast(format!("{}: {e}", tr("Failed")), true);
+                }
+                self.overlay = None;
+                self.focus = Focus::Panes;
+                self.run(Cmd::OpenInNewTab(Location::Local(dir)));
             }
             Cmd::SetIconLook(id, color) => {
                 self.icons.folder_color = color.clone();

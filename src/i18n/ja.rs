@@ -1,6 +1,15 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Your own schemes (JSON)", "自分の配色（JSON）"),
+    ("Color scheme", "配色"),
+    ("New Year", "お正月"),
+    ("Christmas", "クリスマス"),
+    ("Lunar New Year", "旧正月"),
+    ("Valentine's Day", "バレンタインデー"),
+    ("St. Patrick's Day", "聖パトリックの祝日"),
+    ("Easter", "イースター"),
+    ("Halloween", "ハロウィン"),
     ("Restore", "元に戻す"),
     ("Restoring", "復元中"),
     ("No record of where it came from: %n", "元の場所が不明: %n"),

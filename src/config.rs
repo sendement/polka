@@ -42,6 +42,8 @@ pub struct Config {
     pub icon_theme: Option<String>,
     /// Folders in this colour, in themes that come in several (Papirus).
     pub folder_color: Option<String>,
+    /// Polka's colour scheme (None: the standard dark or light look).
+    pub scheme: Option<String>,
     /// UI zoom; bump it up for couch use.
     pub zoom: f32,
     /// The same in the game mode (gamescope), where the screen is often a
@@ -176,7 +178,7 @@ impl Config {
     }
 
     pub fn accent_rgb(&self) -> [u8; 3] {
-        self.accent.unwrap_or(DEFAULT_ACCENT)
+        self.accent.unwrap_or_else(crate::schemes::default_accent)
     }
 }
 
@@ -195,6 +197,7 @@ impl Default for Config {
             thumbnails: true,
             icon_theme: None,
             folder_color: None,
+            scheme: None,
             zoom: 1.0,
             zoom_game: 1.0,
             accent: None,

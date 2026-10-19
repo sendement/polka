@@ -19,6 +19,7 @@ mod mouse;
 mod ops;
 mod packages;
 mod sandbox;
+mod schemes;
 mod sidebar;
 mod steam;
 mod steam_add;

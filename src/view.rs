@@ -745,10 +745,10 @@ impl App {
             Some(Overlay::Settings(st)) if st.editor.is_some() => {
                 vec![(Action::Left, tr("Adjust")), (Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]
             }
-            Some(Overlay::Settings(_)) => vec![
+            Some(Overlay::Settings(st)) => vec![
                 (Action::Left, tr("Adjust")),
                 (Action::Accept, tr("OK")),
-                (Action::Actions, tr("Delete color")),
+                (Action::Actions, if st.row == crate::app::row::SCHEME { tr("Your own schemes (JSON)") } else { tr("Delete color") }),
                 (Action::Back, tr("Close")),
             ],
             Some(Overlay::ViewerSettings(_)) => vec![
@@ -1206,7 +1206,7 @@ impl App {
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
         let dark = ctx.global_style().visuals.dark_mode;
-        let (overlay, icons, cfg) = (&mut self.overlay, &mut self.icons, &self.cfg);
+        let (overlay, icons, cfg, schemes) = (&mut self.overlay, &mut self.icons, &self.cfg, &self.schemes);
         let (anchor, offset) = if bottom {
             // Just above the hints bar.
             (Align2::CENTER_BOTTOM, vec2(0.0, -36.0))
@@ -1237,7 +1237,7 @@ impl App {
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
-                        settings_ev = egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).show(ui, |ui| draw_settings(ui, st, cfg, icons)).inner;
+                        settings_ev = egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).show(ui, |ui| draw_settings(ui, st, cfg, icons, schemes)).inner;
                     }
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
@@ -2662,6 +2662,7 @@ pub enum SettingsEvent {
     Toggle(usize),
     /// Light/dark choice clicked.
     Appearance(u8),
+    SchemesFolder,
     EditorRow(usize),
     EditorSet(usize, f32),
     Save,
@@ -2684,6 +2685,7 @@ impl App {
                 self.run(Cmd::IconThemes);
             }
             SettingsEvent::Close => self.overlay = None,
+            SettingsEvent::SchemesFolder => self.run(Cmd::SchemesFolder),
             SettingsEvent::Chip(i) => self.settings_toggle_open(i),
             SettingsEvent::LayoutChip(i) => self.settings_toggle_layout(i),
             SettingsEvent::Appearance(i) => {
@@ -2736,7 +2738,7 @@ fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) ->
     (rect, r)
 }
 
-fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons: &mut Icons) -> Option<SettingsEvent> {
+fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons: &mut Icons, schemes: &[crate::schemes::Scheme]) -> Option<SettingsEvent> {
     use crate::app::row;
     if let Some(ed) = &st.editor {
         return draw_color_editor(ui, ed);
@@ -2766,7 +2768,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         let resp = ui.interact(hit, ui.id().with(("swatch", i)), Sense::click());
         let cursor = st.row == row::ACCENT && st.swatch == i;
         if let Some(sc) = sw.get(i) {
-            let fill = rgb(sc.unwrap_or(crate::config::DEFAULT_ACCENT));
+            let fill = rgb(sc.unwrap_or_else(crate::schemes::default_accent));
             ui.painter().circle_filled(c, 13.0, fill);
             if *sc == cfg.accent {
                 ui.painter().circle_stroke(c, 13.0, Stroke::new(2.0, Color32::WHITE));
@@ -2806,15 +2808,59 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         let seg = Rect::from_min_size(pos2(x0 + i as f32 * seg_w, whole.min.y), vec2(seg_w, 30.0)).shrink(2.0);
         let resp = ui.interact(seg, ui.id().with(("appearance", i)), Sense::click());
         let on = cfg.appearance as usize == i;
+        // A colour scheme is light or dark of itself.
+        let off = cfg.scheme.is_some();
         if on {
-            ui.painter().rect_filled(seg, 6.0, v.selection.bg_fill);
+            ui.painter().rect_filled(seg, 6.0, if off { v.selection.bg_fill.gamma_multiply(0.35) } else { v.selection.bg_fill });
         } else if resp.hovered() {
             ui.painter().rect_filled(seg, 6.0, v.widgets.hovered.weak_bg_fill);
         }
-        let c = if on { v.selection.stroke.color } else { v.text_color() };
+        let c = if off { v.weak_text_color() } else if on { v.selection.stroke.color } else { v.text_color() };
         ui.painter().text(seg.center(), Align2::CENTER_CENTER, *name, FontId::proportional(14.0), c);
         if resp.clicked() {
             ev = Some(SettingsEvent::Appearance(i as u8));
+        }
+    }
+
+    // Colour scheme: ‹ name ›, its colours beside it.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::SCHEME, "scheme");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::SCHEME));
+    }
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Color scheme"), label_font.clone(), v.text_color());
+    // One's own schemes: their folder (△ on the pad).
+    let fb = Rect::from_center_size(pos2(rect.max.x - 340.0, rect.center().y), Vec2::splat(28.0));
+    let fresp = ui.interact(fb, ui.id().with("scheme-folder"), Sense::click());
+    if fresp.hovered() {
+        ui.painter().rect_filled(fb, 6.0, v.widgets.hovered.weak_bg_fill);
+    }
+    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 20.0)) {
+        egui::Image::new(u).paint_at(ui, fb.shrink(4.0));
+    }
+    if fresp.on_hover_text(tr("Your own schemes (JSON)")).clicked() {
+        ev = Some(SettingsEvent::SchemesFolder);
+    }
+    let scheme = cfg.scheme.as_ref().and_then(|id| schemes.iter().find(|s| s.id == *id));
+    let name = scheme.map_or_else(|| tr("Standard").to_string(), |s| s.label());
+    let (minus, plus) = (
+        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
+        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+    );
+    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
+        let resp = ui.interact(b, ui.id().with(("scheme", label)), Sense::click());
+        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
+        if resp.clicked() {
+            ev = Some(SettingsEvent::Step(row::SCHEME, d));
+        }
+    }
+    let mid = (minus.max.x + plus.min.x) / 2.0;
+    ui.painter().text(pos2(mid, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
+    if let Some(s) = scheme {
+        // Background, controls, text, highlight: a strip under the name.
+        for (i, c) in [s.background, s.surface, s.text, s.accent].into_iter().enumerate() {
+            let at = Rect::from_center_size(pos2(mid - 27.0 + i as f32 * 18.0, rect.max.y - 6.0), vec2(16.0, 5.0));
+            ui.painter().rect(at, 2.0, c, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color), StrokeKind::Outside);
         }
     }
 
