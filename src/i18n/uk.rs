@@ -1,6 +1,7 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("No folder colours in this theme", "У цій темі немає кольорів тек"),
     ("Restore", "Відновити"),
     ("Restoring", "Відновлення"),
     ("No record of where it came from: %n", "Невідомо, звідки видалено: %n"),

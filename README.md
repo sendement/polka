@@ -214,7 +214,9 @@ the system's by default (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`), English w
 of these; Settings → Language switches on the fly. CJK text needs a CJK font (e.g. noto-fonts-cjk).
 
 **Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
-live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along.
+live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along. Themes
+whose folders come in colours (Papirus) offer them in the icon theme picker (L1 / R1, or a click):
+folders, home and desktop take that colour in Polka only, the theme itself is left as it is.
 
 ## Install
 

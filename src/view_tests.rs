@@ -4538,3 +4538,57 @@ fn outside_change_screens() {
     assert_eq!(bin(&h), "user-trash-full");
     let _ = std::fs::remove_file(trash.join("files/x"));
 }
+
+/// A whole theme's folders in one of its colours (Papirus has many): L1/R1
+/// in the theme picker, the preview following; the panes and sidebar take
+/// it; the icon picker still shows each variant as it is.
+#[test]
+#[ignore]
+fn folder_color_screens() {
+    use crate::app::{Cmd, Overlay};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    if !std::path::Path::new("/usr/share/icons/Papirus/64x64/places/folder-green.svg").exists() {
+        eprintln!("no Papirus here: skipped");
+        return;
+    }
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    h.state_mut().run(Cmd::IconThemes);
+    let at = match &h.state().overlay {
+        Some(Overlay::Themes(t)) => t.items.iter().position(|(id, _)| id.as_deref() == Some("Papirus-Dark")).expect("no Papirus-Dark"),
+        _ => panic!("no theme picker"),
+    };
+    if let Some(Overlay::Themes(t)) = h.state_mut().overlay.as_mut() {
+        t.cursor = at;
+    }
+    settle(&mut h);
+    let colors = match &h.state().overlay {
+        Some(Overlay::Themes(t)) => t.colors.clone(),
+        _ => unreachable!(),
+    };
+    let green = colors.iter().position(|c| c == "green").expect("no green") + 1;
+    for _ in 0..green {
+        press(&mut h, &[Action::NextTab]);
+    }
+    match &h.state().overlay {
+        Some(Overlay::Themes(t)) => assert_eq!(t.color.as_deref(), Some("green")),
+        _ => unreachable!(),
+    }
+    settle(&mut h);
+    shot(&mut h, "fc0-theme-green");
+    press(&mut h, &[Action::Accept]);
+    assert_eq!(h.state().cfg.folder_color.as_deref(), Some("green"));
+    let u = h.state_mut().icons.named(&["folder"], 64).unwrap();
+    assert!(u.contains("folder-green"), "{u}");
+    let u = h.state_mut().icons.named(&["user-home"], 64).unwrap();
+    assert!(u.contains("user-green-home"), "{u}");
+    // Not in the icon picker: there "folder" is the theme's own.
+    let u = h.state_mut().icons.named_plain(&["folder"], 64).unwrap();
+    assert!(!u.contains("green"), "{u}");
+    settle(&mut h);
+    shot(&mut h, "fc1-applied");
+    // Back to the theme's own.
+    h.state_mut().run(Cmd::SetIconLook(Some("Papirus-Dark".into()), None));
+    assert!(!h.state_mut().icons.named(&["folder"], 64).unwrap().contains("green"));
+    h.state_mut().run(Cmd::SetIconTheme(None));
+}

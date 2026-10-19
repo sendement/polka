@@ -1,6 +1,7 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("No folder colours in this theme", "このテーマにはフォルダーの色がありません"),
     ("Restore", "元に戻す"),
     ("Restoring", "復元中"),
     ("No record of where it came from: %n", "元の場所が不明: %n"),

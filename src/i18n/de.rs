@@ -1,6 +1,7 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("No folder colours in this theme", "Dieses Thema hat keine Ordnerfarben"),
     ("Restore", "Wiederherstellen"),
     ("Restoring", "Wiederherstellung"),
     ("No record of where it came from: %n", "Herkunft unbekannt: %n"),

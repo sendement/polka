@@ -606,6 +606,8 @@ pub enum Cmd {
     ToggleThumbnails,
     IconThemes,
     SetIconTheme(Option<String>),
+    /// A theme and the colour of its folders (the theme picker).
+    SetIconLook(Option<String>, Option<String>),
     Settings,
     ChooseIcon(PathBuf),
     SetPinIconFile { folder: PathBuf, image: PathBuf },
@@ -1151,6 +1153,10 @@ pub struct ThemePicker {
     pub preview: Vec<String>,
     /// Cursor the list was last scrolled to.
     pub scrolled: Option<usize>,
+    /// Folder colour (None: as the theme has them).
+    pub color: Option<String>,
+    /// The colours the highlighted theme has (last frame), for the hints.
+    pub colors: Vec<String>,
 }
 
 impl ThemePicker {
@@ -1340,7 +1346,8 @@ impl App {
             std::mem::forget(pad_tx);
         }
         let icon_ctx = ctx.clone();
-        let icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
+        let mut icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
+        icons.folder_color = cfg.folder_color.clone();
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
         let (start, focus) = start.and_then(|p| start_location(&p)).unwrap_or((Location::Local(home.clone()), None));
         let mut first = Pane::new(start, &cfg);
@@ -2284,10 +2291,18 @@ impl App {
                 Action::Down => t.cursor = (t.cursor + 1).min(t.items.len().saturating_sub(1)),
                 Action::LeftTrigger => t.cursor = t.cursor.saturating_sub(8),
                 Action::RightTrigger => t.cursor = (t.cursor + 8).min(t.items.len().saturating_sub(1)),
+                // The folder colour, among those the highlighted theme has.
+                Action::PrevTab | Action::NextTab => {
+                    let colors = self.icons.folder_colors(&t.preview[t.cursor]);
+                    let all: Vec<Option<String>> = std::iter::once(None).chain(colors.into_iter().map(Some)).collect();
+                    let at = all.iter().position(|c| *c == t.color).unwrap_or(0) as isize;
+                    let d = if a == Action::NextTab { 1 } else { -1 };
+                    t.color = all[(at + d).rem_euclid(all.len() as isize) as usize].clone();
+                }
                 Action::Accept => {
-                    let id = t.items[t.cursor].0.clone();
+                    let (id, color) = (t.items[t.cursor].0.clone(), t.color.clone());
                     self.overlay = None;
-                    self.run(Cmd::SetIconTheme(id));
+                    self.run(Cmd::SetIconLook(id, color));
                 }
                 Action::Back | Action::Menu => self.overlay = None,
                 _ => {}
@@ -3957,7 +3972,7 @@ impl App {
                 let mut groups = self.icons.place_icons();
                 for g in &mut groups {
                     let names = std::mem::take(&mut g.names);
-                    g.names = names.into_iter().filter(|n| self.icons.named(&[n.as_str()], 64).is_some()).collect();
+                    g.names = names.into_iter().filter(|n| self.icons.named_plain(&[n.as_str()], 64).is_some()).collect();
                 }
                 groups.retain(|g| !g.names.is_empty());
                 if groups.iter().all(|g| g.names.is_empty()) {
@@ -4016,7 +4031,13 @@ impl App {
                     items.push((Some(t.id), t.name));
                 }
                 let cursor = items.iter().position(|(id, _)| *id == self.cfg.icon_theme).unwrap_or(0);
-                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None }));
+                let color = self.cfg.folder_color.clone();
+                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new() }));
+            }
+            Cmd::SetIconLook(id, color) => {
+                self.icons.folder_color = color.clone();
+                self.cfg.folder_color = color;
+                self.run(Cmd::SetIconTheme(id));
             }
             Cmd::SetIconTheme(id) => {
                 self.icons.set_theme(id.clone());

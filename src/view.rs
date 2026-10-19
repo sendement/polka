@@ -762,6 +762,12 @@ impl App {
                 (Action::Menu, tr("Create")),
                 (Action::Back, tr("Cancel")),
             ],
+            Some(Overlay::Themes(t)) if !t.colors.is_empty() => vec![
+                (Action::Up, tr("Move")),
+                (Action::PrevTab, tr("Color")),
+                (Action::Accept, tr("OK")),
+                (Action::Back, tr("Cancel")),
+            ],
             Some(Overlay::IconPicker(_)) => vec![
                 (Action::PrevTab, tr("Color")),
                 (Action::Accept, tr("OK")),
@@ -2176,6 +2182,9 @@ const THEME_SAMPLES: [(&str, &[&str]); 16] = [
     ("Disk", &["drive-harddisk"]),
 ];
 
+/// Room for three rows of folder colours (Papirus has 28) in the theme picker.
+const THEME_CHIPS_H: f32 = 3.0 * 33.0 + 6.0;
+
 fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) -> Option<Cmd> {
     let mut run = None;
     ui.label(egui::RichText::new(tr("Icon theme")).strong().size(18.0));
@@ -2185,7 +2194,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
         ui.vertical(|ui| {
             ui.set_width(250.0);
             let scroll_to = t.take_scroll();
-            egui::ScrollArea::vertical().id_salt("themes").max_height(380.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("themes").max_height(380.0 + THEME_CHIPS_H).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (i, (id, label)) in t.items.iter().enumerate() {
                     let (rect, r) = ui.allocate_exact_size(vec2(240.0, 34.0), Sense::click());
@@ -2209,25 +2218,59 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                         r.scroll_to_me(None);
                     }
                     if r.clicked() {
-                        run = Some(Cmd::SetIconTheme(id.clone()));
+                        run = Some(Cmd::SetIconLook(id.clone(), t.color.clone()));
                     }
                 }
             });
         });
         // A plain ui.separator() here would stretch to the window's height
         // from the last frame, and the window would grow every frame.
-        let (line, _) = ui.allocate_exact_size(vec2(9.0, 380.0), Sense::hover());
+        let (line, _) = ui.allocate_exact_size(vec2(9.0, 380.0 + THEME_CHIPS_H), Sense::hover());
         ui.painter().vline(line.center().x, line.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
         // Preview of the highlighted theme.
         ui.vertical(|ui| {
             let theme = t.preview[t.cursor].clone();
             ui.label(egui::RichText::new(&t.items[t.cursor].1).weak());
             ui.add_space(4.0);
+            // Folder colours, where the theme comes in several (L1/R1). The
+            // room is kept for every theme, so the window keeps its size.
+            let colors = icons.folder_colors(&theme);
+            t.colors = colors.clone();
+            let (room, _) = ui.allocate_exact_size(vec2(4.0 * 84.0, THEME_CHIPS_H), Sense::hover());
+            if colors.is_empty() {
+                let c = ui.visuals().weak_text_color();
+                ui.painter().text(room.center(), Align2::CENTER_CENTER, tr("No folder colours in this theme"), FontId::proportional(13.0), c);
+            } else {
+                let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(Align::Min).with_main_wrap(true)));
+                let ui = &mut ui;
+                {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                    for c in std::iter::once(None).chain(colors.iter().map(Some)) {
+                        let (rect, r) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+                        let on = t.color.as_ref() == c;
+                        let v = ui.visuals();
+                        if on {
+                            ui.painter().rect(rect, 6.0, tint(v, 0.4), Stroke::new(2.0, v.selection.bg_fill), StrokeKind::Inside);
+                        } else if r.hovered() {
+                            ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill);
+                        }
+                        let names = c.map(|c| format!("folder-{c}")).unwrap_or_else(|| "folder".into());
+                        if let Some(u) = icons.named_in(&theme, &[names.as_str()], SMALL_ICON_LOOKUP) {
+                            egui::Image::new(u).paint_at(ui, rect.shrink(5.0));
+                        }
+                        let r = r.on_hover_text(c.cloned().unwrap_or_else(|| tr("Standard").to_string()));
+                        if r.clicked() {
+                            t.color = c.cloned();
+                            run = Some(Cmd::SetIconLook(t.items[t.cursor].0.clone(), t.color.clone()));
+                        }
+                    }
+                }
+            }
             egui::Grid::new("theme-preview").spacing([6.0, 6.0]).show(ui, |ui| {
                 for (i, (caption, names)) in THEME_SAMPLES.iter().enumerate() {
                     let (rect, _) = ui.allocate_exact_size(vec2(78.0, 78.0), Sense::hover());
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 28.0), Vec2::splat(48.0));
-                    if let Some(u) = icons.named_in(&theme, names, 64) {
+                    if let Some(u) = icons.named_colored(&theme, names, 64, t.color.as_deref()) {
                         egui::Image::new(u).paint_at(ui, ir);
                     }
                     let c = ui.visuals().weak_text_color();
@@ -3025,7 +3068,7 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
                 };
                 ui.painter().rect(rect, 6.0, fill, stroke, StrokeKind::Inside);
                 let ir = Rect::from_min_size(rect.min + vec2(5.0, 4.0), Vec2::splat(18.0));
-                if let Some(u) = g.names.first().and_then(|n| icons.named(&[n.as_str()], SMALL_ICON_LOOKUP)) {
+                if let Some(u) = g.names.first().and_then(|n| icons.named_plain(&[n.as_str()], SMALL_ICON_LOOKUP)) {
                     egui::Image::new(u).paint_at(ui, ir);
                 }
                 ui.painter().galley(pos2(ir.max.x + 6.0, rect.center().y - gal.size().y / 2.0), gal, v.text_color());
@@ -3071,7 +3114,7 @@ fn draw_icon_picker(ui: &mut Ui, p: &mut crate::app::IconPicker, icons: &mut Ico
                 } else if r.hovered() {
                     ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill);
                 }
-                if let Some(u) = icons.named(&[name.as_str()], 64) {
+                if let Some(u) = icons.named_plain(&[name.as_str()], 64) {
                     egui::Image::new(u).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(44.0)));
                 }
                 if r.clicked() {

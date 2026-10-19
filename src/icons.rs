@@ -26,6 +26,10 @@ pub struct Icons {
     thumbs: crate::thumbs::Thumbs,
     /// Thumbnail textures handed to egui, to free them in bulk.
     thumb_uris: HashSet<String>,
+    /// Folders in this colour variant (folder-<c>-*), where the theme has it.
+    pub folder_color: Option<String>,
+    /// Folder colours each theme comes in.
+    colors: HashMap<String, Vec<String>>,
     /// The theme's own empty / half-full / full trash icons, per theme.
     trash: Option<(String, Option<[String; 3]>)>,
 }
@@ -38,6 +42,8 @@ impl Icons {
             thumbs: crate::thumbs::Thumbs::new(move || w()),
             thumb_uris: HashSet::new(),
             trash: None,
+            folder_color: None,
+            colors: HashMap::new(),
             theme: String::new(),
             chosen: theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into()),
             dark: true,
@@ -71,12 +77,37 @@ impl Icons {
     /// First icon from `candidates` that the theme has.
     pub fn named(&mut self, candidates: &[&str], size: u16) -> Option<String> {
         let theme = self.theme.clone();
+        let color = self.folder_color.clone();
+        self.named_colored(&theme, candidates, size, color.as_deref())
+    }
+
+    /// As the names say, without the folder colour (the icon picker shows
+    /// each variant as it is).
+    pub fn named_plain(&mut self, candidates: &[&str], size: u16) -> Option<String> {
+        let theme = self.theme.clone();
         self.named_in(&theme, candidates, size)
     }
 
     /// Like `named`, but from any installed theme (theme picker preview).
     pub fn named_in(&mut self, theme: &str, candidates: &[&str], size: u16) -> Option<String> {
         candidates.iter().find_map(|c| self.lookup_in(theme, c, size))
+    }
+
+    /// Folder icons in `color` where the theme draws them, else as named.
+    pub fn named_colored(&mut self, theme: &str, candidates: &[&str], size: u16, color: Option<&str>) -> Option<String> {
+        candidates.iter().find_map(|c| {
+            color.and_then(|col| tinted(c, col)).and_then(|t| self.lookup_in(theme, &t, size)).or_else(|| self.lookup_in(theme, c, size))
+        })
+    }
+
+    /// The folder colours `theme` (and what it inherits) comes in.
+    pub fn folder_colors(&mut self, theme: &str) -> Vec<String> {
+        if let Some(c) = self.colors.get(theme) {
+            return c.clone();
+        }
+        let c: Vec<String> = place_icons_in(theme).into_iter().filter_map(|g| g.color).collect();
+        self.colors.insert(theme.to_string(), c.clone());
+        c
     }
 
     /// Icon for UI chrome (toolbar buttons). Tries `name` and
@@ -102,23 +133,7 @@ impl Icons {
     /// ships in its "places" context, grouped by colour variant. Papirus has
     /// folder-blue-*, folder-red-*…; themes without variants give one group.
     pub fn place_icons(&self) -> Vec<IconGroup> {
-        let mut names = std::collections::BTreeSet::new();
-        let mut queue = vec![self.theme.clone()];
-        let mut seen = HashSet::new();
-        while let Some(t) = queue.pop() {
-            if t == "hicolor" || !seen.insert(t.clone()) {
-                continue;
-            }
-            for dir in theme_dirs(&t) {
-                collect_places(&dir, 0, false, &mut names);
-                if let Ok(idx) = std::fs::read_to_string(dir.join("index.theme")) {
-                    if let Some(inh) = idx.lines().find_map(|l| l.strip_prefix("Inherits=")) {
-                        queue.extend(inh.split(',').map(|s| s.trim().to_string()));
-                    }
-                }
-            }
-        }
-        group_by_color(names.into_iter().collect())
+        place_icons_in(&self.theme)
     }
 
     /// A trash icon for how full it is (0 empty, 1 half, 2 full), when the
@@ -437,6 +452,47 @@ fn collect_places(dir: &Path, depth: usize, in_places: bool, out: &mut std::coll
                 if !stem.ends_with("-symbolic") && !stem.contains("-open") && !stem.contains("drag-accept") {
                     out.insert(stem.to_string());
                 }
+            }
+        }
+    }
+}
+
+
+/// Folder-ish icons a theme ships in its "places" context, grouped by
+/// colour variant.
+fn place_icons_in(theme: &str) -> Vec<IconGroup> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut queue = vec![theme.to_string()];
+    let mut seen = HashSet::new();
+    while let Some(t) = queue.pop() {
+        if t == "hicolor" || !seen.insert(t.clone()) {
+            continue;
+        }
+        for dir in theme_dirs(&t) {
+            collect_places(&dir, 0, false, &mut names);
+            if let Ok(idx) = std::fs::read_to_string(dir.join("index.theme")) {
+                if let Some(inh) = idx.lines().find_map(|l| l.strip_prefix("Inherits=")) {
+                    queue.extend(inh.split(',').map(|s| s.trim().to_string()));
+                }
+            }
+        }
+    }
+    group_by_color(names.into_iter().collect())
+}
+
+/// A folder icon name in a colour variant: folder → folder-<c>,
+/// folder-documents → folder-<c>-documents, user-home → user-<c>-home
+/// (Papirus' naming).
+fn tinted(name: &str, c: &str) -> Option<String> {
+    match name {
+        "folder" | "inode-directory" => Some(format!("folder-{c}")),
+        _ => {
+            if let Some(rest) = name.strip_prefix("folder-") {
+                Some(format!("folder-{c}-{rest}"))
+            } else if name.starts_with("user-home") || name.starts_with("user-desktop") {
+                Some(format!("user-{c}-{}", &name[5..]))
+            } else {
+                None
             }
         }
     }

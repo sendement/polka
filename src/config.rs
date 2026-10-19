@@ -40,6 +40,8 @@ pub struct Config {
     pub thumbnails: bool,
     /// Overrides the detected icon theme.
     pub icon_theme: Option<String>,
+    /// Folders in this colour, in themes that come in several (Papirus).
+    pub folder_color: Option<String>,
     /// UI zoom; bump it up for couch use.
     pub zoom: f32,
     /// The same in the game mode (gamescope), where the screen is often a
@@ -192,6 +194,7 @@ impl Default for Config {
             dual: false,
             thumbnails: true,
             icon_theme: None,
+            folder_color: None,
             zoom: 1.0,
             zoom_game: 1.0,
             accent: None,
