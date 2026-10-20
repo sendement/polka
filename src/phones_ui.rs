@@ -26,8 +26,9 @@ impl App {
         let tx = self.msg_tx.clone();
         let wake = self.wake();
         let key = key.to_string();
+        let alone = self.phones.iter().filter(|x| x.kind == crate::phones::Kind::Android && x.files).count() <= 1;
         std::thread::spawn(move || {
-            let result = crate::phones::mount(&p);
+            let result = crate::phones::mount(&p, alone);
             let _ = tx.send(Msg::PhoneDone { key, result });
             wake();
         });
@@ -62,6 +63,9 @@ impl App {
                         let l = e.to_lowercase();
                         if l.contains("busy") || l.contains("claim") {
                             format!("{name}: {}", tr("another program is using the phone"))
+                        } else if l.contains("timeout") || l.contains("no mtp device") {
+                            // A locked screen, or the phone's MTP side stuck.
+                            format!("{name}: {}", tr("unlock the phone and allow access to files; if it still doesn't answer, plug it in again"))
                         } else {
                             format!("{name}: {e}")
                         }

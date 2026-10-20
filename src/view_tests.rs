@@ -5151,7 +5151,7 @@ fn phone_screens() {
     let redmi = h.state().phones[0].clone();
     assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(redmi.mount_dir()));
     let said = std::fs::read_to_string(&log).unwrap();
-    assert!(said.contains(&format!("aft-mtp-mount -D 9f3bcb68 {}", redmi.mount_dir().display())), "{said}");
+    assert!(said.contains(&format!("aft-mtp-mount {}", redmi.mount_dir().display())), "{said}");
     // The iPhone: not trusted yet.
     open(&mut h, "iPhone");
     let toast = h.state().toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();

@@ -1,6 +1,7 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "请解锁手机并允许访问文件；如果仍无响应，请重新插拔数据线"),
     ("On the phone, choose USB use: File transfer", "请在手机上将 USB 用途设为：传输文件"),
     ("Unlock the iPhone and tap Trust, then open it again", "请解锁 iPhone 并点按“信任”，然后再次打开"),
     ("another program is using the phone", "另一个程序正在使用手机"),

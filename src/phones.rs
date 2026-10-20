@@ -231,8 +231,9 @@ pub enum Trouble {
     Failed(String),
 }
 
-/// Mount it (blocking: off the UI thread). Where to open it.
-pub fn mount(p: &Phone) -> Result<PathBuf, Trouble> {
+/// Mount it (blocking: off the UI thread). Where to open it. `alone`: the
+/// only Android phone plugged in.
+pub fn mount(p: &Phone, alone: bool) -> Result<PathBuf, Trouble> {
     if !p.files {
         return Err(Trouble::NoFiles);
     }
@@ -245,8 +246,10 @@ pub fn mount(p: &Phone) -> Result<PathBuf, Trouble> {
     match tool {
         Tool::Aft => {
             let mut c = Command::new("aft-mtp-mount");
-            if !p.serial.is_empty() {
-                c.args(["-D", &p.serial]);
+            // Its -D filter doesn't find phones by their USB serial (nor,
+            // in 4.6, by anything else): left out when it's the only one.
+            if !alone {
+                c.args(["-D", &p.name]);
             }
             c.arg(&dir);
             run(c).map_err(fail)?;
@@ -333,6 +336,26 @@ pub fn unmount(p: &Phone, at: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With a real phone plugged in (POLKA_REAL_PHONE=1): found, mounted,
+    /// read, unmounted.
+    #[test]
+    #[ignore]
+    fn real_phone() {
+        if std::env::var_os("POLKA_REAL_PHONE").is_none() {
+            return;
+        }
+        let phones = detect();
+        let p = phones.first().expect("no phone plugged in").clone();
+        eprintln!("{p:?} → {:?}", p.tool());
+        let at = mount(&p, phones.len() == 1).unwrap_or_else(|e| panic!("{e:?}"));
+        let names: Vec<String> = std::fs::read_dir(&at).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        eprintln!("{} → {names:?}", at.display());
+        assert!(!names.is_empty());
+        assert!(p.mounted(&crate::net::mount_points()).is_some());
+        unmount(&p, &at).unwrap();
+        assert!(p.mounted(&crate::net::mount_points()).is_none());
+    }
 
     #[test]
     fn finds_phones() {

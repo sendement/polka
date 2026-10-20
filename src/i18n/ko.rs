@@ -1,6 +1,7 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "휴대폰 잠금을 해제하고 파일 접근을 허용하세요. 응답이 없으면 케이블을 다시 연결하세요"),
     ("On the phone, choose USB use: File transfer", "휴대폰에서 USB 용도를 '파일 전송'으로 선택하세요"),
     ("Unlock the iPhone and tap Trust, then open it again", "iPhone 잠금을 해제하고 '신뢰'를 누른 다음 다시 여세요"),
     ("another program is using the phone", "다른 프로그램이 휴대폰을 사용 중입니다"),

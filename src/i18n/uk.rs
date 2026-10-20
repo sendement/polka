@@ -1,6 +1,7 @@
 //! Українська.
 
 pub const T: &[(&str, &str)] = &[
+    ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "розблокуйте телефон і дозвольте доступ до файлів; якщо не відповідає — перепід'єднайте кабель"),
     ("On the phone, choose USB use: File transfer", "На телефоні виберіть режим USB: Передавання файлів"),
     ("Unlock the iPhone and tap Trust, then open it again", "Розблокуйте iPhone і натисніть «Довіряти», потім відкрийте знову"),
     ("another program is using the phone", "телефон зайнятий іншою програмою"),

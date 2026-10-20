@@ -1,6 +1,7 @@
 //! Deutsch.
 
 pub const T: &[(&str, &str)] = &[
+    ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "entsperren Sie das Telefon und erlauben Sie den Dateizugriff; antwortet es nicht, stecken Sie es neu an"),
     ("On the phone, choose USB use: File transfer", "Wählen Sie auf dem Telefon den USB-Modus: Dateiübertragung"),
     ("Unlock the iPhone and tap Trust, then open it again", "Entsperren Sie das iPhone, tippen Sie auf „Vertrauen“ und öffnen Sie es erneut"),
     ("another program is using the phone", "ein anderes Programm verwendet das Telefon"),

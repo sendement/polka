@@ -1,6 +1,7 @@
 //! Oʻzbekcha (lotin).
 
 pub const T: &[(&str, &str)] = &[
+    ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "telefon qulfini oching va fayllarga ruxsat bering; javob bermasa, kabelni qayta ulang"),
     ("On the phone, choose USB use: File transfer", "Telefonda USB rejimini tanlang: Fayl uzatish"),
     ("Unlock the iPhone and tap Trust, then open it again", "iPhone qulfini oching va «Ishonish»ni bosing, soʻng qayta oching"),
     ("another program is using the phone", "telefonni boshqa dastur ishlatyapti"),
