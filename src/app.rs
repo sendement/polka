@@ -1363,6 +1363,10 @@ pub struct App {
     pub net_busy: HashSet<String>,
     /// The help's scrolling asked for by the pad (by so much).
     pub help_scroll: Option<f32>,
+    /// Esc went down in the terminal and is still held: its repeats are no
+    /// one else's (from the sidebar it left for, they'd bring the focus
+    /// straight back).
+    pub esc_down: bool,
     /// Places of the tabs closed, last last (Ctrl+Shift+T).
     pub closed_tabs: Vec<Location>,
     /// Phones on USB (as the sidebar last saw them).
@@ -1484,6 +1488,7 @@ impl App {
             phones: Vec::new(),
             closed_tabs: Vec::new(),
             help_scroll: None,
+            esc_down: false,
             sys_clip: None,
             dark_applied: None,
             schemes: crate::schemes::all(),

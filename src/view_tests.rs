@@ -5232,7 +5232,9 @@ fn hotkey_screens() {
     }
     assert_eq!(h.state().focus, Focus::Panes, "a tap left the terminal");
     h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
-    for _ in 0..14 {
+    // A real key held repeats: those mustn't bring the focus back.
+    for _ in 0..20 {
+        h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: true, modifiers: Modifiers::NONE });
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(60));
     }

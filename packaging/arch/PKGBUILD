@@ -1,6 +1,6 @@
 # Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
 pkgname=polka
-pkgver=0.34.0
+pkgver=0.34.1
 pkgrel=1
 pkgdesc="Gamepad-first file manager: dual pane, archives as folders, themed and .exe icons"
 arch=('x86_64')
@@ -34,7 +34,7 @@ makedepends=('cargo')
 # Rust links with lld here; GCC LTO objects from C build scripts break that.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('99a7f049397f342e8141ddb717138919f1c1aaa2d622239662919ce726b41849')
+sha256sums=('e17cfd8d9cbe78cd55527ba76d5f206bf9f999e4aa74df78686bced120ba9b6b')
 
 prepare() {
   cd "$pkgname-$pkgver"

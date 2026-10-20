@@ -525,8 +525,10 @@ impl App {
                 // held it leaves for the sidebar.
                 egui::Event::Key { key: Key::Escape, pressed, repeat, modifiers: m, .. } if m.is_none() && !self.term_ref().is_some_and(|t| t.selecting) => {
                     if pressed && !repeat {
+                        self.esc_down = true;
                         self.terminal_input(Action::Back);
                     } else if !pressed {
+                        self.esc_down = false;
                         self.terminal_release(Action::Back);
                     }
                 }

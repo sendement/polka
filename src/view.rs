@@ -146,6 +146,20 @@ impl App {
         }
         if self.overlay.is_none() && (self.term_window.is_some() || (self.focus == Focus::Panes && self.term_shown())) {
             events = self.terminal_keyboard(events);
+        } else if self.esc_down {
+            // Esc held left the terminal: until it's let go it does nothing
+            // more (its repeats would bring the focus straight back).
+            let mut up = false;
+            events.retain(|e| match e {
+                egui::Event::Key { key: Key::Escape, pressed, .. } => {
+                    up |= !pressed;
+                    false
+                }
+                _ => true,
+            });
+            if up {
+                self.esc_down = false;
+            }
         }
         for ev in events {
             match ev {
