@@ -1,6 +1,22 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "이미 그 형식입니다"),
+    ("Already in this format: %n", "이미 이 형식: %n"),
+    ("Balanced", "균형"),
+    ("Convert", "변환"),
+    ("Converting", "변환 중"),
+    ("Convert…", "변환…"),
+    ("High", "높음"),
+    ("Left out: %n", "제외됨: %n"),
+    ("Move the originals to the trash", "원본을 휴지통으로 이동"),
+    ("Not convertible: %n", "변환할 수 없음: %n"),
+    ("Nothing here can be converted", "여기에는 변환할 것이 없습니다"),
+    ("Quality", "품질"),
+    ("Small size", "작은 크기"),
+    ("needs ImageMagick or libheif", "ImageMagick 또는 libheif 필요"),
+    ("needs ffmpeg", "ffmpeg 필요"),
+    ("password-protected", "암호로 보호됨"),
     ("Add network place…", "네트워크 위치 추가…"),
     ("Address (URL)", "주소 (URL)"),
     ("Connect", "연결"),

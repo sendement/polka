@@ -224,6 +224,19 @@ tagged items gets a Tags column in the list; the grid shows a dot per tag. Searc
 filter take `#tag` words: `#work report` finds items tagged *work* with *report* in the name;
 □ (or 🔍) on a tag in the Tags dialog looks for it from the current folder down.
 
+**Converting.** △ → Convert… on any files: they're sorted into pictures, sound, video and
+archives, and each kind gets a format of its own — a mix of PNG, JPEG and WebP all become PNG (the
+ones already PNG stay as they are), while the songs picked along with them become MP3. Pictures:
+PNG, JPEG, WebP, AVIF, HEIC, BMP, TIFF, GIF, from those and iPhone's HEIC, AVIF and JPEG XL. Sound:
+MP3, AAC, Opus, Vorbis, FLAC, WAV. Video: MP4 / MOV (H.264, plays anywhere — iPhone's HDR HEVC
+too), MKV (only the container changes, nothing re-encoded), WebM (VP9), or just its sound. Archives
+are repacked as zip, 7z or a tarball; a multi-volume set becomes one archive; password-protected
+ones are left out. Quality: high, balanced or small; the originals can go to the trash after. The
+results go beside the originals. Plain pictures and archives need nothing else; ImageMagick does
+pictures best (HEIC, AVIF, the camera's rotation), libheif's `heif-dec` / `heif-enc` and `avifenc`
+fill in without it; sound and video need ffmpeg. HEIC, AVIF and JPEG XL also open in the viewer and
+get thumbnails.
+
 **Network places.** ≡ → Add network place…: SMB, NFS, SFTP, WebDAV, FTP or an rclone remote
 (Google Drive, OneDrive, S3… whatever `rclone config` has). They sit in the sidebar's Network
 section, faded until connected; ✕ connects and opens one, △ connects, disconnects, edits or

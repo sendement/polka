@@ -1,6 +1,22 @@
 //! Oʻzbekcha (lotin).
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "Allaqachon shu formatda"),
+    ("Already in this format: %n", "Allaqachon shu formatda: %n"),
+    ("Balanced", "Muvozanatli"),
+    ("Convert", "Aylantirish"),
+    ("Converting", "Aylantirilmoqda"),
+    ("Convert…", "Aylantirish…"),
+    ("High", "Yuqori"),
+    ("Left out: %n", "Oʻtkazib yuborildi: %n"),
+    ("Move the originals to the trash", "Asl fayllarni savatga tashlash"),
+    ("Not convertible: %n", "Aylantirib boʻlmaydi: %n"),
+    ("Nothing here can be converted", "Bu yerda aylantiradigan narsa yoʻq"),
+    ("Quality", "Sifat"),
+    ("Small size", "Kichik hajm"),
+    ("needs ImageMagick or libheif", "ImageMagick yoki libheif kerak"),
+    ("needs ffmpeg", "ffmpeg kerak"),
+    ("password-protected", "parol bilan himoyalangan"),
     ("Add network place…", "Tarmoq joyini qoʻshish…"),
     ("Address (URL)", "Manzil (URL)"),
     ("Connect", "Ulanish"),

@@ -2,6 +2,8 @@ mod app;
 mod appearance;
 mod archive_rw;
 mod config;
+mod convert;
+mod convert_ui;
 mod diagnose;
 mod dnd;
 mod drives;

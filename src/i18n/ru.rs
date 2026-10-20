@@ -1,6 +1,22 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "Уже в этом формате"),
+    ("Already in this format: %n", "Уже в этом формате: %n"),
+    ("Balanced", "Баланс"),
+    ("Convert", "Конвертировать"),
+    ("Converting", "Конвертация"),
+    ("Convert…", "Конвертировать…"),
+    ("High", "Высокое"),
+    ("Left out: %n", "Пропущено: %n"),
+    ("Move the originals to the trash", "Убрать оригиналы в корзину"),
+    ("Not convertible: %n", "Не конвертируется: %n"),
+    ("Nothing here can be converted", "Здесь нечего конвертировать"),
+    ("Quality", "Качество"),
+    ("Small size", "Меньше размер"),
+    ("needs ImageMagick or libheif", "нужен ImageMagick или libheif"),
+    ("needs ffmpeg", "нужен ffmpeg"),
+    ("password-protected", "защищён паролем"),
     ("Add network place…", "Добавить сетевое место…"),
     ("Address (URL)", "Адрес (URL)"),
     ("Connect", "Подключить"),

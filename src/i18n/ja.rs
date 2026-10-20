@@ -1,6 +1,22 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "すでにその形式です"),
+    ("Already in this format: %n", "すでにこの形式：%n"),
+    ("Balanced", "バランス"),
+    ("Convert", "変換"),
+    ("Converting", "変換中"),
+    ("Convert…", "変換…"),
+    ("High", "高"),
+    ("Left out: %n", "除外：%n"),
+    ("Move the originals to the trash", "元のファイルをゴミ箱へ"),
+    ("Not convertible: %n", "変換できません：%n"),
+    ("Nothing here can be converted", "ここには変換できるものがありません"),
+    ("Quality", "品質"),
+    ("Small size", "小さいサイズ"),
+    ("needs ImageMagick or libheif", "ImageMagick か libheif が必要"),
+    ("needs ffmpeg", "ffmpeg が必要"),
+    ("password-protected", "パスワード保護"),
     ("Add network place…", "ネットワークの場所を追加…"),
     ("Address (URL)", "アドレス（URL）"),
     ("Connect", "接続"),

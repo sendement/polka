@@ -547,6 +547,8 @@ pub enum Cmd {
     RestoreAsk,
     /// Tag the targets.
     TagsAsk,
+    /// Convert the targets into other formats.
+    ConvertAsk,
     /// Network places: a new one, edit, connect, disconnect, remove.
     NetAdd,
     NetEdit(String),
@@ -924,6 +926,7 @@ pub enum Overlay {
     TermSettings(crate::terminal::app::TermSettings),
     Tags(crate::tags_ui::TagEditor),
     Net(Box<crate::net_ui::NetDlg>),
+    Convert(Box<crate::convert_ui::ConvertDlg>),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1347,6 +1350,8 @@ pub struct App {
     pub net_pw: HashMap<String, String>,
     /// Connections being made.
     pub net_busy: HashSet<String>,
+    /// The format last chosen for each kind of file, in "Convert…".
+    pub convert_last: Vec<(crate::convert::Group, crate::convert::Target)>,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1457,6 +1462,7 @@ impl App {
             sudo_pw: None,
             net_pw: HashMap::new(),
             net_busy: HashSet::new(),
+            convert_last: Vec::new(),
             sys_clip: None,
             dark_applied: None,
             schemes: crate::schemes::all(),
@@ -2435,6 +2441,7 @@ impl App {
             Overlay::Settings(_) => self.settings_input(a),
             Overlay::Tags(_) => self.tags_input(a),
             Overlay::Net(_) => self.net_input(a),
+            Overlay::Convert(_) => self.convert_input(a),
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::TermKeys(_) => self.term_keys_input(a),
             Overlay::TermSettings(_) => self.term_settings_input(a),
@@ -3109,6 +3116,8 @@ impl App {
         }
         add(tr("Rename"), Cmd::Rename, single && editable);
         add(tr("Tags…"), Cmd::TagsAsk, any && local);
+        let convertible = targets.iter().any(|e| !e.is_dir && crate::convert::group_of(&e.name).is_some());
+        add(tr("Convert…"), Cmd::ConvertAsk, convertible && local);
         if local {
             add(tr("Move to trash"), Cmd::TrashAsk, any);
         }
@@ -3836,6 +3845,7 @@ impl App {
                 self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
             }
             Cmd::TagsAsk => self.tags_open(),
+            Cmd::ConvertAsk => self.convert_open(),
             Cmd::NetAdd | Cmd::NetEdit(_) | Cmd::NetConnect(_) | Cmd::NetDisconnect(_) | Cmd::NetRemoveAsk(_) | Cmd::NetRemoveNow(_) => self.net_cmd(cmd),
             Cmd::RestoreAsk => {
                 let mut items = Vec::new();

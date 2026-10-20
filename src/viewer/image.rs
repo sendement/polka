@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 use crossbeam_channel::Receiver;
 
-pub const EXTS: &[&str] = &["png", "jpg", "jpeg", "jpe", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "svgz"];
+pub const EXTS: &[&str] = &["png", "jpg", "jpeg", "jpe", "gif", "webp", "bmp", "tif", "tiff", "ico", "svg", "svgz", "heic", "heif", "hif", "avif", "jxl"];
+
+/// Read through an outside tool (iPhone's HEIC and the like).
+const BY_TOOL: &[&str] = &["heic", "heif", "hif", "avif", "jxl"];
 
 /// A picture by name, or an X cursor (no extension) by its content.
 pub fn is_picture(path: &Path, name: &str) -> bool {
@@ -50,11 +53,17 @@ pub struct Picture {
 
 fn decode(path: &Path, max_side: usize) -> Result<Decoded, String> {
     use image::ImageDecoder;
-    let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
-    let mut dec = reader.into_decoder().map_err(|e| e.to_string())?;
-    let orientation = dec.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut img = image::DynamicImage::from_decoder(dec).map_err(|e| e.to_string())?;
-    img.apply_orientation(orientation);
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut img = if BY_TOOL.contains(&ext.as_str()) {
+        crate::convert::decode(path)?
+    } else {
+        let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
+        let mut dec = reader.into_decoder().map_err(|e| e.to_string())?;
+        let orientation = dec.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut img = image::DynamicImage::from_decoder(dec).map_err(|e| e.to_string())?;
+        img.apply_orientation(orientation);
+        img
+    };
     let full = [img.width() as usize, img.height() as usize];
     if img.width().max(img.height()) as usize > max_side {
         img = img.resize(max_side as u32, max_side as u32, image::imageops::FilterType::Triangle);

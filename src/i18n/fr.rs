@@ -1,6 +1,22 @@
 //! Français.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "Déjà dans ce format"),
+    ("Already in this format: %n", "Déjà dans ce format : %n"),
+    ("Balanced", "Équilibrée"),
+    ("Convert", "Convertir"),
+    ("Converting", "Conversion"),
+    ("Convert…", "Convertir…"),
+    ("High", "Haute"),
+    ("Left out: %n", "Ignorés : %n"),
+    ("Move the originals to the trash", "Mettre les originaux à la corbeille"),
+    ("Not convertible: %n", "Non convertibles : %n"),
+    ("Nothing here can be converted", "Rien à convertir ici"),
+    ("Quality", "Qualité"),
+    ("Small size", "Petite taille"),
+    ("needs ImageMagick or libheif", "nécessite ImageMagick ou libheif"),
+    ("needs ffmpeg", "nécessite ffmpeg"),
+    ("password-protected", "protégé par mot de passe"),
     ("Add network place…", "Ajouter un emplacement réseau…"),
     ("Address (URL)", "Adresse (URL)"),
     ("Connect", "Connecter"),

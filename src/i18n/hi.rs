@@ -1,6 +1,22 @@
 //! हिन्दी.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "पहले से उस फ़ॉर्मैट में"),
+    ("Already in this format: %n", "पहले से इस फ़ॉर्मैट में: %n"),
+    ("Balanced", "संतुलित"),
+    ("Convert", "बदलें"),
+    ("Converting", "बदला जा रहा है"),
+    ("Convert…", "फ़ॉर्मैट बदलें…"),
+    ("High", "उच्च"),
+    ("Left out: %n", "छोड़े गए: %n"),
+    ("Move the originals to the trash", "मूल फ़ाइलें कूड़ेदान में डालें"),
+    ("Not convertible: %n", "बदला नहीं जा सकता: %n"),
+    ("Nothing here can be converted", "यहाँ बदलने के लिए कुछ नहीं"),
+    ("Quality", "गुणवत्ता"),
+    ("Small size", "छोटा आकार"),
+    ("needs ImageMagick or libheif", "ImageMagick या libheif चाहिए"),
+    ("needs ffmpeg", "ffmpeg चाहिए"),
+    ("password-protected", "पासवर्ड से सुरक्षित"),
     ("Add network place…", "नेटवर्क स्थान जोड़ें…"),
     ("Address (URL)", "पता (URL)"),
     ("Connect", "कनेक्ट करें"),

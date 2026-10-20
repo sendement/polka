@@ -1,6 +1,22 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "已经是该格式"),
+    ("Already in this format: %n", "已经是此格式：%n"),
+    ("Balanced", "均衡"),
+    ("Convert", "转换"),
+    ("Converting", "正在转换"),
+    ("Convert…", "转换…"),
+    ("High", "高"),
+    ("Left out: %n", "已跳过：%n"),
+    ("Move the originals to the trash", "将原文件移到回收站"),
+    ("Not convertible: %n", "无法转换：%n"),
+    ("Nothing here can be converted", "这里没有可转换的内容"),
+    ("Quality", "质量"),
+    ("Small size", "小体积"),
+    ("needs ImageMagick or libheif", "需要 ImageMagick 或 libheif"),
+    ("needs ffmpeg", "需要 ffmpeg"),
+    ("password-protected", "受密码保护"),
     ("Add network place…", "添加网络位置…"),
     ("Address (URL)", "地址（URL）"),
     ("Connect", "连接"),

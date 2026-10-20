@@ -762,6 +762,12 @@ impl App {
                 (Action::Menu, tr("Create")),
                 (Action::Back, tr("Cancel")),
             ],
+            Some(Overlay::Convert(_)) => vec![
+                (Action::Up, tr("Move")),
+                (Action::Left, tr("Adjust")),
+                (Action::Menu, tr("Convert")),
+                (Action::Back, tr("Cancel")),
+            ],
             Some(Overlay::Net(_)) => vec![
                 (Action::Up, tr("Move")),
                 (Action::Left, tr("Adjust")),
@@ -1230,6 +1236,7 @@ impl App {
         let mut compress_ev: Option<(usize, isize)> = None;
         let mut tag_ev = None;
         let mut net_ev = None;
+        let mut conv_ev = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1264,6 +1271,7 @@ impl App {
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Tags(ed)) => tag_ev = crate::tags_ui::draw(ui, ed),
                     Some(Overlay::Net(d)) => net_ev = crate::net_ui::draw(ui, d),
+                    Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
@@ -1299,6 +1307,9 @@ impl App {
         }
         if let Some((row, step)) = net_ev {
             crate::net_ui::clicked(self, row, step);
+        }
+        if let Some((row, step)) = conv_ev {
+            crate::convert_ui::clicked(self, row, step);
         }
         if let Some((row, d)) = viewer_ev {
             self.viewer_step(row, d);
@@ -2810,7 +2821,7 @@ impl App {
     }
 }
 
-const SETTINGS_W: f32 = 560.0;
+pub(crate) const SETTINGS_W: f32 = 560.0;
 
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])

@@ -13,7 +13,7 @@ const MAX_QUEUE: usize = 256;
 /// Bigger images aren't worth decoding for a thumbnail.
 const MAX_IMAGE_BYTES: u64 = 150 << 20;
 
-const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff"];
+const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff", "heic", "heif", "hif", "avif", "jxl"];
 const VIDEO_EXT: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp"];
 
 #[derive(Clone)]
@@ -193,6 +193,10 @@ fn from_image(path: &Path) -> Option<image::DynamicImage> {
     use image::ImageDecoder;
     if std::fs::metadata(path).ok()?.len() > MAX_IMAGE_BYTES {
         return None;
+    }
+    // iPhone's HEIC and the like: through a tool.
+    if matches!(ext_of(path).as_str(), "heic" | "heif" | "hif" | "avif" | "jxl") {
+        return crate::convert::decode(path).ok();
     }
     let mut decoder = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;
     let orientation = decoder.orientation().ok();

@@ -166,7 +166,7 @@ pub struct Job {
 
 impl Job {
     /// A job nobody watches, for internal steps.
-    fn detached() -> Self {
+    pub(crate) fn detached() -> Self {
         Job {
             label: String::new(),
             done: AtomicU64::new(0),
@@ -252,6 +252,8 @@ pub enum Op {
     Copy { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Trash { paths: Vec<PathBuf> },
+    /// Pictures, sound, video, archives into other formats.
+    Convert { items: Vec<crate::convert::Item>, quality: crate::convert::Quality, trash: bool },
     /// Out of the trash: (item in it, where it came from).
     Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     Delete { paths: Vec<PathBuf> },
@@ -273,6 +275,11 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             let mut t: Vec<Location> = items.iter().map(|(from, _)| Location::Local(from.clone())).collect();
             t.extend(items.iter().filter_map(|(_, to)| to.parent()).map(|d| Location::Local(d.to_path_buf())));
             (tr("Restoring"), t)
+        }
+        Op::Convert { items, .. } => {
+            let mut t: Vec<Location> = items.iter().filter_map(|i| i.src.parent()).map(|d| Location::Local(d.to_path_buf())).collect();
+            t.dedup();
+            (tr("Converting"), t)
         }
         Op::Compress { out, .. } => {
             (tr("Compressing"), vec![Location::Local(out.parent().unwrap_or(Path::new("/")).into())])
@@ -305,6 +312,10 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         Op::Extract { dest, .. } => name_of(dest),
         Op::ArchiveEdit { archive, .. } => name_of(archive),
         Op::Trash { .. } => tr("Trash").to_string(),
+        Op::Convert { items, .. } => match items.as_slice() {
+            [one] => one.target.label().to_string(),
+            _ => String::new(),
+        },
         Op::Restore { items, .. } => match items.as_slice() {
             [(_, to)] => to.parent().map(name_of).unwrap_or_default(),
             _ => String::new(),
@@ -365,6 +376,7 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             job.done.store(paths.len() as u64, Ordering::Relaxed);
             Ok(())
         }
+        Op::Convert { items, quality, trash } => crate::convert::run(&items, quality, trash, job),
         Op::Restore { items, policy } => {
             job.total.store(items.iter().map(|(from, _)| tree_size(from)).sum(), Ordering::Relaxed);
             for (from, to) in items {
@@ -856,7 +868,7 @@ fn walk(root: &Path, base: &Path, out: &mut Vec<(PathBuf, String)>) {
     }
 }
 
-fn compress(sources: &[PathBuf], out: &Path, opts: &CompressOpts, job: &Job) -> io::Result<()> {
+pub(crate) fn compress(sources: &[PathBuf], out: &Path, opts: &CompressOpts, job: &Job) -> io::Result<()> {
     job.total.store(sources.iter().map(|s| tree_size(s)).sum(), Ordering::Relaxed);
     let mut items = Vec::new();
     for s in sources {

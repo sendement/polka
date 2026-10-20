@@ -4960,3 +4960,125 @@ fn language_screens() {
     crate::i18n::set(Some("en"));
     h.state_mut().cfg.language = None;
 }
+
+/// Converting a mixed bunch: pictures (iPhone's HEIC too), sound, a video
+/// and archives (a multi-volume set as one; one with a password left out,
+/// text left out), each kind to a format of its own; then the same
+/// pictures without ImageMagick (the library and libheif's tools).
+#[test]
+#[ignore]
+fn convert_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::convert::{Group, Target};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("convert");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("box")).unwrap();
+    let run = |c: &mut std::process::Command| assert!(c.current_dir(&dir).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success(), "{c:?}");
+    let ff = |args: &[&str]| run(std::process::Command::new("ffmpeg").args(["-v", "quiet", "-y"]).args(args));
+    // A gradient, so the pictures aren't empty.
+    let img = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 128]));
+    img.save(dir.join("a.png")).unwrap();
+    img.save(dir.join("b.jpg")).unwrap();
+    ff(&["-i", "a.png", "-c:v", "libwebp", "c.webp"]);
+    run(std::process::Command::new("heif-enc").args(["-q", "80", "a.png", "-o", "IMG_0001.HEIC"]));
+    ff(&["-f", "lavfi", "-i", "sine=frequency=440:duration=1", "tone.wav"]);
+    ff(&["-f", "lavfi", "-i", "testsrc=duration=1:size=160x120:rate=10", "-f", "lavfi", "-i", "sine=duration=1", "-shortest", "-c:v", "libx264", "-c:a", "aac", "clip.mov"]);
+    std::fs::write(dir.join("box/inside.txt"), "packed").unwrap();
+    run(std::process::Command::new("7z").args(["a", "-tzip", "plain.zip", "box"]));
+    // Random, so it doesn't shrink below one volume.
+    let noise: Vec<u8> = (0..60_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    std::fs::write(dir.join("box/noise.bin"), &noise).unwrap();
+    run(std::process::Command::new("7z").args(["a", "-v20k", "-mx0", "parts.7z", "box"]));
+    run(std::process::Command::new("7z").args(["a", "-tzip", "-psecret", "locked.zip", "box/inside.txt"]));
+    std::fs::remove_dir_all(dir.join("box")).unwrap();
+    std::fs::write(dir.join("notes.txt"), "text").unwrap();
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg;
+    h.state_mut().run(Cmd::SelectAll);
+    h.state_mut().run(Cmd::ConvertAsk);
+    let groups = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Convert(d)) => d.groups.iter().map(|g| (g.group, g.items.len())).collect::<Vec<_>>(),
+        _ => panic!("no dialog"),
+    };
+    assert_eq!(groups(&h), [(Group::Image, 4), (Group::Audio, 1), (Group::Video, 1), (Group::Archive, 2)]);
+    match &h.state().overlay {
+        Some(Overlay::Convert(d)) => {
+            assert_eq!(d.refused.len(), 1, "{:?}", d.refused);
+            assert_eq!(d.refused[0].0, "locked.zip");
+            assert_eq!(d.other, 1);
+        }
+        _ => unreachable!(),
+    }
+    // Pictures → PNG (a.png stays), sound → Opus, the video's sound →
+    // MP3, archives → 7z.
+    let pick = |h: &mut Harness<'static, App>, g: Group, t: Target| {
+        if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+            let r = d.groups.iter_mut().find(|r| r.group == g).unwrap();
+            r.pick = r.targets.iter().position(|x| *x == t).unwrap();
+        }
+    };
+    pick(&mut h, Group::Image, Target::Png);
+    pick(&mut h, Group::Audio, Target::Opus);
+    pick(&mut h, Group::Video, Target::Mp3);
+    pick(&mut h, Group::Archive, Target::Archive(crate::ops::ArchiveFormat::SevenZ));
+    settle(&mut h);
+    shot(&mut h, "cv0-dialog");
+    press(&mut h, &[Action::Menu]);
+    assert!(h.state().overlay.is_none());
+    wait_jobs(&mut h);
+    for (name, w) in [("b.png", 64), ("c.png", 64), ("IMG_0001.png", 64)] {
+        let i = image::open(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!((i.width(), i.height()), (w, 48), "{name}");
+    }
+    assert!(!dir.join("a (2).png").exists(), "a.png was converted to itself");
+    let probe = |f: &str| {
+        let out = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(dir.join(f)).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(probe("tone.opus"), "opus");
+    assert_eq!(probe("clip.mp3"), "mp3");
+    let list = |f: &str| {
+        let out = std::process::Command::new("7z").args(["l", "-ba"]).arg(dir.join(f)).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert!(list("plain.7z").contains("inside.txt"));
+    let whole = list("parts.7z");
+    assert!(whole.contains("noise.bin") && whole.contains("inside.txt"), "{whole}");
+    assert!(!dir.join("locked.7z").exists());
+    settle(&mut h);
+    shot(&mut h, "cv1-done");
+    // The video to MP4 (H.264), the quality small, the original to the trash.
+    h.state_mut().pane_mut().selected.clear();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "clip.mov").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::ConvertAsk);
+    pick(&mut h, Group::Video, Target::Mp4);
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.quality = crate::convert::Quality::Small;
+        d.trash = true;
+    }
+    press(&mut h, &[Action::Menu]);
+    wait_jobs(&mut h);
+    assert_eq!(probe("clip.mp4").lines().next(), Some("h264"));
+    assert!(!dir.join("clip.mov").exists(), "the original stayed");
+    // No ImageMagick: the library writes JPEG, libheif reads HEIC.
+    unsafe { std::env::set_var("POLKA_CONVERT_TOOLS", "heif-dec,heif-enc,ffmpeg,ffprobe") };
+    let heic = image::open(dir.join("IMG_0001.png")).unwrap();
+    let again = crate::convert::decode(&dir.join("IMG_0001.HEIC")).unwrap();
+    assert_eq!((again.width(), again.height()), (heic.width(), heic.height()));
+    h.state_mut().pane_mut().selected.clear();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "IMG_0001.HEIC").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::ConvertAsk);
+    pick(&mut h, Group::Image, Target::Jpg);
+    press(&mut h, &[Action::Menu]);
+    wait_jobs(&mut h);
+    let j = image::open(dir.join("IMG_0001.jpg")).unwrap();
+    assert_eq!((j.width(), j.height()), (64, 48));
+    unsafe { std::env::remove_var("POLKA_CONVERT_TOOLS") };
+}

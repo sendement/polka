@@ -1,6 +1,22 @@
 //! Қазақша.
 
 pub const T: &[(&str, &str)] = &[
+    ("Already in that format", "Осы пішімде тұр"),
+    ("Already in this format: %n", "Осы пішімде тұр: %n"),
+    ("Balanced", "Теңгерімді"),
+    ("Convert", "Түрлендіру"),
+    ("Converting", "Түрлендіру"),
+    ("Convert…", "Түрлендіру…"),
+    ("High", "Жоғары"),
+    ("Left out: %n", "Өткізіп жіберілді: %n"),
+    ("Move the originals to the trash", "Түпнұсқаларды себетке тастау"),
+    ("Not convertible: %n", "Түрлендіруге келмейді: %n"),
+    ("Nothing here can be converted", "Мұнда түрлендіретін ештеңе жоқ"),
+    ("Quality", "Сапа"),
+    ("Small size", "Шағын өлшем"),
+    ("needs ImageMagick or libheif", "ImageMagick немесе libheif керек"),
+    ("needs ffmpeg", "ffmpeg керек"),
+    ("password-protected", "құпиясөзбен қорғалған"),
     ("Add network place…", "Желілік орын қосу…"),
     ("Address (URL)", "Мекенжай (URL)"),
     ("Connect", "Қосылу"),
