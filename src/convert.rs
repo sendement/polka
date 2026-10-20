@@ -268,7 +268,7 @@ pub fn needless(src: &Path, target: Target) -> bool {
 
 /// Convert them, one by one. The originals that worked go to the trash if
 /// asked to.
-pub fn run(items: &[Item], quality: Quality, trash: bool, job: &Job) -> std::io::Result<()> {
+pub fn run(items: &[Item], quality: Quality, trash: bool, archive_opts: &crate::ops::CompressOpts, job: &Job) -> std::io::Result<()> {
     job.items.store(true, Ordering::Relaxed);
     job.total.store(items.len() as u64, Ordering::Relaxed);
     let mut failed: Vec<String> = Vec::new();
@@ -282,7 +282,7 @@ pub fn run(items: &[Item], quality: Quality, trash: bool, job: &Job) -> std::io:
         let r = match group_of(&it.src.to_string_lossy()) {
             Some(Group::Image) => image(&it.src, &out, it.target, quality),
             Some(Group::Audio) | Some(Group::Video) => media(&it.src, &out, it.target, quality, job),
-            Some(Group::Archive) => archive(&it.src, &out, it.target),
+            Some(Group::Archive) => archive(&it.src, &out, it.target, archive_opts),
             None => Err("not convertible".into()),
         };
         match r {
@@ -537,8 +537,11 @@ fn duration(src: &Path) -> Option<f64> {
 
 /// Unpacked into a scratch folder, packed again as `t` (a multi-volume set
 /// comes out as one file).
-fn archive(src: &Path, out: &Path, t: Target) -> Result<(), String> {
+fn archive(src: &Path, out: &Path, t: Target, opts: &crate::ops::CompressOpts) -> Result<(), String> {
     let Target::Archive(format) = t else { return Err("not an archive format".into()) };
+    let mut opts = opts.clone();
+    opts.format = format;
+    opts.fit();
     let first = crate::volumes::first(src);
     let stage = scratch("stage");
     let _ = std::fs::remove_dir_all(&stage);
@@ -551,7 +554,7 @@ fn archive(src: &Path, out: &Path, t: Target) -> Result<(), String> {
             return Err("empty archive".to_string());
         }
         let scratch_job = Job::detached();
-        crate::ops::compress(&sources, out, &crate::ops::CompressOpts::new(format), &scratch_job).map_err(|e| e.to_string())
+        crate::ops::compress(&sources, out, &opts, &scratch_job).map_err(|e| e.to_string())
     })();
     let _ = std::fs::remove_dir_all(&stage);
     r

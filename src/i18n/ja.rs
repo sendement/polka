@@ -1,6 +1,9 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "変換先"),
+    ("Left out", "除外"),
+    ("doesn't convert", "変換できません"),
     ("All programs", "すべてのプログラム"),
     ("Always open this type with it", "この種類を常にこれで開く"),
     ("Copy / cut / paste", "コピー / 切り取り / 貼り付け"),

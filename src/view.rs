@@ -1318,7 +1318,7 @@ impl App {
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Tags(ed)) => tag_ev = crate::tags_ui::draw(ui, ed),
                     Some(Overlay::Net(d)) => net_ev = crate::net_ui::draw(ui, d),
-                    Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d),
+                    Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d, icons),
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
@@ -2085,7 +2085,7 @@ pub(crate) fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f
     layout(ui, text, font, color, width, rows, false)
 }
 
-fn elided_centered(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
+pub(crate) fn elided_centered(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
     layout(ui, text, font, color, width, rows, true)
 }
 

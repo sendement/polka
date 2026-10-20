@@ -1,6 +1,9 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "转换为"),
+    ("Left out", "已排除"),
+    ("doesn't convert", "无法转换"),
     ("All programs", "所有程序"),
     ("Always open this type with it", "始终用它打开此类型"),
     ("Copy / cut / paste", "复制 / 剪切 / 粘贴"),

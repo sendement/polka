@@ -1,6 +1,9 @@
 //! Oʻzbekcha (lotin).
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "Nimaga aylantirish"),
+    ("Left out", "Chiqarib tashlangan"),
+    ("doesn't convert", "aylantirib boʻlmaydi"),
     ("All programs", "Barcha dasturlar"),
     ("Always open this type with it", "Bu turni doim u bilan ochish"),
     ("Copy / cut / paste", "Nusxalash / kesish / qoʻyish"),

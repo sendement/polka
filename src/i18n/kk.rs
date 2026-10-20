@@ -1,6 +1,9 @@
 //! Қазақша.
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "Неге түрлендіру"),
+    ("Left out", "Шығарылды"),
+    ("doesn't convert", "түрлендірілмейді"),
     ("All programs", "Барлық бағдарламалар"),
     ("Always open this type with it", "Бұл түрді әрқашан осымен ашу"),
     ("Copy / cut / paste", "Көшіру / қиып алу / кірістіру"),

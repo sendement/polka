@@ -5008,9 +5008,10 @@ fn convert_screens() {
     assert_eq!(groups(&h), [(Group::Image, 4), (Group::Audio, 1), (Group::Video, 1), (Group::Archive, 2)]);
     match &h.state().overlay {
         Some(Overlay::Convert(d)) => {
-            assert_eq!(d.refused.len(), 1, "{:?}", d.refused);
-            assert_eq!(d.refused[0].0, "locked.zip");
-            assert_eq!(d.other, 1);
+            // Left out, at the end: the locked archive and the text.
+            let mut out: Vec<String> = d.refused.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+            out.sort();
+            assert_eq!(out, ["locked.zip", "notes.txt"], "{:?}", d.refused);
         }
         _ => unreachable!(),
     }
@@ -5025,9 +5026,36 @@ fn convert_screens() {
     pick(&mut h, Group::Image, Target::Png);
     pick(&mut h, Group::Audio, Target::Opus);
     pick(&mut h, Group::Video, Target::Mp3);
-    pick(&mut h, Group::Archive, Target::Archive(crate::ops::ArchiveFormat::SevenZ));
+    // Archives: the archive dialog's own rows, the format first (the pad).
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.row = crate::convert_ui::CRow::Format;
+    }
+    for _ in 0..5 {
+        let f = match &h.state().overlay {
+            Some(Overlay::Convert(d)) => d.arch.format,
+            _ => unreachable!(),
+        };
+        if f == crate::ops::ArchiveFormat::SevenZ {
+            break;
+        }
+        press(&mut h, &[Action::Right]);
+    }
+    match &h.state().overlay {
+        Some(Overlay::Convert(d)) => {
+            assert_eq!(d.arch.format, crate::ops::ArchiveFormat::SevenZ);
+            assert_eq!(d.groups.iter().find(|g| g.group == Group::Archive).unwrap().target(), Target::Archive(crate::ops::ArchiveFormat::SevenZ));
+            assert!(d.rows().contains(&crate::convert_ui::CRow::Method) && d.rows().contains(&crate::convert_ui::CRow::Password));
+        }
+        _ => unreachable!(),
+    }
     settle(&mut h);
     shot(&mut h, "cv0-dialog");
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.row = crate::convert_ui::CRow::Trash;
+    }
+    h.state_mut().ctx.data_mut(|m| m.insert_temp(egui::Id::new("settings-reveal"), true));
+    settle(&mut h);
+    shot(&mut h, "cv0b-dialog-end");
     press(&mut h, &[Action::Menu]);
     assert!(h.state().overlay.is_none());
     wait_jobs(&mut h);
@@ -5052,6 +5080,26 @@ fn convert_screens() {
     assert!(!dir.join("locked.7z").exists());
     settle(&mut h);
     shot(&mut h, "cv1-done");
+    // A zip again as a zip, with a password (typed on the keyboard).
+    h.state_mut().pane_mut().selected.clear();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "plain.zip").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::ConvertAsk);
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.arch.format = crate::ops::ArchiveFormat::Zip;
+        d.row = crate::convert_ui::CRow::Password;
+    }
+    press(&mut h, &[Action::Accept]);
+    osk_type(&mut h, "pw");
+    h.state_mut().osk_submit();
+    match &h.state().overlay {
+        Some(Overlay::Convert(d)) => assert_eq!(d.arch.password.as_deref(), Some("pw")),
+        _ => panic!("the dialog didn't come back"),
+    }
+    press(&mut h, &[Action::Menu]);
+    wait_jobs(&mut h);
+    let test = |pw: &str| std::process::Command::new("7z").args(["t", &format!("-p{pw}")]).arg(dir.join("plain (2).zip")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success();
+    assert!(test("pw") && !test("wrong"), "not packed with the password");
     // The video to MP4 (H.264), the quality small, the original to the trash.
     h.state_mut().pane_mut().selected.clear();
     let i = h.state().pane().entries.iter().position(|e| e.name == "clip.mov").unwrap();

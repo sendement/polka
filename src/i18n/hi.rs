@@ -1,6 +1,9 @@
 //! हिन्दी.
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "इसमें बदलें"),
+    ("Left out", "छोड़े गए"),
+    ("doesn't convert", "बदला नहीं जा सकता"),
     ("All programs", "सभी प्रोग्राम"),
     ("Always open this type with it", "इस प्रकार को हमेशा इसी से खोलें"),
     ("Copy / cut / paste", "कॉपी / काटें / चिपकाएँ"),

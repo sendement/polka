@@ -1,6 +1,9 @@
 //! Français.
 
 pub const T: &[(&str, &str)] = &[
+    ("Convert to", "Convertir en"),
+    ("Left out", "Exclus"),
+    ("doesn't convert", "non convertible"),
     ("All programs", "Tous les programmes"),
     ("Always open this type with it", "Toujours ouvrir ce type avec"),
     ("Copy / cut / paste", "Copier / couper / coller"),

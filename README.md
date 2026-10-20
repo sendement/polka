@@ -236,7 +236,9 @@ filter take `#tag` words: `#work report` finds items tagged *work* with *report*
 □ (or 🔍) on a tag in the Tags dialog looks for it from the current folder down.
 
 **Converting.** △ → Convert… on any files: they're sorted into pictures, sound, video and
-archives, and each kind gets a format of its own — a mix of PNG, JPEG and WebP all become PNG (the
+archives; each kind shows its files (thumbnails), then the format they become — archives with the
+archive dialog's own settings (format, method, level, split, password) — and what can't be
+converted is listed last with why. Each kind gets a format of its own — a mix of PNG, JPEG and WebP all become PNG (the
 ones already PNG stay as they are), while the songs picked along with them become MP3. Pictures:
 PNG, JPEG, WebP, AVIF, HEIC, BMP, TIFF, GIF, from those and iPhone's HEIC, AVIF and JPEG XL. Sound:
 MP3, AAC, Opus, Vorbis, FLAC, WAV. Video: MP4 / MOV (H.264, plays anywhere — iPhone's HDR HEVC
