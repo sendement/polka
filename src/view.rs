@@ -1400,12 +1400,23 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     let over = dragging && pointer.is_some_and(|p| whole.contains(p));
     let released = ui.input(|i| i.pointer.primary_released());
     let mut drop_entry = None;
+    // Nothing to list (loading, an error, empty): the whole pane takes the
+    // click, so it becomes the active side all the same.
+    if pane.loading.is_some() || pane.error.is_some() || pane.entries.is_empty() {
+        let bg = ui.interact(whole, ui.id().with(("pane-bare", id)), Sense::click());
+        if bg.clicked() {
+            events.push(PaneEvent::ClearSelection);
+        }
+        if bg.secondary_clicked() {
+            events.push(PaneEvent::Context(None));
+        }
+    }
     if pane.loading.is_some() {
         ui.centered_and_justified(|ui| ui.spinner());
         return events;
     }
     if let Some(err) = &pane.error {
-        ui.centered_and_justified(|ui| ui.label(egui::RichText::new(err).color(ui.visuals().error_fg_color)));
+        ui.centered_and_justified(|ui| ui.add(egui::Label::new(egui::RichText::new(err).color(ui.visuals().error_fg_color)).selectable(false)));
         return events;
     }
     if pane.entries.is_empty() {
@@ -1414,10 +1425,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         } else {
             tr("Empty folder")
         };
-        let r = ui.centered_and_justified(|ui| ui.label(egui::RichText::new(empty).weak())).response;
-        if r.secondary_clicked() {
-            events.push(PaneEvent::Context(None));
-        }
+        ui.centered_and_justified(|ui| ui.add(egui::Label::new(egui::RichText::new(empty).weak()).selectable(false)));
         if over {
             ui.painter().rect_stroke(whole, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
             if released {

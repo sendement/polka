@@ -5286,3 +5286,43 @@ fn hotkey_screens() {
     settle(&mut h);
     shot(&mut h, "hk1-help");
 }
+
+/// A click into a pane with nothing in it (an empty folder) makes it the
+/// active side too; a right click there gives its menu.
+#[test]
+#[ignore]
+fn empty_pane_click_screens() {
+    use crate::vfs::Location;
+    use egui::{Event, Modifiers, PointerButton, pos2};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("emptyclick");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("nothing")).unwrap();
+    std::fs::write(dir.join("a.txt"), "x").unwrap();
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let cfg = h.state().cfg.clone();
+    h.state_mut().run(crate::app::Cmd::ToggleDual);
+    h.state_mut().pane_at_mut(1).navigate(Location::Local(dir.join("nothing")), None, &cfg);
+    h.state_mut().set_side(0);
+    settle(&mut h);
+    assert_eq!(h.state().side(), 0);
+    let click = |h: &mut Harness<'static, App>, button: PointerButton| {
+        let p = pos2(850.0, 400.0);
+        h.event(Event::PointerMoved(p));
+        h.event(Event::PointerButton { pos: p, button, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(Event::PointerButton { pos: p, button, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+        h.step();
+    };
+    click(&mut h, PointerButton::Primary);
+    assert_eq!(h.state().side(), 1, "the empty pane didn't take the click");
+    h.state_mut().set_side(0);
+    settle(&mut h);
+    click(&mut h, PointerButton::Secondary);
+    assert_eq!(h.state().side(), 1);
+    assert!(matches!(h.state().overlay, Some(crate::app::Overlay::Menu(_))), "no menu on a right click");
+    h.state_mut().overlay = None;
+    h.state_mut().run(crate::app::Cmd::ToggleDual);
+}
