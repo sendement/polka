@@ -233,6 +233,8 @@ pub fn refusal(path: &Path, name: &str) -> Option<&'static str> {
 pub struct Item {
     pub src: PathBuf,
     pub target: Target,
+    /// Its kind's own quality (for the lossy formats).
+    pub quality: Quality,
 }
 
 /// Where the converted file goes: beside it, named after it.
@@ -268,7 +270,7 @@ pub fn needless(src: &Path, target: Target) -> bool {
 
 /// Convert them, one by one. The originals that worked go to the trash if
 /// asked to.
-pub fn run(items: &[Item], quality: Quality, trash: bool, archive_opts: &crate::ops::CompressOpts, job: &Job) -> std::io::Result<()> {
+pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts, job: &Job) -> std::io::Result<()> {
     job.items.store(true, Ordering::Relaxed);
     job.total.store(items.len() as u64, Ordering::Relaxed);
     let mut failed: Vec<String> = Vec::new();
@@ -280,8 +282,8 @@ pub fn run(items: &[Item], quality: Quality, trash: bool, archive_opts: &crate::
         job.now_on(&it.src);
         let out = out_path(&it.src, it.target);
         let r = match group_of(&it.src.to_string_lossy()) {
-            Some(Group::Image) => image(&it.src, &out, it.target, quality),
-            Some(Group::Audio) | Some(Group::Video) => media(&it.src, &out, it.target, quality, job),
+            Some(Group::Image) => image(&it.src, &out, it.target, it.quality),
+            Some(Group::Audio) | Some(Group::Video) => media(&it.src, &out, it.target, it.quality, job),
             Some(Group::Archive) => archive(&it.src, &out, it.target, archive_opts),
             None => Err("not convertible".into()),
         };

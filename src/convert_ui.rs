@@ -1,7 +1,7 @@
 //! The "Convert…" dialog: the chosen files sorted into pictures, sound,
 //! video and archives. Each kind shows its files, then what they become
 //! (archives with the archive dialog's own settings); what can't be
-//! converted is listed last, with why. Then the quality, the originals.
+//! converted is listed last, with why. Then what becomes of the originals.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,8 @@ pub struct GroupRow {
     pub items: Vec<PathBuf>,
     pub targets: Vec<Target>,
     pub pick: usize,
+    /// Its own quality (pictures, sound and video).
+    pub quality: Quality,
 }
 
 impl GroupRow {
@@ -44,7 +46,8 @@ pub enum CRow {
     Split,
     Password,
     Names,
-    Quality,
+    /// A kind's quality (by group index).
+    Quality(usize),
     Trash,
     Buttons,
 }
@@ -53,7 +56,6 @@ pub struct ConvertDlg {
     pub groups: Vec<GroupRow>,
     /// How the archives are packed again.
     pub arch: CompressOpts,
-    pub quality: Quality,
     /// The originals that converted go to the trash.
     pub trash: bool,
     /// Left out, and why (password-protected, a tool missing, not a kind
@@ -87,10 +89,8 @@ impl ConvertDlg {
                 }
             } else {
                 v.push(CRow::Target(i));
+                v.push(CRow::Quality(i));
             }
-        }
-        if self.groups.iter().any(|g| g.group != Group::Archive) {
-            v.push(CRow::Quality);
         }
         v.push(CRow::Trash);
         v.push(CRow::Buttons);
@@ -139,9 +139,10 @@ impl ConvertDlg {
                 o.split = cycle(&all, o.split, d);
             }
             CRow::Names => o.encrypt_names = !o.encrypt_names,
-            CRow::Quality => {
-                let at = QUALITIES.iter().position(|q| *q == self.quality).unwrap_or(1) as isize;
-                self.quality = QUALITIES[(at + d).clamp(0, 2) as usize];
+            CRow::Quality(i) => {
+                let g = &mut self.groups[i];
+                let at = QUALITIES.iter().position(|q| *q == g.quality).unwrap_or(1) as isize;
+                g.quality = QUALITIES[(at + d).clamp(0, 2) as usize];
             }
             CRow::Trash => self.trash = !self.trash,
             CRow::Buttons => self.button = (self.button as isize + d).clamp(0, 1) as usize,
@@ -213,7 +214,7 @@ impl App {
                     };
                     let want = self.convert_last.iter().find(|(k, _)| *k == g).map(|(_, t)| *t).unwrap_or(usual);
                     let pick = targets.iter().position(|t| *t == want).unwrap_or(0);
-                    groups.push(GroupRow { group: g, items: vec![p], targets, pick });
+                    groups.push(GroupRow { group: g, items: vec![p], targets, pick, quality: Quality::Balanced });
                 }
             }
         }
@@ -227,7 +228,7 @@ impl App {
             _ => None,
         });
         let arch = CompressOpts::new(format.unwrap_or(ArchiveFormat::Zip));
-        let mut d = ConvertDlg { groups, arch, quality: Quality::Balanced, trash: false, refused, row: CRow::Buttons, button: 0 };
+        let mut d = ConvertDlg { groups, arch, trash: false, refused, row: CRow::Buttons, button: 0 };
         d.row = d.rows()[0];
         d.sync_archive();
         self.overlay = Some(Overlay::Convert(Box::new(d)));
@@ -238,7 +239,12 @@ impl App {
         match a {
             Action::Up | Action::Down => {
                 d.move_row(if a == Action::Up { -1 } else { 1 });
-                self.ctx.data_mut(|m| m.insert_temp(egui::Id::new("settings-reveal"), true));
+                let bottom = matches!(d.row, CRow::Trash | CRow::Buttons);
+                self.ctx.data_mut(|m| {
+                    m.insert_temp(egui::Id::new("settings-reveal"), true);
+                    // At the end: down to what's left out, under it.
+                    m.insert_temp(egui::Id::new("convert-bottom"), bottom);
+                });
             }
             Action::Left | Action::Right => {
                 let row = d.row;
@@ -295,13 +301,13 @@ impl App {
             let t = if g.group == Group::Archive { Target::Archive(d.arch.format) } else { g.target() };
             self.convert_last.retain(|(k, _)| *k != g.group);
             self.convert_last.push((g.group, t));
-            items.extend(g.items.iter().filter(|p| !crate::convert::needless(p, t) || (g.group == Group::Archive && (d.arch.split.is_some() || d.arch.password.is_some()))).map(|p| crate::convert::Item { src: p.clone(), target: t }));
+            items.extend(g.items.iter().filter(|p| !crate::convert::needless(p, t) || (g.group == Group::Archive && (d.arch.split.is_some() || d.arch.password.is_some()))).map(|p| crate::convert::Item { src: p.clone(), target: t, quality: g.quality }));
         }
         if items.is_empty() {
             return self.toast(tr("Already in that format"), false);
         }
         self.pane_mut().selected.clear();
-        self.start(Op::Convert { items, quality: d.quality, trash: d.trash, archive: d.arch.clone() });
+        self.start(Op::Convert { items, trash: d.trash, archive: d.arch.clone() });
     }
 }
 
@@ -488,9 +494,30 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
                     ui.painter().text(pos2(rect.min.x + 14.0, rect.min.y + 42.0), Align2::LEFT_CENTER, trn("Already in this format: %n", already), FontId::proportional(12.0), v.weak_text_color());
                 }
                 chips(ui, rect, row, g.targets.iter().enumerate().map(|(k, t)| (t.label().to_string(), k == g.pick)).collect(), &mut ev);
+                // Its own quality (faded for a lossless format, where it
+                // means nothing).
+                let qrow = CRow::Quality(i);
+                let (rect, r) = crate::view::settings_row(ui, 40.0, d.row == qrow, ("conv-q", i));
+                if r.clicked() {
+                    ev = Some((qrow, 0));
+                }
+                let c = if g.target().lossy() { v.text_color() } else { v.weak_text_color() };
+                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Quality"), FontId::proportional(14.0), c);
+                chips(ui, Rect::from_min_max(pos2(rect.min.x, rect.center().y - 22.0), rect.max), qrow, QUALITIES.iter().map(|q| (quality_name(*q).to_string(), *q == g.quality)).collect(), &mut ev);
             }
             ui.add_space(8.0);
         }
+        let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Trash, ("conv", "trash"));
+        if r.clicked() {
+            ev = Some((CRow::Trash, 0));
+        }
+        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Move the originals to the trash"), font.clone(), v.text_color());
+        let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+        ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+        if d.trash {
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+        }
+        ui.add_space(8.0);
         // What can't be converted, and why.
         if !d.refused.is_empty() {
             ui.label(egui::RichText::new(format!("{} · {}", tr("Left out"), d.refused.len())).strong().color(v.warn_fg_color));
@@ -509,23 +536,8 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
             }
             ui.add_space(8.0);
         }
-        if d.groups.iter().any(|g| g.group != Group::Archive) {
-            let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Quality, ("conv", "quality"));
-            if r.clicked() {
-                ev = Some((CRow::Quality, 0));
-            }
-            ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Quality"), font.clone(), v.text_color());
-            chips(ui, Rect::from_min_max(pos2(rect.min.x, rect.center().y - 22.0), rect.max), CRow::Quality, QUALITIES.iter().map(|q| (quality_name(*q).to_string(), *q == d.quality)).collect(), &mut ev);
-        }
-        let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Trash, ("conv", "trash"));
-        if r.clicked() {
-            ev = Some((CRow::Trash, 0));
-        }
-        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Move the originals to the trash"), font.clone(), v.text_color());
-        let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-        ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-        if d.trash {
-            ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+        if ui.ctx().data_mut(|m| m.remove_temp::<bool>(egui::Id::new("convert-bottom"))).unwrap_or(false) {
+            ui.scroll_to_cursor(Some(egui::Align::Max));
         }
     });
     // The buttons (the pad: ← → and ✕ on their row, or Start).
@@ -571,7 +583,7 @@ pub fn clicked(app: &mut App, row: CRow, step: isize) {
                         d.sync_archive();
                     }
                 }
-                CRow::Quality => d.quality = QUALITIES[i.min(2)],
+                CRow::Quality(g) => d.groups[g].quality = QUALITIES[i.min(2)],
                 _ => {}
             }
         }

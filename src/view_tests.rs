@@ -5053,7 +5053,8 @@ fn convert_screens() {
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         d.row = crate::convert_ui::CRow::Trash;
     }
-    h.state_mut().ctx.data_mut(|m| m.insert_temp(egui::Id::new("settings-reveal"), true));
+    // Down with the pad: the list scrolls to what's left out, at the end.
+    press(&mut h, &[Action::Up, Action::Down]);
     settle(&mut h);
     shot(&mut h, "cv0b-dialog-end");
     press(&mut h, &[Action::Menu]);
@@ -5107,7 +5108,7 @@ fn convert_screens() {
     h.state_mut().run(Cmd::ConvertAsk);
     pick(&mut h, Group::Video, Target::Mp4);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
-        d.quality = crate::convert::Quality::Small;
+        d.groups[0].quality = crate::convert::Quality::Small;
         d.trash = true;
     }
     press(&mut h, &[Action::Menu]);
