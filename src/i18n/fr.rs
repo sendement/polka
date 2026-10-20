@@ -1,6 +1,15 @@
 //! Français.
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "Tous les programmes"),
+    ("Always open this type with it", "Toujours ouvrir ce type avec"),
+    ("Copy / cut / paste", "Copier / couper / coller"),
+    ("Leave the terminal", "Quitter le terminal"),
+    ("Open with…", "Ouvrir avec…"),
+    ("Refresh", "Actualiser"),
+    ("Remember", "Retenir"),
+    ("Reopen closed tab", "Rouvrir l'onglet fermé"),
+    ("usual", "par défaut"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "déverrouillez le téléphone et autorisez l'accès aux fichiers ; s'il ne répond pas, rebranchez-le"),
     ("On the phone, choose USB use: File transfer", "Sur le téléphone, choisissez l'usage USB : Transfert de fichiers"),
     ("Unlock the iPhone and tap Trust, then open it again", "Déverrouillez l'iPhone et touchez « Se fier », puis rouvrez-le"),

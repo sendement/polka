@@ -156,6 +156,11 @@ impl App {
                 }
                 // Ctrl+V on a real keyboard.
                 egui::Event::Paste(t) if osk => self.osk_paste(Some(t)),
+                // Ctrl+C / X / V come as clipboard events, not keys: the
+                // files' copy, cut and paste.
+                egui::Event::Copy if self.overlay.is_none() => self.run(Cmd::Copy),
+                egui::Event::Cut if self.overlay.is_none() => self.run(Cmd::Cut),
+                egui::Event::Paste(_) if self.overlay.is_none() => self.run(Cmd::Paste),
                 egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
                     if osk {
                         self.osk_keyboard(key);
@@ -230,7 +235,15 @@ impl App {
                 Key::X => Some(Cmd::Cut),
                 Key::V => Some(Cmd::Paste),
                 Key::A => Some(Cmd::SelectAll),
+                Key::T if m.shift => Some(Cmd::ReopenTab),
                 Key::T => Some(Cmd::NewTab),
+                Key::R => return self.reload_all(),
+                Key::D => self.pane().loc.local_path().map(|p| Cmd::Pin(p.to_path_buf())),
+                Key::Num1 => Some(Cmd::SetView(ViewMode::Grid)),
+                Key::Num2 => Some(Cmd::SetView(ViewMode::List)),
+                // Tabs: back and forth.
+                Key::ArrowLeft => return press(self, Action::PrevTab),
+                Key::ArrowRight => return press(self, Action::NextTab),
                 Key::W => Some(Cmd::CloseTab),
                 Key::H => Some(Cmd::ToggleHidden),
                 Key::B => Some(Cmd::ToggleSidebar),
@@ -258,6 +271,13 @@ impl App {
                 Key::ArrowLeft => press(self, Action::HistoryBack),
                 Key::ArrowRight => press(self, Action::HistoryForward),
                 Key::ArrowUp => press(self, Action::Back),
+                Key::Home if self.overlay.is_none() => {
+                    let cfg = self.cfg.clone();
+                    let home = dirs::home_dir().unwrap_or_else(|| "/".into());
+                    self.focus = Focus::Panes;
+                    self.pane_mut().navigate(crate::vfs::Location::Local(home), None, &cfg);
+                }
+                Key::Enter if self.overlay.is_none() => self.run(Cmd::Properties),
                 _ => {}
             }
             return;
@@ -287,6 +307,9 @@ impl App {
             Key::F1 => return if self.overlay.is_none() { self.run(Cmd::Help) },
             Key::F2 => return if self.overlay.is_none() { self.run(Cmd::Rename) },
             Key::F3 => Action::View,
+            Key::F4 => return if self.overlay.is_none() { self.run(Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
+            Key::F5 => return self.reload_all(),
+            Key::F9 => return if self.overlay.is_none() { self.run(Cmd::ToggleSidebar) },
             Key::Delete => {
                 if self.overlay.is_none() {
                     self.run(if m.shift { Cmd::DeleteAsk } else { Cmd::TrashAsk });
@@ -760,6 +783,14 @@ impl App {
                 (Action::Left, tr("Adjust")),
                 (Action::Accept, tr("OK")),
                 (Action::Menu, tr("Create")),
+                (Action::Back, tr("Cancel")),
+            ],
+            Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
+            Some(Overlay::OpenWith(_)) => vec![
+                (Action::Up, tr("Move")),
+                (Action::Accept, tr("Open")),
+                (Action::Select, tr("Remember")),
+                (Action::Actions, tr("All programs")),
                 (Action::Back, tr("Cancel")),
             ],
             Some(Overlay::Convert(_)) => vec![
@@ -1238,6 +1269,7 @@ impl App {
         let mut tag_ev = None;
         let mut net_ev = None;
         let mut conv_ev = None;
+        let mut ow_ev = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1268,11 +1300,12 @@ impl App {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live())),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
-                    Some(Overlay::Help) => dismiss = draw_help(ui, pad),
+                    Some(Overlay::Help) => dismiss = draw_help(ui, pad, self.help_scroll.take()),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Tags(ed)) => tag_ev = crate::tags_ui::draw(ui, ed),
                     Some(Overlay::Net(d)) => net_ev = crate::net_ui::draw(ui, d),
                     Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d),
+                    Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
@@ -1311,6 +1344,9 @@ impl App {
         }
         if let Some((row, step)) = conv_ev {
             crate::convert_ui::clicked(self, row, step);
+        }
+        if let Some(ev) = ow_ev {
+            crate::openwith::event(self, ev);
         }
         if let Some((row, d)) = viewer_ev {
             self.viewer_step(row, d);
@@ -2432,50 +2468,66 @@ fn draw_props(ui: &mut Ui, p: &Props) -> bool {
     ui.button(tr("Close")).clicked()
 }
 
-fn draw_help(ui: &mut Ui, pad: PadKind) -> bool {
+fn draw_help(ui: &mut Ui, pad: PadKind, scroll: Option<f32>) -> bool {
     ui.label(egui::RichText::new(tr("Controls")).strong().size(18.0));
     ui.add_space(8.0);
-    let rows: [(Action, &str, &str); 13] = [
-        (Action::Up, "", "←↑→↓"),
-        (Action::Accept, tr("Open"), "Enter"),
-        (Action::Back, tr("Back"), "Backspace / Esc"),
-        (Action::Select, tr("Select"), "Space / Insert"),
-        (Action::Actions, tr("Actions"), "Shift+F10"),
-        (Action::Menu, tr("Menu"), "F10"),
-        (Action::View, tr("Dual pane"), "F3"),
-        (Action::PrevTab, tr("Tabs"), "Ctrl+Tab"),
-        (Action::LeftTrigger, tr("Panes / page"), "Tab / PgUp PgDn"),
-        (Action::LeftStick, tr("Sidebar"), "Ctrl+B"),
-        (Action::HistoryBack, tr("History"), "Alt+← →"),
-        (Action::Home, tr("Rename"), "F2"),
-        (Action::Menu, tr("Filter / search"), "Ctrl+F / Ctrl+Shift+F"),
+    // (the pad's buttons, what it does, the keys); no buttons: keyboard only.
+    let rows: [(&[Action], &str, &str); 27] = [
+        (&[Action::Up], tr("Move"), "←↑→↓"),
+        (&[Action::Accept], tr("Open"), "Enter"),
+        (&[Action::Back], tr("Back"), "Backspace / Esc"),
+        (&[Action::Select], tr("Select"), "Space / Insert"),
+        (&[], tr("Select all"), "Ctrl+A"),
+        (&[Action::Actions], tr("Actions"), "Shift+F10"),
+        (&[Action::Menu], tr("Menu"), "F10"),
+        (&[], tr("Copy / cut / paste"), "Ctrl+C / X / V"),
+        (&[Action::Actions], tr("Rename"), "F2"),
+        (&[Action::Actions], tr("Move to trash"), "Delete"),
+        (&[Action::Actions], tr("Delete permanently"), "Shift+Delete"),
+        (&[Action::Menu], tr("New folder"), "Ctrl+Shift+N"),
+        (&[Action::View], tr("Dual pane"), "F3"),
+        (&[Action::PrevTab, Action::NextTab], tr("Tabs"), "Ctrl+← → / Ctrl+Tab"),
+        (&[Action::Menu], tr("New tab"), "Ctrl+T"),
+        (&[Action::Menu], tr("Close tab"), "Ctrl+W"),
+        (&[], tr("Reopen closed tab"), "Ctrl+Shift+T"),
+        (&[Action::LeftTrigger, Action::RightTrigger], tr("Panes / page"), "Tab / PgUp PgDn"),
+        (&[Action::LeftStick], tr("Sidebar"), "Ctrl+B / F9"),
+        (&[], tr("History"), "Alt+← →"),
+        (&[], tr("Home folder"), "Alt+Home"),
+        (&[Action::Menu], tr("Filter / search"), "Ctrl+F / Ctrl+Shift+F"),
+        (&[Action::Menu], tr("Go to path…"), "Ctrl+L"),
+        (&[], tr("Refresh"), "F5 / Ctrl+R"),
+        (&[Action::Actions], tr("Properties"), "Alt+Enter"),
+        (&[Action::Menu], tr("View"), "Ctrl+1 / Ctrl+2"),
+        (&[Action::Back], tr("Leave the terminal"), "Esc held"),
     ];
-    egui::Grid::new("help").num_columns(3).spacing([18.0, 8.0]).show(ui, |ui| {
-        ui.label(egui::RichText::new(tr("Gamepad")).weak());
-        ui.label("");
-        ui.label(egui::RichText::new(tr("Keyboard")).weak());
-        ui.end_row();
-        for (a, label, keys) in rows {
-            ui.horizontal(|ui| {
-                if a == Action::Home {
-                    glyph(ui, Action::Actions, pad);
-                } else if a == Action::HistoryBack {
-                    ui.label(egui::RichText::new("—").weak()); // keyboard / toolbar only
-                } else {
-                    glyph(ui, a, pad);
-                    if a == Action::PrevTab {
-                        glyph(ui, Action::NextTab, pad);
-                    }
-                    if a == Action::LeftTrigger {
-                        glyph(ui, Action::RightTrigger, pad);
-                    }
-                }
-            });
-            ui.label(if a == Action::Up { tr("Move") } else { label });
-            ui.label(egui::RichText::new(keys).monospace());
+    let mut sa = egui::ScrollArea::vertical().id_salt("help").max_height((ui.ctx().content_rect().height() - 160.0).max(200.0));
+    if let Some(d) = scroll.filter(|d| *d != 0.0) {
+        let now = ui.ctx().data(|m| m.get_temp::<f32>(egui::Id::new("help-scroll"))).unwrap_or(0.0);
+        sa = sa.vertical_scroll_offset((now + d).max(0.0));
+    }
+    let out = sa.show(ui, |ui| {
+        egui::Grid::new("help").num_columns(3).spacing([18.0, 6.0]).show(ui, |ui| {
+            ui.label(egui::RichText::new(tr("Gamepad")).weak());
+            ui.label("");
+            ui.label(egui::RichText::new(tr("Keyboard")).weak());
             ui.end_row();
-        }
+            for (buttons, label, keys) in rows {
+                ui.horizontal(|ui| {
+                    if buttons.is_empty() {
+                        ui.label(egui::RichText::new("—").weak()); // keyboard / mouse only
+                    }
+                    for a in buttons {
+                        glyph(ui, *a, pad);
+                    }
+                });
+                ui.label(label);
+                ui.label(egui::RichText::new(keys).monospace());
+                ui.end_row();
+            }
+        });
     });
+    ui.ctx().data_mut(|m| m.insert_temp(egui::Id::new("help-scroll"), out.state.offset.y));
     ui.add_space(8.0);
     ui.button(tr("Close")).clicked()
 }

@@ -24,6 +24,7 @@ mod sandbox;
 mod schemes;
 mod sidebar;
 mod net;
+mod openwith;
 mod phones;
 mod phones_ui;
 mod net_ui;

@@ -1,6 +1,15 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "すべてのプログラム"),
+    ("Always open this type with it", "この種類を常にこれで開く"),
+    ("Copy / cut / paste", "コピー / 切り取り / 貼り付け"),
+    ("Leave the terminal", "端末から出る"),
+    ("Open with…", "このアプリで開く…"),
+    ("Refresh", "更新"),
+    ("Remember", "記憶"),
+    ("Reopen closed tab", "閉じたタブを開き直す"),
+    ("usual", "既定"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "スマートフォンのロックを解除してファイルへのアクセスを許可してください。応答しない場合はケーブルを挿し直してください"),
     ("On the phone, choose USB use: File transfer", "スマートフォンで USB の用途を「ファイル転送」にしてください"),
     ("Unlock the iPhone and tap Trust, then open it again", "iPhone のロックを解除して「信頼」をタップし、もう一度開いてください"),

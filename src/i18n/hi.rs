@@ -1,6 +1,15 @@
 //! हिन्दी.
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "सभी प्रोग्राम"),
+    ("Always open this type with it", "इस प्रकार को हमेशा इसी से खोलें"),
+    ("Copy / cut / paste", "कॉपी / काटें / चिपकाएँ"),
+    ("Leave the terminal", "टर्मिनल से बाहर निकलें"),
+    ("Open with…", "इसके साथ खोलें…"),
+    ("Refresh", "रीफ़्रेश करें"),
+    ("Remember", "याद रखें"),
+    ("Reopen closed tab", "बंद टैब फिर खोलें"),
+    ("usual", "डिफ़ॉल्ट"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "फ़ोन अनलॉक करें और फ़ाइलों तक पहुँच दें; फिर भी जवाब न दे तो केबल दोबारा लगाएँ"),
     ("On the phone, choose USB use: File transfer", "फ़ोन पर USB का उपयोग चुनें: फ़ाइल ट्रांसफ़र"),
     ("Unlock the iPhone and tap Trust, then open it again", "iPhone अनलॉक करें और «Trust» दबाएँ, फिर दोबारा खोलें"),

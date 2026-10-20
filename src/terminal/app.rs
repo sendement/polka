@@ -521,6 +521,15 @@ impl App {
                         self.term_key(K::Char('v'), Mods::CTRL);
                     }
                 }
+                // Esc as ○ on the pad: a tap goes to the shell (on release),
+                // held it leaves for the sidebar.
+                egui::Event::Key { key: Key::Escape, pressed, repeat, modifiers: m, .. } if m.is_none() && !self.term_ref().is_some_and(|t| t.selecting) => {
+                    if pressed && !repeat {
+                        self.terminal_input(Action::Back);
+                    } else if !pressed {
+                        self.terminal_release(Action::Back);
+                    }
+                }
                 egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
                     if !self.terminal_key(key, m) {
                         rest.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: m });

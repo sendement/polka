@@ -1,6 +1,15 @@
 //! Русский.
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "Все программы"),
+    ("Always open this type with it", "Всегда открывать этот тип в ней"),
+    ("Copy / cut / paste", "Копировать / вырезать / вставить"),
+    ("Leave the terminal", "Выйти из терминала"),
+    ("Open with…", "Открыть с помощью…"),
+    ("Refresh", "Обновить"),
+    ("Remember", "Запомнить"),
+    ("Reopen closed tab", "Вернуть закрытую вкладку"),
+    ("usual", "по умолчанию"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "разблокируйте телефон и разрешите доступ к файлам; если не отвечает — переподключите кабель"),
     ("On the phone, choose USB use: File transfer", "На телефоне выберите режим USB: Передача файлов"),
     ("Unlock the iPhone and tap Trust, then open it again", "Разблокируйте iPhone и нажмите «Доверять», затем откройте снова"),

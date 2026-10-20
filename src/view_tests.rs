@@ -5169,3 +5169,120 @@ fn phone_screens() {
         std::env::remove_var("POLKA_PHONE_TOOLS");
     }
 }
+
+/// The keyboard as on other file managers: Ctrl+C / Ctrl+V (they come as
+/// clipboard events), Ctrl+← → through the tabs, Ctrl+Shift+T bringing a
+/// closed one back; Esc held leaving the terminal (a tap stays in it);
+/// "Open with…" listing the programs for the type and launching one.
+#[test]
+#[ignore]
+fn hotkey_screens() {
+    use crate::app::{Cmd, Focus, Overlay};
+    use crate::vfs::Location;
+    use egui::{Event, Key, Modifiers};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("keys");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("into")).unwrap();
+    std::fs::write(dir.join("doc.txt"), "x").unwrap();
+    image::RgbImage::new(4, 4).save(dir.join("pic.png")).unwrap();
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    h.state_mut().cfg = cfg.clone();
+    let key = |h: &mut Harness<'static, App>, k: Key, m: Modifiers| {
+        h.event(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m });
+        h.event(Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: m });
+        h.step();
+    };
+    // Ctrl+C on doc.txt, into the folder, Ctrl+V.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "doc.txt").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.event(Event::Copy);
+    h.step();
+    assert!(h.state().clip.is_some(), "Ctrl+C copied nothing");
+    h.state_mut().pane_mut().navigate(Location::Local(dir.join("into")), None, &cfg);
+    h.event(Event::Paste(String::new()));
+    h.step();
+    wait_jobs(&mut h);
+    assert!(dir.join("into/doc.txt").exists(), "Ctrl+V pasted nothing");
+    // Tabs: two more, Ctrl+← →, closed and back.
+    h.state_mut().run(Cmd::NewTab);
+    h.state_mut().run(Cmd::NewTab);
+    assert_eq!(h.state().tab, 2);
+    key(&mut h, Key::ArrowLeft, Modifiers::COMMAND);
+    assert_eq!(h.state().tab, 1);
+    key(&mut h, Key::ArrowRight, Modifiers::COMMAND);
+    assert_eq!(h.state().tab, 2);
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    key(&mut h, Key::W, Modifiers::COMMAND);
+    assert_eq!(h.state().tabs.len(), 2);
+    key(&mut h, Key::T, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(h.state().tabs.len(), 3);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.clone()));
+    // The terminal: a tap of Esc stays, held it leaves for the sidebar.
+    h.state_mut().run(Cmd::TermOpen(Some(dir.clone())));
+    settle(&mut h);
+    h.state_mut().focus = Focus::Panes;
+    key(&mut h, Key::Escape, Modifiers::NONE);
+    for _ in 0..10 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    assert_eq!(h.state().focus, Focus::Panes, "a tap left the terminal");
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    for _ in 0..14 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+    h.step();
+    assert_eq!(h.state().focus, Focus::Sidebar, "holding Esc didn't leave the terminal");
+    h.state_mut().run(Cmd::TermClose);
+    settle(&mut h);
+    // Open with: a stand-in viewer for PNG, chosen, launched.
+    let apps = dir.join("apps");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::write(apps.join("test.picviewer.desktop"), "[Desktop Entry]\nType=Application\nName=Test Picture Viewer\nExec=testview %f\nMimeType=image/png;image/jpeg;\n").unwrap();
+    std::fs::write(apps.join("test.music.desktop"), "[Desktop Entry]\nType=Application\nName=Test Music\nExec=testmusic %f\nMimeType=audio/mpeg;\n").unwrap();
+    unsafe { std::env::set_var("POLKA_APPS_DIR", &apps) };
+    h.state_mut().focus = Focus::Panes;
+    h.state_mut().pane_mut().selected.clear();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "pic.png").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::OpenExternal);
+    let (names, at) = match &h.state().overlay {
+        Some(Overlay::OpenWith(d)) => {
+            assert_eq!(d.mime, "image/png");
+            let names: Vec<String> = d.list.iter().map(|p| p.name.clone()).collect();
+            let at = names.iter().position(|n| n == "Test Picture Viewer");
+            (names, at)
+        }
+        _ => panic!("no dialog"),
+    };
+    let at = at.unwrap_or_else(|| panic!("{names:?}"));
+    assert!(!names.iter().any(|n| n == "Test Music"), "{names:?}");
+    if let Some(Overlay::OpenWith(d)) = h.state_mut().overlay.as_mut() {
+        d.cursor = at;
+    }
+    settle(&mut h);
+    shot(&mut h, "hk0-open-with");
+    crate::launch::LAUNCHED.with(|l| l.borrow_mut().clear());
+    press(&mut h, &[Action::Accept]);
+    assert!(h.state().overlay.is_none());
+    let launched = crate::launch::LAUNCHED.with(|l| l.borrow().clone());
+    assert!(launched.iter().any(|l| l.contains("testview") && l.contains("pic.png")), "{launched:?}");
+    // "All programs" shows the music player too.
+    h.state_mut().run(Cmd::OpenExternal);
+    press(&mut h, &[Action::Actions]);
+    match &h.state().overlay {
+        Some(Overlay::OpenWith(d)) => assert!(d.list.iter().any(|p| p.name == "Test Music")),
+        _ => unreachable!(),
+    }
+    h.state_mut().overlay = None;
+    unsafe { std::env::remove_var("POLKA_APPS_DIR") };
+    h.state_mut().run(Cmd::Help);
+    settle(&mut h);
+    shot(&mut h, "hk1-help");
+}

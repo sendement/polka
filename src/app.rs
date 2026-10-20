@@ -549,6 +549,8 @@ pub enum Cmd {
     TagsAsk,
     /// Convert the targets into other formats.
     ConvertAsk,
+    /// The tab closed last, open again.
+    ReopenTab,
     /// Network places: a new one, edit, connect, disconnect, remove.
     NetAdd,
     NetEdit(String),
@@ -930,6 +932,7 @@ pub enum Overlay {
     Tags(crate::tags_ui::TagEditor),
     Net(Box<crate::net_ui::NetDlg>),
     Convert(Box<crate::convert_ui::ConvertDlg>),
+    OpenWith(Box<crate::openwith::OpenWithDlg>),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1233,7 +1236,7 @@ impl SideItem {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Sidebar,
     Panes,
@@ -1358,6 +1361,10 @@ pub struct App {
     pub net_pw: HashMap<String, String>,
     /// Connections being made.
     pub net_busy: HashSet<String>,
+    /// The help's scrolling asked for by the pad (by so much).
+    pub help_scroll: Option<f32>,
+    /// Places of the tabs closed, last last (Ctrl+Shift+T).
+    pub closed_tabs: Vec<Location>,
     /// Phones on USB (as the sidebar last saw them).
     pub phones: Vec<crate::phones::Phone>,
     /// The format last chosen for each kind of file, in "Convert…".
@@ -1475,6 +1482,8 @@ impl App {
             net_busy: HashSet::new(),
             convert_last: Vec::new(),
             phones: Vec::new(),
+            closed_tabs: Vec::new(),
+            help_scroll: None,
             sys_clip: None,
             dark_applied: None,
             schemes: crate::schemes::all(),
@@ -2490,6 +2499,7 @@ impl App {
             Overlay::Tags(_) => self.tags_input(a),
             Overlay::Net(_) => self.net_input(a),
             Overlay::Convert(_) => self.convert_input(a),
+            Overlay::OpenWith(_) => self.open_with_input(a),
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::TermKeys(_) => self.term_keys_input(a),
             Overlay::TermSettings(_) => self.term_settings_input(a),
@@ -2552,6 +2562,15 @@ impl App {
                 if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
                 }
+                // The help is longer than small screens: the pad scrolls it.
+                let d = match a {
+                    Action::Up => -40.0,
+                    Action::Down => 40.0,
+                    Action::LeftTrigger => -300.0,
+                    Action::RightTrigger => 300.0,
+                    _ => 0.0,
+                };
+                self.help_scroll = Some(d);
             }
         }
     }
@@ -3132,7 +3151,7 @@ impl App {
         if let Some(path) = targets.first().filter(|e| single && !e.is_dir).and_then(|e| p.entry_path(e)) {
             let name = targets[0].name.clone();
             if crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
-                add(tr("Open in another app"), Cmd::OpenExternal, true);
+                // ("Open with…" below.)
             } else if crate::viewer::kind(&path, &name).is_some() {
                 add(tr("Open in Polka"), Cmd::OpenInViewer, true);
             } else if crate::launch::runs(&path) && crate::viewer::text::sniff(&path) {
@@ -3163,6 +3182,7 @@ impl App {
             add(tr("Move to other pane"), Cmd::MoveOther, any && editable && other_writable);
         }
         add(tr("Rename"), Cmd::Rename, single && editable);
+        add(tr("Open with…"), Cmd::OpenExternal, local && targets.iter().any(|e| !e.is_dir));
         add(tr("Tags…"), Cmd::TagsAsk, any && local);
         let convertible = targets.iter().any(|e| !e.is_dir && crate::convert::group_of(&e.name).is_some());
         add(tr("Convert…"), Cmd::ConvertAsk, convertible && local);
@@ -3945,18 +3965,11 @@ impl App {
                 self.pane_mut().selected.clear();
                 self.start(Op::Delete { paths });
             }
-            Cmd::OpenExternal => {
-                let path = match &self.cur_tab().viewer {
-                    Some(v) => Some(v.path.clone()),
-                    None => self.pane().current().and_then(|e| self.pane().entry_path(e)),
-                };
-                if let Some(p) = path {
-                    // Not the in-app viewer: straight to xdg-open.
-                    let mut cmd = std::process::Command::new("xdg-open");
-                    cmd.arg(&p);
-                    if let Err(e) = crate::launch::spawn_cmd(cmd) {
-                        self.toast(format!("{}: {e}", tr("Failed")), true);
-                    }
+            // A program to open it with: chosen, maybe remembered.
+            Cmd::OpenExternal => self.open_with_ask(),
+            Cmd::ReopenTab => {
+                if let Some(loc) = self.closed_tabs.pop() {
+                    self.run(Cmd::OpenInNewTab(loc));
                 }
             }
             Cmd::OpenInViewer => self.view_current(),
@@ -4130,6 +4143,8 @@ impl App {
             Cmd::CloseTab => self.run(Cmd::CloseTabAt(self.tab)),
             Cmd::CloseTabAt(i) => {
                 if self.tabs.len() > 1 && i < self.tabs.len() && !self.confirm_unsaved(i, crate::viewer::glue::Then::CloseTab(i)) {
+                    // Ctrl+Shift+T brings it back.
+                    self.closed_tabs.push(self.tabs[i].pane.loc.clone());
                     self.tabs.remove(i);
                     // Closing a tab left of the current one shifts it; closing
                     // the current one lands on its neighbour.

@@ -1,6 +1,15 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "所有程序"),
+    ("Always open this type with it", "始终用它打开此类型"),
+    ("Copy / cut / paste", "复制 / 剪切 / 粘贴"),
+    ("Leave the terminal", "离开终端"),
+    ("Open with…", "打开方式…"),
+    ("Refresh", "刷新"),
+    ("Remember", "记住"),
+    ("Reopen closed tab", "重新打开关闭的标签页"),
+    ("usual", "默认"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "请解锁手机并允许访问文件；如果仍无响应，请重新插拔数据线"),
     ("On the phone, choose USB use: File transfer", "请在手机上将 USB 用途设为：传输文件"),
     ("Unlock the iPhone and tap Trust, then open it again", "请解锁 iPhone 并点按“信任”，然后再次打开"),

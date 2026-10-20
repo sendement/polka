@@ -110,8 +110,8 @@ scrollback, start folder.
 | Enter | ✕ / A held | Enter |
 | Erase a character | □ / X tap | Backspace |
 | Mark part of the command, then erase it | □ / X held + ← → (↑ ↓: to the line's start / end), then □ / X tap | — |
-| Esc | ○ / B tap | Esc |
-| Leave for the sidebar (shells keep running) | ○ / B held | mouse |
+| Esc | ○ / B tap | Esc (on release) |
+| Leave for the sidebar (shells keep running) | ○ / B held | Esc held |
 | Menu: type a command, interrupt, copy, paste, launch htop/btop/… | △ / Y tap | Ctrl+C, Ctrl+Shift+C / V |
 | Command history | △ / Y held | Ctrl+Shift+H |
 | Quick keys for what's running (vim, nano, htop, mc, less, lazygit, tmux…) | Create / View tap | Ctrl+Shift+K |
@@ -164,10 +164,21 @@ The result stays in its tab while you browse and can be measured again in place.
 | △ / Y | Actions menu | Shift+F10 |
 | Options / Menu | App menu | F10 |
 | Create / View | Toggle dual pane | F3 |
-| L1 / R1 | Previous / next tab | Ctrl+Tab, Ctrl+PgUp/PgDn |
+| L1 / R1 | Previous / next tab | Ctrl+← →, Ctrl+Tab, Ctrl+PgUp/PgDn |
 | L2 / R2 | Left / right pane (dual), page up / down (single) | Tab, PgUp/PgDn |
 | L3 | Collapse sidebar | Ctrl+B |
 | — | History back / forward | Alt+← → |
+
+The usual keys of other file managers work too: Ctrl+C / X / V copy, cut and paste files, Ctrl+A
+selects all, F2 renames, Delete moves to the trash (Shift+Delete deletes for good), Ctrl+Shift+N
+makes a folder, Ctrl+T / Ctrl+W open and close tabs (Ctrl+Shift+T brings the last closed one back),
+Ctrl+L goes to a path, Ctrl+H shows hidden files, F5 / Ctrl+R refresh, Alt+Home goes home,
+Alt+Enter shows properties, Ctrl+D pins the folder, Ctrl+1 / Ctrl+2 switch grid / list, F4 opens a
+terminal here, F9 hides the sidebar. F1 lists them.
+
+**Open with…** (△ on any file): the programs that take its type, the usual one first, or all of
+them; "Always open this type with it" makes the choice the system's default for the type
+(`xdg-mime`, so other programs follow it too).
 
 The right stick and the touchpad are intentionally left unbound.
 Menus: → or ✕/A opens a submenu (View, Sorting), ← or ○/B goes back; toggles keep the menu open.

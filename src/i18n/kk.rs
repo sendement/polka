@@ -1,6 +1,15 @@
 //! Қазақша.
 
 pub const T: &[(&str, &str)] = &[
+    ("All programs", "Барлық бағдарламалар"),
+    ("Always open this type with it", "Бұл түрді әрқашан осымен ашу"),
+    ("Copy / cut / paste", "Көшіру / қиып алу / кірістіру"),
+    ("Leave the terminal", "Терминалдан шығу"),
+    ("Open with…", "Мынамен ашу…"),
+    ("Refresh", "Жаңарту"),
+    ("Remember", "Есте сақтау"),
+    ("Reopen closed tab", "Жабылған бетті қайта ашу"),
+    ("usual", "әдепкі"),
     ("unlock the phone and allow access to files; if it still doesn't answer, plug it in again", "телефон құлпын ашып, файлдарға рұқсат беріңіз; жауап бермесе, кабельді қайта жалғаңыз"),
     ("On the phone, choose USB use: File transfer", "Телефонда USB режимін таңдаңыз: Файл тасымалдау"),
     ("Unlock the iPhone and tap Trust, then open it again", "iPhone құлпын ашып, «Сену» түймесін басыңыз, содан соң қайта ашыңыз"),
