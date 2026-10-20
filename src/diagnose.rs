@@ -26,6 +26,10 @@ pub fn run() {
         println!("trash: {}", r.display());
     }
     println!("trash items: {}", crate::trashbin::count());
+    for p in crate::phones::detect() {
+        let tool = p.tool().map_or_else(|| format!("none — install {}", p.kind.packages()), |t| format!("{t:?}"));
+        println!("phone: {} ({:?}, serial {}, files: {}) → {tool}", p.name, p.kind, p.serial, p.files);
+    }
     println!("show in folder (FileManager1): {}", crate::fm1::current_owner());
     for m in crate::usage::mounts() {
         println!("mount: {} (read at {}) {} {}/{} bytes", m.host.display(), m.path.display(), m.fstype, m.used, m.total);

@@ -1,6 +1,10 @@
 //! 日本語.
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "スマートフォンで USB の用途を「ファイル転送」にしてください"),
+    ("Unlock the iPhone and tap Trust, then open it again", "iPhone のロックを解除して「信頼」をタップし、もう一度開いてください"),
+    ("another program is using the phone", "別のプログラムがスマートフォンを使用中です"),
+    ("Phones", "スマートフォン"),
     ("Already in that format", "すでにその形式です"),
     ("Already in this format: %n", "すでにこの形式：%n"),
     ("Balanced", "バランス"),

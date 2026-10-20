@@ -1,6 +1,10 @@
 //! Polski.
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "Na telefonie wybierz tryb USB: Przesyłanie plików"),
+    ("Unlock the iPhone and tap Trust, then open it again", "Odblokuj iPhone'a i stuknij „Zaufaj”, a potem otwórz go ponownie"),
+    ("another program is using the phone", "inny program używa telefonu"),
+    ("Phones", "Telefony"),
     ("Already in that format", "Już w tym formacie"),
     ("Already in this format: %n", "Już w tym formacie: %n"),
     ("Balanced", "Zrównoważona"),

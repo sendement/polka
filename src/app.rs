@@ -556,6 +556,9 @@ pub enum Cmd {
     NetDisconnect(String),
     NetRemoveAsk(String),
     NetRemoveNow(String),
+    /// A phone: mount and open, unmount.
+    PhoneOpen(String),
+    PhoneDisconnect(String),
     Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     DeleteNow(Vec<PathBuf>),
     /// Copy/move with a decided conflict policy.
@@ -1218,13 +1221,15 @@ pub struct SideItem {
     /// A network place: its connection's id, and whether it's connected
     /// (if not, `loc` is no real place either).
     pub net: Option<(String, bool)>,
+    /// A phone on USB: its key, and whether it's mounted.
+    pub phone: Option<(String, bool)>,
 }
 
 impl SideItem {
     /// A drive not mounted or a network place not connected: nothing to
     /// open or drop onto yet.
     pub fn offline(&self) -> bool {
-        self.drive.as_ref().is_some_and(|d| d.mount.is_none()) || self.net.as_ref().is_some_and(|n| !n.1)
+        self.drive.as_ref().is_some_and(|d| d.mount.is_none()) || self.net.as_ref().is_some_and(|n| !n.1) || self.phone.as_ref().is_some_and(|n| !n.1)
     }
 }
 
@@ -1266,6 +1271,8 @@ pub enum Msg {
     NetDone { id: String, result: Result<PathBuf, String>, open: bool, pw: Option<String> },
     /// A network place was disconnected.
     NetGone,
+    /// Mounting a phone ended.
+    PhoneDone { key: String, result: Result<PathBuf, crate::phones::Trouble> },
     NeedPassword(PathBuf, bool, Retry),
     /// A file from an archive was extracted for the viewer.
     View { tab: usize, path: PathBuf, name: String, origin: usize, source: Option<(PathBuf, String)> },
@@ -1294,6 +1301,7 @@ pub struct App {
     watched: Arc<std::sync::Mutex<Vec<(PathBuf, Option<std::time::SystemTime>)>>>,
     watch_checked: Instant,
     trash_stamp: Option<std::time::SystemTime>,
+    usb_seen: u64,
     pub overlay: Option<Overlay>,
     pub icons: Icons,
     pub pad_rx: Receiver<Input>,
@@ -1350,6 +1358,8 @@ pub struct App {
     pub net_pw: HashMap<String, String>,
     /// Connections being made.
     pub net_busy: HashSet<String>,
+    /// Phones on USB (as the sidebar last saw them).
+    pub phones: Vec<crate::phones::Phone>,
     /// The format last chosen for each kind of file, in "Convert…".
     pub convert_last: Vec<(crate::convert::Group, crate::convert::Target)>,
     /// The system clipboard, read straight from the display connection
@@ -1436,6 +1446,7 @@ impl App {
             watched: Default::default(),
             watch_checked: Instant::now(),
             trash_stamp: None,
+            usb_seen: 0,
             overlay: None,
             icons,
             pad_rx,
@@ -1463,6 +1474,7 @@ impl App {
             net_pw: HashMap::new(),
             net_busy: HashSet::new(),
             convert_last: Vec::new(),
+            phones: Vec::new(),
             sys_clip: None,
             dark_applied: None,
             schemes: crate::schemes::all(),
@@ -1498,6 +1510,7 @@ impl App {
         let watched = self.watched.clone();
         let wake = self.wake();
         let _ = std::thread::Builder::new().name("polka-watch".into()).spawn(move || {
+            let mut usb = crate::phones::usb_signature();
             loop {
                 std::thread::sleep(WATCH_EVERY);
                 // The window is gone (tests make many).
@@ -1505,7 +1518,10 @@ impl App {
                     return;
                 }
                 let list = watched.lock().map(|l| l.clone()).unwrap_or_default();
-                if list.iter().any(|(p, stamp)| dir_stamp(p) != *stamp) {
+                // A phone (or anything) plugged in or out shows at once too.
+                let now = crate::phones::usb_signature();
+                if list.iter().any(|(p, stamp)| dir_stamp(p) != *stamp) || now != usb {
+                    usb = now;
                     wake();
                 }
             }
@@ -1531,8 +1547,10 @@ impl App {
         }
         let trash = trash_files();
         let ts = trash.as_deref().and_then(dir_stamp);
-        if ts != self.trash_stamp {
+        let usb = crate::phones::usb_signature();
+        if ts != self.trash_stamp || usb != self.usb_seen {
             self.trash_stamp = ts;
+            self.usb_seen = usb;
             self.refresh_sidebar();
         }
         let mut list: Vec<(PathBuf, Option<std::time::SystemTime>)> =
@@ -1763,6 +1781,7 @@ impl App {
                 Msg::Drive(r) => self.drive_done(r),
                 Msg::NetDone { id, result, open, pw } => self.net_done(id, result, open, pw),
                 Msg::NetGone => self.refresh_sidebar(),
+                Msg::PhoneDone { key, result } => self.phone_done(key, result),
                 Msg::TrashEmptied(n, failed) => {
                     self.refresh_sidebar();
                     self.reload_all();
@@ -1932,6 +1951,7 @@ impl App {
             term: false,
             drive: None,
             net: None,
+            phone: None,
         };
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
         let places: [(&str, Option<PathBuf>, &'static [&'static str]); 7] = [
@@ -1970,6 +1990,7 @@ impl App {
             term: true,
             drive: None,
             net: None,
+            phone: None,
         });
         if let Some(root) = crate::steam::root() {
             v.push(SideItem { custom_icon: icon_for(&self.cfg, "polka:steam"), ..place("Steam".into(), &["steam", "com.valvesoftware.Steam", "applications-games"], PathBuf::new(), "Places", &self.cfg) });
@@ -1988,7 +2009,7 @@ impl App {
         for d in &drives {
             let label = d.label.clone().unwrap_or_else(|| format!("{} {}", tr("Drive"), human_size(d.size)));
             let loc = Location::Local(d.mount.clone().unwrap_or_else(|| PathBuf::from(d.key())));
-            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()), net: None });
+            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()), net: None, phone: None });
         }
         for (dev, mnt) in mounts() {
             if drives.iter().any(|d| d.mount.as_ref() == Some(&mnt)) {
@@ -2017,6 +2038,29 @@ impl App {
                 term: false,
                 drive: None,
                 net: Some((c.id.clone(), at.is_some())),
+                phone: None,
+            });
+        }
+        // Phones on USB.
+        self.phones = crate::phones::detect();
+        for p in &self.phones {
+            let at = p.mounted(&mounts);
+            let icon: &'static [&'static str] = match p.kind {
+                crate::phones::Kind::Apple => &["phone-apple-iphone", "phone", "smartphone", "multimedia-player"],
+                crate::phones::Kind::Android => &["phone", "smartphone", "pda", "multimedia-player"],
+            };
+            v.push(SideItem {
+                label: p.name.clone(),
+                icon,
+                custom_icon: icon_for(&self.cfg, &p.key()),
+                loc: Location::Local(at.clone().unwrap_or_else(|| p.mount_dir())),
+                pinned: false,
+                section: "Phones",
+                usage: false,
+                term: false,
+                drive: None,
+                net: None,
+                phone: Some((p.key(), at.is_some())),
             });
         }
         v.push(SideItem {
@@ -2030,6 +2074,7 @@ impl App {
             term: false,
             drive: None,
             net: None,
+            phone: None,
         });
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
@@ -2329,6 +2374,9 @@ impl App {
                     // A network place: connect first if need be.
                     if let Some((id, _)) = &it.net {
                         return self.net_open(id);
+                    }
+                    if let Some((key, _)) = &it.phone {
+                        return self.phone_open(key);
                     }
                     let cfg = self.cfg.clone();
                     // A place replaces the disk usage page (kept for later).
@@ -3846,6 +3894,8 @@ impl App {
             }
             Cmd::TagsAsk => self.tags_open(),
             Cmd::ConvertAsk => self.convert_open(),
+            Cmd::PhoneOpen(key) => self.phone_open(&key),
+            Cmd::PhoneDisconnect(key) => self.phone_disconnect(&key),
             Cmd::NetAdd | Cmd::NetEdit(_) | Cmd::NetConnect(_) | Cmd::NetDisconnect(_) | Cmd::NetRemoveAsk(_) | Cmd::NetRemoveNow(_) => self.net_cmd(cmd),
             Cmd::RestoreAsk => {
                 let mut items = Vec::new();

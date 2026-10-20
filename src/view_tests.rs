@@ -5082,3 +5082,90 @@ fn convert_screens() {
     assert_eq!((j.width(), j.height()), (64, 48));
     unsafe { std::env::remove_var("POLKA_CONVERT_TOOLS") };
 }
+
+/// Phones on USB (a stand-in sysfs like the real Redmi's, stand-in
+/// tools): the Phones section, an Android phone mounted and opened, an
+/// iPhone that waits for "Trust", one that's only charging.
+#[test]
+#[ignore]
+fn phone_screens() {
+    use crate::app::Focus;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let usb = dir.join("fake-usb");
+    let bin = dir.join("fake-phone-bin");
+    let log = dir.join("fake-phone.log");
+    for d in [&usb, &bin] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let _ = std::fs::remove_file(&log);
+    let dev = |name: &str, files: &[(&str, &str)]| {
+        let d = usb.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        for (f, v) in files {
+            std::fs::write(d.join(f), format!("{v}\n")).unwrap();
+        }
+    };
+    dev("3-10", &[("idVendor", "2717"), ("product", "Redmi Note 14 Pro+ 5G"), ("manufacturer", "Xiaomi"), ("serial", "9f3bcb68"), ("busnum", "3"), ("devnum", "13")]);
+    dev("3-10:1.0", &[("bInterfaceClass", "06"), ("bInterfaceSubClass", "01"), ("bInterfaceProtocol", "01"), ("interface", "MTP")]);
+    dev("3-11", &[("idVendor", "05ac"), ("product", "iPhone"), ("serial", "00008030001A35E83E8A802E"), ("busnum", "3"), ("devnum", "14")]);
+    dev("3-12", &[("idVendor", "18d1"), ("product", "Pixel 7"), ("serial", "ABC"), ("busnum", "3"), ("devnum", "15")]);
+    dev("3-12:1.0", &[("bInterfaceClass", "ff"), ("bInterfaceSubClass", "42"), ("bInterfaceProtocol", "01")]);
+    let tool = |name: &str, body: &str| {
+        let p = bin.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\necho \"{name} $*\" >> {}\n{body}\n", log.display())).unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    };
+    tool("aft-mtp-mount", "exit 0");
+    tool("ifuse", "exit 0");
+    tool("idevice_id", "echo 00008030-001A35E83E8A802E");
+    tool("idevicepair", "echo 'ERROR: Please accept the trust dialog on the screen of device 00008030-001A35E83E8A802E, then attempt to pair again.' >&2; exit 1");
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe {
+        std::env::set_var("POLKA_SYSFS_USB", &usb);
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("POLKA_PHONE_TOOLS", "aft-mtp-mount,ifuse");
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    h.state_mut().refresh_sidebar();
+    let phones: Vec<(String, bool)> = h.state().side_items.iter().filter(|s| s.section == "Phones").map(|s| (s.label.clone(), s.offline())).collect();
+    assert_eq!(phones, [("Redmi Note 14 Pro+ 5G".to_string(), true), ("iPhone".to_string(), true), ("Pixel 7".to_string(), true)]);
+    settle(&mut h);
+    shot(&mut h, "ph0-sidebar");
+    let open = |h: &mut Harness<'static, App>, label: &str| {
+        let i = h.state().side_items.iter().position(|s| s.label == label).unwrap();
+        h.state_mut().side_cursor = i;
+        h.state_mut().focus = Focus::Sidebar;
+        press(h, &[Action::Accept]);
+        for _ in 0..30 {
+            settle(h);
+            if h.state().net_busy.is_empty() {
+                break;
+            }
+        }
+    };
+    // The Redmi: mounted by its serial, opened.
+    open(&mut h, "Redmi Note 14 Pro+ 5G");
+    let redmi = h.state().phones[0].clone();
+    assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(redmi.mount_dir()));
+    let said = std::fs::read_to_string(&log).unwrap();
+    assert!(said.contains(&format!("aft-mtp-mount -D 9f3bcb68 {}", redmi.mount_dir().display())), "{said}");
+    // The iPhone: not trusted yet.
+    open(&mut h, "iPhone");
+    let toast = h.state().toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+    assert_eq!(toast, crate::i18n::tr("Unlock the iPhone and tap Trust, then open it again"));
+    assert!(std::fs::read_to_string(&log).unwrap().contains("idevicepair -u 00008030-001A35E83E8A802E pair"));
+    settle(&mut h);
+    shot(&mut h, "ph1-trust");
+    // The Pixel: only charging.
+    open(&mut h, "Pixel 7");
+    let toast = h.state().toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+    assert_eq!(toast, crate::i18n::tr("On the phone, choose USB use: File transfer"));
+    unsafe {
+        std::env::remove_var("POLKA_SYSFS_USB");
+        std::env::set_var("PATH", path);
+        std::env::remove_var("POLKA_PHONE_TOOLS");
+    }
+}

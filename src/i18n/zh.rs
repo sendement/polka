@@ -1,6 +1,10 @@
 //! 中文 (简体).
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "请在手机上将 USB 用途设为：传输文件"),
+    ("Unlock the iPhone and tap Trust, then open it again", "请解锁 iPhone 并点按“信任”，然后再次打开"),
+    ("another program is using the phone", "另一个程序正在使用手机"),
+    ("Phones", "手机"),
     ("Already in that format", "已经是该格式"),
     ("Already in this format: %n", "已经是此格式：%n"),
     ("Balanced", "均衡"),

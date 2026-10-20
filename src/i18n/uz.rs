@@ -1,6 +1,10 @@
 //! Oʻzbekcha (lotin).
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "Telefonda USB rejimini tanlang: Fayl uzatish"),
+    ("Unlock the iPhone and tap Trust, then open it again", "iPhone qulfini oching va «Ishonish»ni bosing, soʻng qayta oching"),
+    ("another program is using the phone", "telefonni boshqa dastur ishlatyapti"),
+    ("Phones", "Telefonlar"),
     ("Already in that format", "Allaqachon shu formatda"),
     ("Already in this format: %n", "Allaqachon shu formatda: %n"),
     ("Balanced", "Muvozanatli"),

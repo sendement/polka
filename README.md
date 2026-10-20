@@ -237,6 +237,14 @@ pictures best (HEIC, AVIF, the camera's rotation), libheif's `heif-dec` / `heif-
 fill in without it; sound and video need ffmpeg. HEIC, AVIF and JPEG XL also open in the viewer and
 get thumbnails.
 
+**Phones.** An Android phone (with USB set to *File transfer*) or an iPhone / iPad plugged in
+shows up in the sidebar's Phones section, faded until it's opened; ✕ mounts and opens it, △ →
+Disconnect unmounts it before unplugging. Polka uses what the system has: for Android
+`aft-mtp-mount` (android-file-transfer), GVfs (gvfs-mtp), jmtpfs or simple-mtpfs; for iPhone `ifuse`
+(with usbmuxd) or GVfs (gvfs-afc) — an iPhone asks *Trust this computer?* the first time: unlock
+it, tap Trust and open it again. A phone that's only charging says to switch its USB mode.
+`polka --diagnose` lists the phones it sees and what it would mount them with.
+
 **Network places.** ≡ → Add network place…: SMB, NFS, SFTP, WebDAV, FTP or an rclone remote
 (Google Drive, OneDrive, S3… whatever `rclone config` has). They sit in the sidebar's Network
 section, faded until connected; ✕ connects and opens one, △ connects, disconnects, edits or

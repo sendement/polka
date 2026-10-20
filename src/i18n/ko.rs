@@ -1,6 +1,10 @@
 //! 한국어.
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "휴대폰에서 USB 용도를 '파일 전송'으로 선택하세요"),
+    ("Unlock the iPhone and tap Trust, then open it again", "iPhone 잠금을 해제하고 '신뢰'를 누른 다음 다시 여세요"),
+    ("another program is using the phone", "다른 프로그램이 휴대폰을 사용 중입니다"),
+    ("Phones", "휴대폰"),
     ("Already in that format", "이미 그 형식입니다"),
     ("Already in this format: %n", "이미 이 형식: %n"),
     ("Balanced", "균형"),

@@ -1,6 +1,10 @@
 //! Қазақша.
 
 pub const T: &[(&str, &str)] = &[
+    ("On the phone, choose USB use: File transfer", "Телефонда USB режимін таңдаңыз: Файл тасымалдау"),
+    ("Unlock the iPhone and tap Trust, then open it again", "iPhone құлпын ашып, «Сену» түймесін басыңыз, содан соң қайта ашыңыз"),
+    ("another program is using the phone", "телефонды басқа бағдарлама пайдаланып жатыр"),
+    ("Phones", "Телефондар"),
     ("Already in that format", "Осы пішімде тұр"),
     ("Already in this format: %n", "Осы пішімде тұр: %n"),
     ("Balanced", "Теңгерімді"),

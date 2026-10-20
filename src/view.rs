@@ -925,11 +925,12 @@ impl App {
                         });
                         // A network place not connected looks faded; one
                         // connecting spins.
-                        let faded = it.net.as_ref().is_some_and(|n| !n.1);
+                        let state = it.net.as_ref().or(it.phone.as_ref());
+                        let faded = state.is_some_and(|n| !n.1);
                         if let Some(u) = custom.or_else(|| self.icons.named(it.icon, px)) {
                             egui::Image::new(u).tint(if faded { Color32::from_white_alpha(110) } else { Color32::WHITE }).paint_at(ui, icon_rect);
                         }
-                        if let Some((id, online)) = &it.net {
+                        if let Some((id, online)) = state {
                             if self.net_busy.contains(id) {
                                 egui::Spinner::new().size(side_icon * 0.6).paint_at(ui, Rect::from_center_size(icon_rect.right_bottom(), Vec2::splat(side_icon * 0.6)));
                             } else if *online {

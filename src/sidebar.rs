@@ -36,6 +36,9 @@ impl App {
         if it.loc.local_path().is_some() && trash_files().as_deref() == it.loc.local_path() {
             items.push(MenuItem { enabled: crate::trashbin::count() > 0, ..item(tr("Empty trash…"), Cmd::EmptyTrashAsk) });
         }
+        if let Some((key, online)) = &it.phone {
+            items.push(if *online { item(tr("Disconnect"), Cmd::PhoneDisconnect(key.clone())) } else { item(tr("Connect"), Cmd::PhoneOpen(key.clone())) });
+        }
         if let Some((id, online)) = &it.net {
             items.push(if *online { item(tr("Disconnect"), Cmd::NetDisconnect(id.clone())) } else { item(tr("Connect"), Cmd::NetConnect(id.clone())) });
             items.push(item(tr("Edit connection…"), Cmd::NetEdit(id.clone())));
@@ -45,6 +48,7 @@ impl App {
         // Any entry can wear its own icon; drives keep theirs by UUID.
         let key = match (&it.drive, &it.loc) {
             _ if it.net.is_some() => it.net.as_ref().map(|(id, _)| PathBuf::from(format!("net:{id}"))),
+            _ if it.phone.is_some() => it.phone.as_ref().map(|(key, _)| PathBuf::from(key)),
             (Some(d), _) => Some(PathBuf::from(d.key())),
             (None, _) if it.term => Some(PathBuf::from("polka:terminal")),
             (None, Location::Steam(_)) => Some(PathBuf::from("polka:steam")),
