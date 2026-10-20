@@ -209,9 +209,39 @@ items) or full, when the icon theme draws all three (`gnome-stock-trash-empty`, 
 were (their folder made again if it's gone); if something is there now it asks: keep both, replace
 or skip.
 
-**Languages.** English, Русский, Українська, Deutsch, Español, Français, 中文, 日本語, 한국어 —
+**Languages.** English, Русский, Українська, Deutsch, Español, Français, Polski, Қазақша,
+Oʻzbekcha, हिन्दी, 中文, 日本語, 한국어 —
 the system's by default (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`), English when it isn't one
-of these; Settings → Language switches on the fly. CJK text needs a CJK font (e.g. noto-fonts-cjk).
+of these; Settings → Language switches on the fly. CJK text needs a CJK font (e.g. noto-fonts-cjk),
+Hindi a Devanagari one (e.g. noto-fonts). The on-screen keyboard has layouts for each of them
+(Polish with ą ę ł ó ś ż on keys and ´ for ć ń ś ź; Kazakh as the KZ layout; Uzbek Latin with ʻ;
+Hindi InScript).
+
+**Tags.** △ → Tags… on any files and folders: tick the tags they share, or type a new one. They
+are kept in the `user.xdg.tags` attribute, the same place KDE's Dolphin keeps them, so both see
+the same tags (on filesystems without such attributes Polka keeps its own list). A folder with
+tagged items gets a Tags column in the list; the grid shows a dot per tag. Search and the quick
+filter take `#tag` words: `#work report` finds items tagged *work* with *report* in the name;
+□ (or 🔍) on a tag in the Tags dialog looks for it from the current folder down.
+
+**Network places.** ≡ → Add network place…: SMB, NFS, SFTP, WebDAV, FTP or an rclone remote
+(Google Drive, OneDrive, S3… whatever `rclone config` has). They sit in the sidebar's Network
+section, faded until connected; ✕ connects and opens one, △ connects, disconnects, edits or
+removes it. Polka mounts them with what the system has, so they're plain folders everywhere else:
+
+| | tried in this order |
+|---|---|
+| SMB | GVfs (`gvfs-smb`), rclone, `mount.cifs` (sudo) |
+| NFS | `mount.nfs` (sudo) |
+| SFTP | sshfs, rclone, GVfs |
+| WebDAV, FTP | rclone, GVfs |
+| rclone | rclone |
+
+(a different one can be picked in the dialog; what's missing says what to install). SFTP tries
+your SSH keys first and asks for a password only if they're refused. Passwords go to the keyring
+(`secret-tool`) when it's there and asked for, else they're kept until Polka closes — never in the
+settings file. sudo mounts take the password for SMB from a file only you can read, removed right
+after.
 
 **Look.** Settings → Appearance: as the desktop (xdg-desktop-portal's colour scheme, followed
 live), dark or light. Icon themes with light/dark siblings (Papirus, Breeze) switch along. Themes

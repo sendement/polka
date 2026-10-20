@@ -762,6 +762,21 @@ impl App {
                 (Action::Menu, tr("Create")),
                 (Action::Back, tr("Cancel")),
             ],
+            Some(Overlay::Net(_)) => vec![
+                (Action::Up, tr("Move")),
+                (Action::Left, tr("Adjust")),
+                (Action::Accept, tr("OK")),
+                (Action::Menu, tr("Connect")),
+                (Action::Back, tr("Cancel")),
+            ],
+            Some(Overlay::Tags(ed)) => {
+                let mut v = vec![(Action::Up, tr("Move")), (Action::Accept, tr("Mark"))];
+                if ed.cursor < ed.tags.len() {
+                    v.push((Action::Select, tr("Find")));
+                }
+                v.extend([(Action::Actions, tr("New tag…")), (Action::Back, tr("Done"))]);
+                v
+            }
             Some(Overlay::Themes(t)) if t.in_colors => vec![(Action::Up, tr("Color")), (Action::Accept, tr("OK")), (Action::Back, tr("Back"))],
             Some(Overlay::Themes(t)) => {
                 let mut v = vec![(Action::Up, tr("Move"))];
@@ -881,7 +896,7 @@ impl App {
                             it.loc == cur_loc && !usage_here && !term_here
                         };
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
-                        if dragging && !it.usage && !it.term && pointer.is_some_and(|p| rect.contains(p)) {
+                        if dragging && !it.usage && !it.term && !it.offline() && pointer.is_some_and(|p| rect.contains(p)) {
                             ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
                             if released {
                                 dropped = Some(i);
@@ -902,12 +917,23 @@ impl App {
                             let p = std::path::Path::new(c);
                             if p.is_absolute() { p.exists().then(|| crate::icons::uri(p)) } else { self.icons.named(&[c], px) }
                         });
+                        // A network place not connected looks faded; one
+                        // connecting spins.
+                        let faded = it.net.as_ref().is_some_and(|n| !n.1);
                         if let Some(u) = custom.or_else(|| self.icons.named(it.icon, px)) {
-                            egui::Image::new(u).paint_at(ui, icon_rect);
+                            egui::Image::new(u).tint(if faded { Color32::from_white_alpha(110) } else { Color32::WHITE }).paint_at(ui, icon_rect);
+                        }
+                        if let Some((id, online)) = &it.net {
+                            if self.net_busy.contains(id) {
+                                egui::Spinner::new().size(side_icon * 0.6).paint_at(ui, Rect::from_center_size(icon_rect.right_bottom(), Vec2::splat(side_icon * 0.6)));
+                            } else if *online {
+                                ui.painter().circle(icon_rect.right_bottom() - vec2(2.0, 2.0), 4.0, Color32::from_rgb(80, 200, 120), Stroke::new(1.5, ui.visuals().panel_fill));
+                            }
                         }
                         if !collapsed {
                             let tx = side_icon + 16.0;
-                            let g = elided(ui, &it.label, FontId::proportional(side_font), ui.visuals().text_color(), rect.width() - tx - 8.0, 1);
+                            let text_c = if faded { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
+                            let g = elided(ui, &it.label, FontId::proportional(side_font), text_c, rect.width() - tx - 8.0, 1);
                             ui.painter().galley(pos2(rect.min.x + tx, rect.center().y - g.size().y / 2.0), g, Color32::WHITE);
                         }
                         let r = if collapsed { r.on_hover_text(&it.label) } else { r };
@@ -1202,6 +1228,8 @@ impl App {
         let mut dismiss = false;
         let mut settings_ev: Option<SettingsEvent> = None;
         let mut compress_ev: Option<(usize, isize)> = None;
+        let mut tag_ev = None;
+        let mut net_ev = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1234,6 +1262,8 @@ impl App {
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
+                    Some(Overlay::Tags(ed)) => tag_ev = crate::tags_ui::draw(ui, ed),
+                    Some(Overlay::Net(d)) => net_ev = crate::net_ui::draw(ui, d),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
@@ -1263,6 +1293,12 @@ impl App {
         }
         if let Some(ev) = settings_ev {
             self.settings_event(ev);
+        }
+        if let Some(ev) = tag_ev {
+            self.tags_event(ev);
+        }
+        if let Some((row, step)) = net_ev {
+            crate::net_ui::clicked(self, row, step);
         }
         if let Some((row, d)) = viewer_ev {
             self.viewer_step(row, d);
@@ -1363,7 +1399,20 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     let size_right = if show_date { 160.0 * k } else { 12.0 };
     let type_w = 150.0 * k;
     let type_right = size_right + 100.0 * k + type_w;
-    let name_room = if show_type { type_right + 10.0 } else if show_date { 260.0 * k } else { 100.0 * k };
+    // Tags: a column of their own when anything here has some, left of the
+    // type (or the size).
+    let show_tags = width > 520.0 * k && pane.entries.iter().any(|e| !e.tags.is_empty());
+    let tags_w = 150.0 * k;
+    let tags_right = if show_type { type_right } else { size_right + 100.0 * k };
+    let name_room = if show_tags {
+        tags_right + tags_w + 10.0
+    } else if show_type {
+        type_right + 10.0
+    } else if show_date {
+        260.0 * k
+    } else {
+        100.0 * k
+    };
     let cols = if grid { ((width - 8.0) / grid_w).floor().max(1.0) as usize } else { 1 };
     pane.cols = cols;
     let row_h = if grid { grid_h } else { list_row };
@@ -1391,8 +1440,17 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
             }
             heads.push((key, cell));
         };
-        let name_end = if show_type { r.max.x - type_right } else { r.max.x - size_right - 100.0 * k };
+        let name_end = if show_tags {
+            r.max.x - tags_right - tags_w
+        } else if show_type {
+            r.max.x - type_right
+        } else {
+            r.max.x - size_right - 100.0 * k
+        };
         head(r.min.x + name_x - 4.0, name_end, tr("Name"), SortKey::Name, false);
+        if show_tags {
+            ui.painter().text(pos2(r.max.x - tags_right - tags_w + 4.0, r.center().y), Align2::LEFT_CENTER, tr("Tags"), f.clone(), ui.visuals().weak_text_color());
+        }
         if show_type {
             head(r.max.x - type_right, r.max.x - size_right - 100.0 * k, tr("Type"), SortKey::Type, false);
         }
@@ -1495,6 +1553,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
+                    tag_dots(ui, &e.tags, pos2(ir.min.x + 4.0, ir.max.y - 4.0));
                     let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     hot = ir.union(Rect::from_center_size(pos2(rect.center().x, ir.max.y + 4.0 + g.size().y / 2.0), g.size()));
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, text_c);
@@ -1536,6 +1595,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let f = FontId::proportional(list_font - 1.0);
                     let size = if e.is_dir { String::new() } else { human_size(folded.map_or(e.size, |f| f.1)) };
                     ui.painter().text(pos2(rect.max.x - size_right, rect.center().y), Align2::RIGHT_CENTER, size, f.clone(), weak);
+                    if show_tags {
+                        let x0 = rect.max.x - tags_right - tags_w;
+                        tag_pills(ui, &e.tags, Rect::from_min_max(pos2(x0, rect.min.y), pos2(x0 + tags_w - 8.0, rect.max.y)), FontId::proportional((list_font - 3.0).max(10.0)));
+                    }
                     if show_type {
                         let g = elided(ui, &type_name(e, path.as_deref()), f.clone(), weak, type_w - 8.0, 1);
                         ui.painter().galley(pos2(rect.max.x - type_right, rect.center().y - g.size().y / 2.0), g, weak);
@@ -1694,6 +1757,38 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
 /// the dark look's translucency would turn grey.
 pub(crate) fn tint(v: &egui::Visuals, k: f32) -> Color32 {
     v.selection.bg_fill.gamma_multiply(if v.dark_mode { k } else { k * 0.5 })
+}
+
+/// Tags as small coloured pills from the left of `room`; what doesn't fit
+/// becomes "+n".
+fn tag_pills(ui: &Ui, tags: &[String], room: Rect, font: FontId) {
+    let dark = ui.visuals().dark_mode;
+    let mut x = room.min.x;
+    let h = font.size + 6.0;
+    for (i, t) in tags.iter().enumerate() {
+        let g = ui.painter().layout_no_wrap(t.clone(), font.clone(), Color32::WHITE);
+        let w = g.size().x + 12.0;
+        let left = tags.len() - i;
+        let more = if left > 1 { ui.painter().layout_no_wrap(format!("+{}", left - 1), font.clone(), Color32::WHITE).size().x + 6.0 } else { 0.0 };
+        if x + w + more > room.max.x {
+            ui.painter().text(pos2(x, room.center().y), Align2::LEFT_CENTER, format!("+{left}"), font, ui.visuals().weak_text_color());
+            return;
+        }
+        let pill = Rect::from_min_size(pos2(x, room.center().y - h / 2.0), vec2(w, h));
+        let c = crate::tags::color(t, dark);
+        ui.painter().rect(pill, h / 2.0, c.gamma_multiply(0.25), Stroke::new(1.0, c), StrokeKind::Inside);
+        ui.painter().galley(pos2(pill.min.x + 6.0, pill.center().y - g.size().y / 2.0), g, ui.visuals().text_color());
+        x += w + 4.0;
+    }
+}
+
+/// Tags on an icon (the grid): a dot each, up to four.
+fn tag_dots(ui: &Ui, tags: &[String], at: Pos2) {
+    let dark = ui.visuals().dark_mode;
+    for (i, t) in tags.iter().take(4).enumerate() {
+        let c = pos2(at.x + i as f32 * 9.0, at.y);
+        ui.painter().circle(c, 4.0, crate::tags::color(t, dark), Stroke::new(1.0, ui.visuals().panel_fill));
+    }
 }
 
 /// Highlight for the volumes of one archive: the accent's complement, so it
@@ -1916,7 +2011,7 @@ pub fn elided_text(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32
     layout(ui, text, font, color, width, 1, false)
 }
 
-fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
+pub(crate) fn elided(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<Galley> {
     layout(ui, text, font, color, width, rows, false)
 }
 
@@ -2722,7 +2817,7 @@ fn rgb(c: [u8; 3]) -> Color32 {
 }
 
 /// Row background; the focused row gets the highlight.
-fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) -> (Rect, egui::Response) {
+pub(crate) fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) -> (Rect, egui::Response) {
     let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W, h), Sense::click());
     let _ = id;
     // Up/Down in long settings scroll the focused row into view.
@@ -2976,16 +3071,20 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
 
     // Keyboard layouts for ⇄.
-    let (rect, r) = settings_row(ui, 86.0, st.row == row::LAYOUTS, "layouts");
+    // Up to eight a line.
+    const PER_LINE: usize = 8;
+    let lines = crate::keyboard::CODES.len().div_ceil(PER_LINE);
+    let (rect, r) = settings_row(ui, 44.0 + 42.0 * lines as f32, st.row == row::LAYOUTS, "layouts");
     if r.clicked() {
         ev = Some(SettingsEvent::Row(row::LAYOUTS));
     }
     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Keyboard layouts"), label_font.clone(), v.text_color());
     let on_layouts = cfg.layouts();
-    let n = crate::keyboard::CODES.len();
+    let n = crate::keyboard::CODES.len().min(PER_LINE);
     let chip_w = (SETTINGS_W - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
     for (i, code) in crate::keyboard::CODES.iter().enumerate() {
-        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 6.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
+        let (line, col) = (i / PER_LINE, i % PER_LINE);
+        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 6.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
         let resp = ui.interact(chip, ui.id().with(("layout-chip", i)), Sense::click());
         let on = on_layouts.iter().any(|c| c == code);
         let cursor = st.row == row::LAYOUTS && st.layout_chip == i;

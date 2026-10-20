@@ -204,6 +204,8 @@ pub struct Entry {
     pub size: u64,
     pub mtime: Option<i64>,
     pub mode: u32,
+    /// Its tags (files on disk only).
+    pub tags: Vec<String>,
 }
 
 impl Entry {
@@ -254,6 +256,13 @@ const SEARCH_MAX_RESULTS: usize = 5000;
 const SEARCH_MAX_TIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Case-insensitive substring match on names; `*` matches anything.
+/// A search or filter: `#tag` words want that tag (all of them), the rest
+/// is looked for in the name.
+pub fn entry_matches(e: &Entry, query: &str) -> bool {
+    let (tags, name) = crate::tags::split_query(query);
+    tags.iter().all(|t| e.tags.iter().any(|x| x.to_lowercase() == *t)) && (name.is_empty() || name_matches(&e.name, &name))
+}
+
 pub fn name_matches(name: &str, query: &str) -> bool {
     let name = name.to_lowercase();
     let mut rest = name.as_str();
@@ -293,7 +302,7 @@ fn search(root: &Path, query: &str, hidden: bool) -> Vec<Entry> {
                     queue.push_back(PathBuf::from(&rel_name));
                 }
             }
-            if name_matches(&e.name, query) {
+            if entry_matches(&e, query) {
                 e.name = rel_name;
                 out.push(e);
             }
@@ -304,6 +313,9 @@ fn search(root: &Path, query: &str, hidden: bool) -> Vec<Entry> {
 
 fn list_local(dir: &Path) -> std::io::Result<Vec<Entry>> {
     let mut out = Vec::new();
+    // Tags: a filesystem without user attributes answers so for the first
+    // file already, and isn't asked again.
+    let mut probe = true;
     for de in std::fs::read_dir(dir)? {
         let Ok(de) = de else { continue };
         let name = de.file_name().to_string_lossy().into_owned();
@@ -311,6 +323,8 @@ fn list_local(dir: &Path) -> std::io::Result<Vec<Entry>> {
         let is_link = lmeta.file_type().is_symlink();
         // Broken links still show up, with the link's own metadata.
         let meta = if is_link { std::fs::metadata(de.path()).unwrap_or(lmeta) } else { lmeta };
+        let (tags, kept) = crate::tags::read(&de.path(), probe);
+        probe &= kept;
         out.push(Entry {
             name,
             is_dir: meta.is_dir(),
@@ -318,6 +332,7 @@ fn list_local(dir: &Path) -> std::io::Result<Vec<Entry>> {
             size: meta.len(),
             mtime: Some(meta.mtime()),
             mode: meta.mode(),
+            tags,
         });
     }
     Ok(out)
@@ -603,6 +618,7 @@ fn build_index(headers: Vec<(String, u32, u64, i64)>) -> ArchiveIndex {
                 size: if is_dir { 0 } else { size },
                 mtime: Some(mtime),
                 mode,
+                tags: Vec::new(),
             },
         );
     }
@@ -624,6 +640,7 @@ fn build_index(headers: Vec<(String, u32, u64, i64)>) -> ArchiveIndex {
             size: 0,
             mtime: None,
             mode: 0o040755,
+            tags: Vec::new(),
         });
         out.entry(parent).or_default().push(Entry { is_dir: true, name, ..e });
     }

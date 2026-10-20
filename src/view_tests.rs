@@ -4678,3 +4678,285 @@ fn scheme_screens() {
     settle(&mut h);
     assert_eq!(panel(&h), egui::Visuals::dark().panel_fill);
 }
+
+/// Tags: given to two items at once (one new, typed in), a column of their
+/// own in the list, dots in the grid, taken off again; looked for with
+/// #tag in a search and in the quick filter.
+#[test]
+#[ignore]
+fn tags_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::vfs::Location;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("tagged");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Projects/deep")).unwrap();
+    for n in ["report.txt", "notes.txt", "photo.png", "Projects/deep/plan.txt"] {
+        std::fs::write(dir.join(n), n).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg.clone();
+    // report.txt and Projects: a new tag for both.
+    {
+        let p = h.state_mut().pane_mut();
+        p.selected.insert("report.txt".into());
+        p.selected.insert("Projects".into());
+    }
+    h.state_mut().run(Cmd::TagsAsk);
+    assert!(matches!(h.state().overlay, Some(Overlay::Tags(_))));
+    press(&mut h, &[Action::Actions]);
+    osk_type(&mut h, "work, 2026");
+    h.state_mut().osk_submit();
+    let tags_of = |n: &str| crate::tags::read(&dir.join(n), true).0;
+    assert_eq!(tags_of("report.txt"), ["work", "2026"]);
+    assert_eq!(tags_of("Projects"), ["work", "2026"]);
+    assert!(tags_of("notes.txt").is_empty());
+    match &h.state().overlay {
+        Some(Overlay::Tags(ed)) => {
+            assert!(ed.tags.contains(&"work".to_string()) && ed.tags.contains(&"2026".to_string()));
+            let i = ed.tags.iter().position(|t| t == "work").unwrap();
+            assert_eq!(ed.count[i], 2);
+        }
+        _ => panic!("the tags didn't come back"),
+    }
+    settle(&mut h);
+    shot(&mut h, "tg0-editor");
+    // "2026" off both (✕ on it).
+    let at = match &h.state().overlay {
+        Some(Overlay::Tags(ed)) => ed.tags.iter().position(|t| t == "2026").unwrap(),
+        _ => unreachable!(),
+    };
+    if let Some(Overlay::Tags(ed)) = h.state_mut().overlay.as_mut() {
+        ed.cursor = at;
+    }
+    press(&mut h, &[Action::Accept]);
+    assert_eq!(tags_of("report.txt"), ["work"]);
+    press(&mut h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    // photo.png gets one too, from the editor's list.
+    h.state_mut().pane_mut().selected.clear();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "photo.png").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::TagsAsk);
+    let at = match &h.state().overlay {
+        Some(Overlay::Tags(ed)) => ed.tags.iter().position(|t| t == "2026").expect("known tags offered"),
+        _ => unreachable!(),
+    };
+    if let Some(Overlay::Tags(ed)) = h.state_mut().overlay.as_mut() {
+        ed.cursor = at;
+    }
+    press(&mut h, &[Action::Accept, Action::Back]);
+    assert_eq!(tags_of("photo.png"), ["2026"]);
+    // The list: a column of tags.
+    settle(&mut h);
+    let e = h.state().pane().entries.iter().find(|e| e.name == "report.txt").unwrap().clone();
+    assert_eq!(e.tags, ["work"]);
+    shot(&mut h, "tg1-list-column");
+    h.state_mut().cfg.view = crate::config::ViewMode::Grid;
+    settle(&mut h);
+    shot(&mut h, "tg2-grid-dots");
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    // The quick filter: #work.
+    h.state_mut().pane_mut().set_filter(Some("#work".into()));
+    let names: Vec<String> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    assert_eq!(names, ["Projects", "report.txt"]);
+    h.state_mut().pane_mut().set_filter(None);
+    // A search from the editor's 🔍 (□): everything tagged so, deep down too.
+    crate::tags::write(&dir.join("Projects/deep/plan.txt"), &["work".into()]).unwrap();
+    let i = h.state().pane().entries.iter().position(|e| e.name == "notes.txt").unwrap();
+    h.state_mut().pane_mut().cursor = i;
+    h.state_mut().run(Cmd::TagsAsk);
+    let at = match &h.state().overlay {
+        Some(Overlay::Tags(ed)) => ed.tags.iter().position(|t| t == "work").unwrap(),
+        _ => unreachable!(),
+    };
+    if let Some(Overlay::Tags(ed)) = h.state_mut().overlay.as_mut() {
+        ed.cursor = at;
+    }
+    press(&mut h, &[Action::Select]);
+    assert!(h.state().overlay.is_none());
+    assert!(matches!(&h.state().pane().loc, Location::Search { query, .. } if query == "#work"));
+    for _ in 0..40 {
+        settle(&mut h);
+        if h.state().pane().loading.is_none() {
+            break;
+        }
+    }
+    let mut found: Vec<String> = h.state().pane().entries.iter().map(|e| e.name.clone()).collect();
+    found.sort();
+    assert_eq!(found, ["Projects", "Projects/deep/plan.txt", "report.txt"]);
+    shot(&mut h, "tg3-search");
+}
+
+/// Network places: one added through the dialog (on the pad), in the
+/// sidebar's Network section not connected, then connected with a stand-in
+/// sshfs that first wants a password (asked for, then given on its input),
+/// and opened; a kind with no tool says what to install.
+#[test]
+#[ignore]
+fn net_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::net_ui::NRow;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    // A stand-in sshfs: notes its arguments and input; refuses until it
+    // gets a password.
+    let bin = dir.join("fake-net-bin");
+    let log = dir.join("fake-sshfs.log");
+    let _ = std::fs::remove_dir_all(&bin);
+    let _ = std::fs::remove_file(&log);
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = format!(
+        "#!/bin/sh\necho \"args: $*\" >> {log}\ncase \"$*\" in *password_stdin*) read pw; echo \"pw: $pw\" >> {log}; exit 0;; esac\necho 'user@box: Permission denied (publickey,password).' >&2\nexit 1\n",
+        log = log.display()
+    );
+    std::fs::write(bin.join("sshfs"), script).unwrap();
+    std::fs::set_permissions(bin.join("sshfs"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe {
+        std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+        std::env::set_var("POLKA_NET_TOOLS", "sshfs");
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    h.state_mut().cfg.connections.clear();
+    // The dialog: SFTP, the server, the user.
+    h.state_mut().run(Cmd::NetAdd);
+    fn dlg<'a>(h: &'a mut Harness<'static, App>) -> &'a mut crate::net_ui::NetDlg {
+        match h.state_mut().overlay.as_mut() {
+            Some(Overlay::Net(d)) => d,
+            _ => panic!("no dialog"),
+        }
+    }
+    assert_eq!(dlg(&mut h).row, NRow::Kind);
+    press(&mut h, &[Action::Right, Action::Right]);
+    assert_eq!(dlg(&mut h).conn.kind, crate::net::Kind::Sftp);
+    // The server: ✕ on its row, typed in.
+    press(&mut h, &[Action::Down, Action::Down]);
+    assert_eq!(dlg(&mut h).row, NRow::Address);
+    press(&mut h, &[Action::Accept]);
+    osk_type(&mut h, "box.local");
+    h.state_mut().osk_submit();
+    press(&mut h, &[Action::Down]);
+    press(&mut h, &[Action::Accept]);
+    osk_type(&mut h, "/srv/files");
+    h.state_mut().osk_submit();
+    press(&mut h, &[Action::Down]);
+    press(&mut h, &[Action::Accept]);
+    osk_type(&mut h, "me");
+    h.state_mut().osk_submit();
+    let d = dlg(&mut h);
+    assert_eq!((d.conn.address.as_str(), d.conn.path.as_str(), d.conn.user.as_str()), ("box.local", "/srv/files", "me"));
+    assert_eq!(d.conn.tool(), Some(crate::net::Tool::Sshfs));
+    settle(&mut h);
+    shot(&mut h, "nt0-dialog");
+    // Save only (on the buttons' row: Save).
+    let d = dlg(&mut h);
+    d.row = NRow::Buttons;
+    d.button = 1;
+    press(&mut h, &[Action::Accept]);
+    assert!(h.state().overlay.is_none());
+    let c = h.state().cfg.connections[0].clone();
+    assert_eq!(c.name, "srv/files (box.local)");
+    let side = h.state().side_items.iter().position(|s| s.net.as_ref().is_some_and(|n| n.0 == c.id)).expect("not in the sidebar");
+    assert_eq!(h.state().side_items[side].section, "Network");
+    assert!(h.state().side_items[side].offline());
+    settle(&mut h);
+    shot(&mut h, "nt1-sidebar-offline");
+    // Open it: keys first (no password), refused; the password asked.
+    h.state_mut().side_cursor = side;
+    h.state_mut().focus = crate::app::Focus::Sidebar;
+    press(&mut h, &[Action::Accept]);
+    for _ in 0..30 {
+        settle(&mut h);
+        if matches!(h.state().overlay, Some(Overlay::Osk(_))) {
+            break;
+        }
+    }
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if k.secret), "no password asked");
+    osk_type(&mut h, "s3cret");
+    h.state_mut().osk_submit();
+    for _ in 0..30 {
+        settle(&mut h);
+        if h.state().net_busy.is_empty() {
+            break;
+        }
+    }
+    let said = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines[0].contains("me@box.local:/srv/files") && lines[0].contains("BatchMode=yes"), "{said}");
+    assert!(lines[1].contains("password_stdin") && lines[2] == "pw: s3cret", "{said}");
+    // (Not really mounted: the stand-in mounts nothing, but Polka went there.)
+    assert_eq!(h.state().pane().loc, crate::vfs::Location::Local(c.mount_dir()));
+    assert_eq!(h.state().net_pw.get(&c.id).map(String::as_str), Some("s3cret"));
+    // Its menu.
+    let it = h.state().side_items[side].clone();
+    h.state_mut().side_menu(it);
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    for l in [crate::i18n::tr("Connect"), crate::i18n::tr("Edit connection…"), crate::i18n::tr("Remove connection…")] {
+        assert!(labels.iter().any(|x| x == l), "{labels:?}");
+    }
+    h.state_mut().overlay = None;
+    // WebDAV with no tool here: what to install.
+    h.state_mut().run(Cmd::NetAdd);
+    dlg(&mut h).conn.kind = crate::net::Kind::WebDav;
+    settle(&mut h);
+    assert_eq!(dlg(&mut h).conn.tool(), None);
+    shot(&mut h, "nt2-no-tool");
+    h.state_mut().overlay = None;
+    // Removed.
+    h.state_mut().run(Cmd::NetRemoveNow(c.id.clone()));
+    assert!(h.state().cfg.connections.is_empty());
+    assert!(!h.state().side_items.iter().any(|s| s.net.is_some()));
+    unsafe {
+        std::env::set_var("PATH", path);
+        std::env::remove_var("POLKA_NET_TOOLS");
+    }
+}
+
+/// Polish, Kazakh, Uzbek and Hindi: the interface, the settings and the
+/// keyboard in each (Hindi needs its own font and shaping).
+#[test]
+#[ignore]
+fn language_screens() {
+    use crate::app::{Cmd, Osk, OskPurpose, Overlay};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::var_os("POLKA_TEST_DIR").map(PathBuf::from).expect("POLKA_TEST_DIR");
+    let mut h = harness(dir);
+    for (code, layout) in [("pl", "PL"), ("kk", "KZ"), ("uz", "UZ"), ("hi", "HI")] {
+        h.state_mut().cfg.language = Some(code.into());
+        crate::i18n::set(Some(code));
+        assert_eq!(crate::i18n::current(), code);
+        assert_ne!(crate::i18n::tr("Settings"), "Settings", "{code}");
+        h.state_mut().refresh_sidebar();
+        settle(&mut h);
+        shot(&mut h, &format!("lang-{code}-0-main"));
+        h.state_mut().run(Cmd::Settings);
+        settle(&mut h);
+        shot(&mut h, &format!("lang-{code}-1-settings"));
+        if code == "pl" {
+            // Down to the keyboard layouts (two lines of them now).
+            for _ in 0..crate::app::row::LAYOUTS {
+                press(&mut h, &[Action::Down]);
+            }
+            settle(&mut h);
+            shot(&mut h, "lang-pl-1b-layouts");
+        }
+        h.state_mut().overlay = None;
+        let mut k = Osk::new(crate::i18n::tr("New folder"), "", OskPurpose::GoTo);
+        k.layout = crate::keyboard::CODES.iter().position(|c| *c == layout).unwrap();
+        h.state_mut().overlay = Some(Overlay::Osk(k));
+        settle(&mut h);
+        shot(&mut h, &format!("lang-{code}-2-keyboard"));
+        h.state_mut().overlay = None;
+    }
+    crate::i18n::set(Some("en"));
+    h.state_mut().cfg.language = None;
+}

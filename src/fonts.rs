@@ -94,6 +94,14 @@ pub fn install_with(ctx: &egui::Context, viewer: Option<&str>) {
         fonts.families.entry(egui::FontFamily::Proportional).or_default().push("system-cjk".into());
         fonts.families.entry(egui::FontFamily::Monospace).or_default().push("system-cjk".into());
     }
+    // Devanagari (Hindi, and file names in it), after the rest.
+    if let Some((bytes, index)) = fc_match_face("sans-serif:lang=hi") {
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        fonts.font_data.insert("system-deva".into(), Arc::new(data));
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().push("system-deva".into());
+        fonts.families.entry(egui::FontFamily::Monospace).or_default().push("system-deva".into());
+    }
     let prop = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
     fonts.families.entry(egui::FontFamily::Name("bold".into())).or_default().extend(prop);
     // The viewer's family: the chosen font, then the usual monospace chain.

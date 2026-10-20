@@ -54,7 +54,7 @@ const fn lay(name: &'static str, rows: [(&'static str, &'static str); 4], dead: 
     Layout { name, rows, dead, script }
 }
 
-pub const LAYOUTS: [Layout; 8] = [
+pub const LAYOUTS: [Layout; 12] = [
     lay("EN", [("`1234567890-=", "~!@#$%^&*()_+"), ("qwertyuiop[]\\", "QWERTYUIOP{}|"), ("asdfghjkl;'", "ASDFGHJKL:\""), ("zxcvbnm,./", "ZXCVBNM<>?")], "", Script::Plain),
     lay("RU", [("ё1234567890-=", "Ё!\"№;%:?*()_+"), ("йцукенгшщзхъ\\", "ЙЦУКЕНГШЩЗХЪ/"), ("фывапролджэ", "ФЫВАПРОЛДЖЭ"), ("ячсмитьбю.", "ЯЧСМИТЬБЮ,")], "", Script::Plain),
     lay("UK", [("ґ1234567890-=", "Ґ!\"№;%:?*()_+"), ("йцукенгшщзхї\\", "ЙЦУКЕНГШЩЗХЇ/"), ("фівапролджє", "ФІВАПРОЛДЖЄ"), ("ячсмитьбю.", "ЯЧСМИТЬБЮ,")], "", Script::Plain),
@@ -63,10 +63,18 @@ pub const LAYOUTS: [Layout; 8] = [
     lay("ES", [("º1234567890'¡", "ª!\"·$%&/()=?¿"), ("qwertyuiop`+ç", "QWERTYUIOP^*Ç"), ("asdfghjklñ´", "ASDFGHJKLÑ¨"), ("zxcvbnm,.-", "ZXCVBNM;:_")], "´`^¨", Script::Plain),
     lay("한", [("`1234567890-=", "~!@#$%^&*()_+"), ("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔ[]\\", "ㅃㅉㄸㄲㅆㅛㅕㅑㅒㅖ{}|"), ("ㅁㄴㅇㄹㅎㅗㅓㅏㅣ;'", "ㅁㄴㅇㄹㅎㅗㅓㅏㅣ:\""), ("ㅋㅌㅊㅍㅠㅜㅡ,./", "ㅋㅌㅊㅍㅠㅜㅡ<>?")], "", Script::Hangul),
     lay("あ", [("ぬふあうえおやゆよわほへろ", "ぬふぁぅぇぉゃゅょをほへー"), ("たていすかんなにらせ゛゜む", "たてぃすかんなにらせ゛「」"), ("ちとしはきくまのりれけ", "ちとしはきくまのりれけ"), ("つさそひこみもねるめ", "っさそひこみも、。・")], "", Script::Kana),
+    // Polish: ą ę ł ó ś ż on their own keys, ´ before c n o s z for ć ń ó ś ź.
+    lay("PL", [("ó1234567890-=", "Ó!@#$%^&*()_+"), ("qwertyuiopżś'", "QWERTYUIOPŻŚ\""), ("asdfghjklłą", "ASDFGHJKLŁĄ"), ("zxcvbnmę.´", "ZXCVBNMĘ,´")], "´", Script::Plain),
+    // Kazakh, as the KZ layout: its letters where the digits are.
+    lay("KZ", [("(\"әіңғ,.үұқөһ", ")!ӘІҢҒ;:ҮҰҚӨҺ"), ("йцукенгшщзхъ\\", "ЙЦУКЕНГШЩЗХЪ/"), ("фывапролджэ", "ФЫВАПРОЛДЖЭ"), ("ячсмитьбю№", "ЯЧСМИТЬБЮ?")], "", Script::Plain),
+    // Uzbek (Latin): ʻ for oʻ and gʻ on the first key.
+    lay("UZ", [("ʻ1234567890-=", "ʼ!@#$%^&*()_+"), ("qwertyuiop[]\\", "QWERTYUIOP{}|"), ("asdfghjkl;'", "ASDFGHJKL:\""), ("zxcvbnm,./", "ZXCVBNM<>?")], "", Script::Plain),
+    // Hindi: InScript (vowel signs plain, the vowels themselves with Shift).
+    lay("हि", [("ॊ1234567890-ृ", "ऒऍॅ#$%^&*()ःऋ"), ("ौैाीूबहगदजड़ॉ", "औऐआईऊभङघधझढञऑ"), ("ोे्िुपरकतचट", "ओएअइउफऱखथछठ"), ("ॆंमनवलस,.य", "ऎँणऩऴळशष।य़")], "", Script::Plain),
 ];
 
 /// Codes the settings use (the names, but Latin for the CJK ones).
-pub const CODES: [&str; 8] = ["EN", "RU", "UK", "DE", "FR", "ES", "KO", "JA"];
+pub const CODES: [&str; 12] = ["EN", "RU", "UK", "DE", "FR", "ES", "KO", "JA", "PL", "KZ", "UZ", "HI"];
 
 /// Layouts the ⇄ key goes through (indices; never empty).
 static ENABLED: std::sync::RwLock<Vec<usize>> = std::sync::RwLock::new(Vec::new());
@@ -104,6 +112,10 @@ pub fn default_codes(ui_lang: &str) -> Vec<String> {
         "es" => "ES",
         "ko" => "KO",
         "ja" => "JA",
+        "pl" => "PL",
+        "kk" => "KZ",
+        "uz" => "UZ",
+        "hi" => "HI",
         _ => "",
     };
     let mut v = vec!["EN".to_string()];
@@ -218,7 +230,7 @@ pub fn compose(layout: usize, prev: char, c: char) -> Option<String> {
 /// An accent (dead key) on a letter.
 fn accent(dead: char, c: char) -> Option<char> {
     let (from, to) = match dead {
-        '´' | '\'' => ("aeiouyAEIOUY", "áéíóúýÁÉÍÓÚÝ"),
+        '´' | '\'' => ("aeiouycnszAEIOUYCNSZ", "áéíóúýćńśźÁÉÍÓÚÝĆŃŚŹ"),
         '`' => ("aeiouAEIOU", "àèìòùÀÈÌÒÙ"),
         '^' => ("aeiouAEIOU", "âêîôûÂÊÎÔÛ"),
         '¨' => ("aeiouyAEIOU", "äëïöüÿÄËÏÖÜ"),

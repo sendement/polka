@@ -236,6 +236,9 @@ pub struct Secret(pub String);
 pub enum After {
     /// A text file saved through a copy: the editor's changes are saved.
     Saved { path: PathBuf, text: String },
+    /// A network place (un)mounted: the password file to remove, whether
+    /// to open it.
+    Net { id: String, cred: Option<PathBuf>, open: bool, mount: bool },
 }
 
 /// The job's error when sudo didn't take the password.

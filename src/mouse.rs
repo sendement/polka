@@ -45,6 +45,7 @@ impl Drag {
                 size: m.as_ref().map_or(0, |m| m.len()),
                 mtime: m.as_ref().map(|m| m.mtime()),
                 mode: m.as_ref().map_or(0o644, |m| m.mode()),
+                tags: Vec::new(),
             }
         };
         let label = match files.len() {
@@ -138,7 +139,7 @@ impl App {
             }
             return;
         }
-        match it.loc.dest().filter(|_| !it.usage && it.drive.as_ref().is_none_or(|d| d.mount.is_some())) {
+        match it.loc.dest().filter(|_| !it.usage && !it.offline()) {
             Some(d) => self.drop_to(Some(d), None, it.label.clone()),
             None => self.drag = None,
         }

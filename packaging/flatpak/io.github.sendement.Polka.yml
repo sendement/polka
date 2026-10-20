@@ -26,6 +26,8 @@ finish-args:
   - --share=network
   # programs, scripts and launchers the user opens run on the host
   - --talk-name=org.freedesktop.Flatpak
+  # network places GVfs mounts (gio) show up here
+  - --filesystem=xdg-run/gvfs
   # mounting, unmounting and ejecting drives
   - --system-talk-name=org.freedesktop.UDisks2
   # answering "Show in folder" from other programs

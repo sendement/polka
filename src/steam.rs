@@ -526,6 +526,7 @@ pub fn list(v: View) -> std::io::Result<Vec<Entry>> {
             size: 0,
             mtime: meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64),
             mode: 0o755,
+            tags: Vec::new(),
         }
     };
     if v == View::Root {

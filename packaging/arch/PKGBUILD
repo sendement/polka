@@ -1,6 +1,6 @@
 # Maintainer: Sendem <18467008+sendement@users.noreply.github.com>
 pkgname=polka
-pkgver=0.30.0
+pkgver=0.31.0
 pkgrel=1
 pkgdesc="Gamepad-first file manager: dual pane, archives as folders, themed and .exe icons"
 arch=('x86_64')

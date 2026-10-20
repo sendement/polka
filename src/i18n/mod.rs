@@ -5,10 +5,14 @@
 mod de;
 mod es;
 mod fr;
+mod hi;
 mod ja;
+mod kk;
 mod ko;
+mod pl;
 mod ru;
 mod uk;
+mod uz;
 mod zh;
 
 use std::collections::HashMap;
@@ -23,6 +27,10 @@ pub const LANGUAGES: &[(&str, &str, &[(&str, &str)])] = &[
     ("de", "Deutsch", de::T),
     ("es", "Español", es::T),
     ("fr", "Français", fr::T),
+    ("pl", "Polski", pl::T),
+    ("kk", "Қазақша", kk::T),
+    ("uz", "Oʻzbekcha", uz::T),
+    ("hi", "हिन्दी", hi::T),
     ("zh", "中文", zh::T),
     ("ja", "日本語", ja::T),
     ("ko", "한국어", ko::T),
@@ -85,6 +93,15 @@ pub fn volumes(n: usize) -> String {
     match current() {
         "ru" => slavic("том", "тома", "томов"),
         "uk" => slavic("том", "томи", "томів"),
+        // Polish: 1 wolumin, 2–4 woluminy, 5–21 woluminów, 22 woluminy…
+        "pl" => {
+            let word = match (n, n % 10, n % 100) {
+                (1, _, _) => "wolumin",
+                (_, 2..=4, x) if !(12..=14).contains(&x) => "woluminy",
+                _ => "woluminów",
+            };
+            format!("{n} {word}")
+        }
         _ if n == 1 => tr("1 volume").to_string(),
         _ => trn("%n volumes", n),
     }

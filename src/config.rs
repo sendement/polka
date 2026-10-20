@@ -83,6 +83,8 @@ pub struct Config {
     pub install_on_open: bool,
     /// The right pane opens where it was (else beside the left one).
     pub remember_right: bool,
+    /// Network places.
+    pub connections: Vec<crate::net::Conn>,
     /// Where the right pane was last.
     pub right_dir: Option<std::path::PathBuf>,
 }
@@ -220,6 +222,7 @@ impl Default for Config {
             osk_layouts: Vec::new(),
             install_on_open: true,
             remember_right: true,
+            connections: Vec::new(),
             right_dir: None,
         }
     }

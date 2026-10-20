@@ -64,6 +64,10 @@ impl App {
                 self.toast(tr("Saved"), false);
                 true
             }
+            (Op::Elevated { after: Some(After::Net { id, cred, open, mount }), .. }, r) => {
+                self.net_elevated(id.clone(), cred.clone(), *open, *mount, r);
+                true
+            }
             (Op::Elevated { .. }, _) => false,
             (op, Err(_)) if denied => match crate::ops::elevated_steps(op) {
                 Some((steps, label)) => {

@@ -258,7 +258,7 @@ impl Pane {
             HashMap::new()
         };
         let shown: Vec<Entry> = match self.filter.as_deref() {
-            Some(f) if !f.is_empty() => self.all.iter().filter(|e| vfs::name_matches(&e.name, f)).cloned().collect(),
+            Some(f) if !f.is_empty() => self.all.iter().filter(|e| vfs::entry_matches(e, f)).cloned().collect(),
             _ => self.all.clone(),
         };
         // Fold each volume set into its first item, unless it's open.
@@ -545,6 +545,15 @@ pub enum Cmd {
     /// Put the targets in the trash back where they came from (asking
     /// first if something is there now).
     RestoreAsk,
+    /// Tag the targets.
+    TagsAsk,
+    /// Network places: a new one, edit, connect, disconnect, remove.
+    NetAdd,
+    NetEdit(String),
+    NetConnect(String),
+    NetDisconnect(String),
+    NetRemoveAsk(String),
+    NetRemoveNow(String),
     Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     DeleteNow(Vec<PathBuf>),
     /// Copy/move with a decided conflict policy.
@@ -766,6 +775,12 @@ pub enum OskPurpose {
     Sudo { op: Box<Op> },
     /// A command to keep among the saved ones.
     TermSave,
+    /// A tag for the items being tagged (the list comes back after).
+    NewTag { ed: Box<crate::tags_ui::TagEditor> },
+    /// A field of the connection dialog (which comes back afterwards).
+    NetField { dlg: Box<crate::net_ui::NetDlg>, row: crate::net_ui::NRow },
+    /// The password a connection needs.
+    NetPassword { id: String, open: bool },
 }
 
 /// What to do again once an archive password is entered.
@@ -907,6 +922,8 @@ pub enum Overlay {
     ViewerSettings(ViewerSettings),
     TermKeys(crate::terminal::app::QuickKeys),
     TermSettings(crate::terminal::app::TermSettings),
+    Tags(crate::tags_ui::TagEditor),
+    Net(Box<crate::net_ui::NetDlg>),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1195,6 +1212,17 @@ pub struct SideItem {
     pub term: bool,
     /// A drive (maybe not mounted: then `loc` is no real place).
     pub drive: Option<crate::drives::Drive>,
+    /// A network place: its connection's id, and whether it's connected
+    /// (if not, `loc` is no real place either).
+    pub net: Option<(String, bool)>,
+}
+
+impl SideItem {
+    /// A drive not mounted or a network place not connected: nothing to
+    /// open or drop onto yet.
+    pub fn offline(&self) -> bool {
+        self.drive.as_ref().is_some_and(|d| d.mount.is_none()) || self.net.as_ref().is_some_and(|n| !n.1)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1231,6 +1259,10 @@ pub enum Msg {
     Drive(Result<crate::drives::Done, String>),
     /// The trash was emptied: (items, failures).
     TrashEmptied(usize, usize),
+    /// Connecting to a network place ended: where to open it, or why not.
+    NetDone { id: String, result: Result<PathBuf, String>, open: bool, pw: Option<String> },
+    /// A network place was disconnected.
+    NetGone,
     NeedPassword(PathBuf, bool, Retry),
     /// A file from an archive was extracted for the viewer.
     View { tab: usize, path: PathBuf, name: String, origin: usize, source: Option<(PathBuf, String)> },
@@ -1311,6 +1343,10 @@ pub struct App {
     pub term_window_title: String,
     /// The sudo password that last worked, and since when.
     pub sudo_pw: Option<(crate::ops::Secret, Instant)>,
+    /// Network passwords for this session (by connection id).
+    pub net_pw: HashMap<String, String>,
+    /// Connections being made.
+    pub net_busy: HashSet<String>,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1419,6 +1455,8 @@ impl App {
             term_window: None,
             term_window_title: String::new(),
             sudo_pw: None,
+            net_pw: HashMap::new(),
+            net_busy: HashSet::new(),
             sys_clip: None,
             dark_applied: None,
             schemes: crate::schemes::all(),
@@ -1649,7 +1687,7 @@ impl App {
             }
             SpringAt::Side(i) => match self.side_items.get(i) {
                 // Unmounted drives and tools aren't folders yet.
-                Some(it) if !it.usage && !it.term && it.drive.as_ref().is_none_or(|d| d.mount.is_some()) => it.loc.clone(),
+                Some(it) if !it.usage && !it.term && !it.offline() => it.loc.clone(),
                 _ => return,
             },
             SpringAt::Entry(side, shown, name) => {
@@ -1717,6 +1755,8 @@ impl App {
             match m {
                 Msg::Toast(s, e) => self.toast(s, e),
                 Msg::Drive(r) => self.drive_done(r),
+                Msg::NetDone { id, result, open, pw } => self.net_done(id, result, open, pw),
+                Msg::NetGone => self.refresh_sidebar(),
                 Msg::TrashEmptied(n, failed) => {
                     self.refresh_sidebar();
                     self.reload_all();
@@ -1885,6 +1925,7 @@ impl App {
             usage: false,
             term: false,
             drive: None,
+            net: None,
         };
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
         let places: [(&str, Option<PathBuf>, &'static [&'static str]); 7] = [
@@ -1922,6 +1963,7 @@ impl App {
             usage: false,
             term: true,
             drive: None,
+            net: None,
         });
         if let Some(root) = crate::steam::root() {
             v.push(SideItem { custom_icon: icon_for(&self.cfg, "polka:steam"), ..place("Steam".into(), &["steam", "com.valvesoftware.Steam", "applications-games"], PathBuf::new(), "Places", &self.cfg) });
@@ -1940,7 +1982,7 @@ impl App {
         for d in &drives {
             let label = d.label.clone().unwrap_or_else(|| format!("{} {}", tr("Drive"), human_size(d.size)));
             let loc = Location::Local(d.mount.clone().unwrap_or_else(|| PathBuf::from(d.key())));
-            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()) });
+            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()), net: None });
         }
         for (dev, mnt) in mounts() {
             if drives.iter().any(|d| d.mount.as_ref() == Some(&mnt)) {
@@ -1948,6 +1990,28 @@ impl App {
             }
             let label = mnt.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(dev);
             v.push(place(label, &["drive-removable-media", "drive-harddisk", "media-flash"], mnt, "Drives", &self.cfg));
+        }
+        // Network places, connected or not.
+        let mounts = crate::net::mount_points();
+        for c in &self.cfg.connections {
+            let at = c.mounted(&mounts);
+            let icon: &'static [&'static str] = match c.kind {
+                crate::net::Kind::Rclone | crate::net::Kind::WebDav => &["folder-cloud", "folder-remote", "network-server"],
+                _ => &["folder-remote", "network-server", "folder-network", "folder"],
+            };
+            let loc = Location::Local(at.clone().unwrap_or_else(|| c.mount_dir()));
+            v.push(SideItem {
+                label: c.name.clone(),
+                icon,
+                custom_icon: icon_for(&self.cfg, &format!("net:{}", c.id)),
+                loc,
+                pinned: false,
+                section: "Network",
+                usage: false,
+                term: false,
+                drive: None,
+                net: Some((c.id.clone(), at.is_some())),
+            });
         }
         v.push(SideItem {
             label: tr("Disk usage").into(),
@@ -1959,6 +2023,7 @@ impl App {
             usage: true,
             term: false,
             drive: None,
+            net: None,
         });
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
@@ -2255,6 +2320,10 @@ impl App {
                     if let Some(d) = it.drive.as_ref().filter(|d| d.mount.is_none()) {
                         return self.drive_op(d.clone(), crate::drives::Op::Mount);
                     }
+                    // A network place: connect first if need be.
+                    if let Some((id, _)) = &it.net {
+                        return self.net_open(id);
+                    }
                     let cfg = self.cfg.clone();
                     // A place replaces the disk usage page (kept for later).
                     if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
@@ -2364,6 +2433,8 @@ impl App {
                 _ => {}
             },
             Overlay::Settings(_) => self.settings_input(a),
+            Overlay::Tags(_) => self.tags_input(a),
+            Overlay::Net(_) => self.net_input(a),
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::TermKeys(_) => self.term_keys_input(a),
             Overlay::TermSettings(_) => self.term_settings_input(a),
@@ -2549,6 +2620,8 @@ impl App {
                     dlg.pending_pw = None;
                     self.overlay = Some(Overlay::Compress(dlg));
                 }
+                OskPurpose::NewTag { ed } => self.overlay = Some(Overlay::Tags(*ed)),
+                OskPurpose::NetField { dlg, .. } => self.overlay = Some(Overlay::Net(dlg)),
                 _ => {}
             }
         }
@@ -2565,6 +2638,15 @@ impl App {
         }
         if let OskPurpose::CompressField { dlg, field } = k.purpose {
             return self.compress_field(*dlg, field, raw);
+        }
+        if let OskPurpose::NewTag { ed } = k.purpose {
+            return self.tags_typed(*ed, &text);
+        }
+        if let OskPurpose::NetField { dlg, row } = k.purpose {
+            return self.net_field(dlg, row, raw);
+        }
+        if let OskPurpose::NetPassword { id, open } = k.purpose {
+            return self.net_password_typed(id, raw, open);
         }
         if let OskPurpose::Sudo { op } = k.purpose {
             return self.sudo_typed(*op, raw);
@@ -2738,7 +2820,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } => unreachable!(),
         }
     }
 
@@ -3026,6 +3108,7 @@ impl App {
             add(tr("Move to other pane"), Cmd::MoveOther, any && editable && other_writable);
         }
         add(tr("Rename"), Cmd::Rename, single && editable);
+        add(tr("Tags…"), Cmd::TagsAsk, any && local);
         if local {
             add(tr("Move to trash"), Cmd::TrashAsk, any);
         }
@@ -3143,6 +3226,7 @@ impl App {
             MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
             MenuItem { enabled: local, ..item(tr("Open terminal here"), Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
             item(tr("Go to path…"), Cmd::GoTo),
+            item(tr("Add network place…"), Cmd::NetAdd),
             item(tr("Select all"), Cmd::SelectAll),
             item(tr("View"), Cmd::Submenu(SubMenu::View)),
             item(tr("Sorting"), Cmd::Submenu(SubMenu::Sort)),
@@ -3640,7 +3724,7 @@ impl App {
         }
     }
 
-    fn local_targets(&self) -> Vec<PathBuf> {
+    pub(crate) fn local_targets(&self) -> Vec<PathBuf> {
         let p = self.pane();
         p.targets().iter().filter_map(|e| p.entry_path(e)).collect()
     }
@@ -3751,6 +3835,8 @@ impl App {
                 let items = vec![item(tr("Cancel"), Cmd::Nothing), item(if perm { tr("Delete") } else { tr("Move to trash") }, go)];
                 self.overlay = Some(Overlay::Menu(Menu::new(title, items)));
             }
+            Cmd::TagsAsk => self.tags_open(),
+            Cmd::NetAdd | Cmd::NetEdit(_) | Cmd::NetConnect(_) | Cmd::NetDisconnect(_) | Cmd::NetRemoveAsk(_) | Cmd::NetRemoveNow(_) => self.net_cmd(cmd),
             Cmd::RestoreAsk => {
                 let mut items = Vec::new();
                 let mut unknown = 0;
