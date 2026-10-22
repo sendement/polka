@@ -709,19 +709,30 @@ impl App {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.add_space(3.0);
             ui.horizontal(|ui| {
+                // The hints at the right come first: the figures get what
+                // room is left (as last frame measured it), losing the last
+                // ones first.
+                let hints_id = egui::Id::new("status-hints-w");
+                let hints_w = ui.ctx().data(|d| d.get_temp::<f32>(hints_id)).unwrap_or(0.0);
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let text_w = |ui: &Ui, t: &str| ui.painter().layout_no_wrap(t.to_string(), font.clone(), Color32::WHITE).size().x;
                 let p = self.pane();
                 let mut s = format!("{} {}", p.entries.len(), tr("items"));
                 if !p.selected.is_empty() {
                     s += &format!(" · {} {}", p.selected.len(), tr("selected"));
                 }
+                let vol = p.current().and_then(|e| p.volumes.get(&e.name)).map(|m| (format!("{} {} {} {} · {}", tr("Volume"), m.index + 1, tr("of"), m.count, m.archive), m.gap));
+                let mut others = vol.as_ref().map_or(0.0, |(t, gap)| text_w(ui, t) + 16.0 + if *gap { text_w(ui, tr("some volumes are missing")) + 8.0 } else { 0.0 });
+                if let Some((t, _, _)) = &self.toast {
+                    others += text_w(ui, t) + 16.0;
+                }
+                let budget = ui.available_width() - text_w(ui, &s) - hints_w - others - 24.0;
                 ui.label(s);
-                self.status_figures(ui);
-                let p = self.pane();
-                if let Some(m) = p.current().and_then(|e| p.volumes.get(&e.name)) {
+                self.status_figures(ui, budget);
+                if let Some((t, gap)) = vol {
                     ui.separator();
-                    let t = format!("{} {} {} {} · {}", tr("Volume"), m.index + 1, tr("of"), m.count, m.archive);
                     ui.label(egui::RichText::new(t).color(volume_color(ui.visuals())));
-                    if m.gap {
+                    if gap {
                         ui.label(egui::RichText::new(tr("some volumes are missing")).color(ui.visuals().error_fg_color));
                     }
                 }
@@ -731,11 +742,14 @@ impl App {
                     ui.label(egui::RichText::new(t).color(c));
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let from = ui.cursor().max.x;
                     for (a, label) in self.hints().into_iter().rev() {
                         ui.label(label);
                         glyph(ui, a, self.pad);
                         ui.add_space(6.0);
                     }
+                    let w = from - ui.min_rect().min.x;
+                    ui.ctx().data_mut(|d| d.insert_temp(hints_id, w));
                 });
             });
             ui.add_space(3.0);
@@ -744,7 +758,7 @@ impl App {
 
     /// Past the item count: the disk's space and what the folder holds, an
     /// icon and a number each (what each is, on hover).
-    fn status_figures(&mut self, ui: &mut Ui) {
+    fn status_figures(&mut self, ui: &mut Ui, mut budget: f32) {
         use crate::status::{Counts, FIGURES, Figure};
         let shown = self.cfg.status;
         let p = self.pane();
@@ -775,17 +789,26 @@ impl App {
                     k => (k.to_string(), format!("{}: {k}", f.label()), None),
                 },
             };
+            // No room left: this one and the rest stay out.
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            // (The disk's bar is its icon.)
+            let w = 8.0 + if used.is_some() { 34.0 } else { 20.0 } + ui.painter().layout_no_wrap(text.clone(), font, Color32::WHITE).size().x;
+            budget -= w;
+            if budget < 0.0 {
+                break;
+            }
             ui.add_space(8.0);
-            let icon = self.icons.named(f.icons(), px);
+            let icon = if used.is_some() { None } else { self.icons.named(f.icons(), px) };
             let r = ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 match icon {
                     Some(u) => {
                         ui.add(egui::Image::new(u).fit_to_exact_size(Vec2::splat(16.0)));
                     }
-                    None => {
+                    None if used.is_none() => {
                         ui.label("•");
                     }
+                    None => {}
                 }
                 // The disk: how full, as a little bar.
                 if let Some(t) = used {

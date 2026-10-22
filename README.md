@@ -214,9 +214,10 @@ it (a line fills up meanwhile), so the target can be reached without letting go.
 moment (at once while dragging) widens to show the whole path. Files dragged in from other programs land
 the same way, and items pulled out of the window go to other programs (Wayland; X11 takes drops
 into the panel). A folded multi-volume
-set is selected whole; an unfolded one volume by volume. The status bar shows, past the item count, the disk's space used / free (with a little bar)
+set is selected whole; an unfolded one volume by volume. The status bar shows, past the item count, the disk's space used / free (after a bar of how full it is)
 and how many folders, pictures, videos and archives the folder holds, an icon and a number each
-(hover one for what it is; View → Status bar picks which). Running operations show a progress card
+(hover one for what it is; View → Status bar picks which). In a narrow window they give way to
+the button hints, the last ones first. Running operations show a progress card
 (item, amount, speed, time left, cancel; also App menu → Cancel operations). Folders on screen follow
 changes made by other programs (looked at every couple of seconds): what's added or removed shows
 up, the cursor and selection stay put.

@@ -5689,4 +5689,23 @@ fn status_screens() {
     settle(&mut h);
     assert!(!h.state().cfg.status.pictures);
     assert!(h.query_by_label("3").is_none(), "pictures still shown");
+    drop(h);
+
+    // A narrow window: the hints keep their room, the figures give way
+    // from the last.
+    let mut h = harness_with(dir.clone(), [760.0, 500.0], "");
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.status = crate::status::Shown::default();
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    shot(&mut h, "st1-narrow");
+    let menu = crate::i18n::tr("Menu");
+    assert!(h.query_by_label(menu).is_some(), "the hints gave way");
+    assert!(h.query_by_label("2").is_some(), "the folders went first");
+    assert!(h.query_by_label("3").is_none(), "nothing gave way");
 }

@@ -78,7 +78,8 @@ impl Figure {
     /// Theme icons for it, the first found.
     pub fn icons(self) -> &'static [&'static str] {
         match self {
-            Figure::Space => &["drive-harddisk", "drive-harddisk-solidstate", "media-flash"],
+            // (Shown as a bar instead.)
+            Figure::Space => &[],
             Figure::Folders => &["folder"],
             Figure::Pictures => &["image-x-generic", "folder-pictures"],
             Figure::Videos => &["video-x-generic", "folder-videos"],

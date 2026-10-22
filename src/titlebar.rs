@@ -100,7 +100,8 @@ impl Style {
             Style::Adwaita => (Vec2::splat(30.0), 10.0),
             Style::Yaru => (Vec2::splat(30.0), 6.0),
             Style::Macos => (Vec2::splat(20.0), 4.0),
-            Style::Win11 => (vec2(46.0, 38.0), 0.0),
+            // (The size of the top bar's own buttons, as their highlight.)
+            Style::Win11 => (Vec2::splat(38.0), 4.0),
             _ => (Vec2::splat(34.0), 4.0),
         }
     }
@@ -228,9 +229,9 @@ fn paint(ui: &Ui, icons: &mut Icons, style: Style, b: WinButton, rect: Rect, max
         Style::Win11 => {
             let red = b == WinButton::Close && hot;
             if red {
-                p.rect_filled(rect, 0.0, Color32::from_rgb(0xc4, 0x2b, 0x1c));
+                p.rect_filled(rect, 8.0 * scale, Color32::from_rgb(0xc4, 0x2b, 0x1c));
             } else if hot {
-                p.rect_filled(rect, 0.0, soft(false));
+                p.rect_filled(rect, 8.0 * scale, v.widgets.hovered.weak_bg_fill);
             }
             glyph(ui, b, maximized, c, if red { Color32::WHITE } else { text }, 1.0, 10.0 * scale);
             return;
