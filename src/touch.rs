@@ -2,7 +2,8 @@
 //! at once, so a drag would select or drag files); here that's undone and
 //! the finger's moves read as gestures instead:
 //!
-//! - a tap: a click (the file list opens on it, or on two taps, as set);
+//! - a tap: a click (the file list opens on it, or on two taps, as set;
+//!   its check boxes, shown big while the screen is used, choose);
 //!   two taps quickly at one place: a double tap;
 //! - a finger moved up or down: scrolling, gliding on after a flick;
 //! - held still half a second: let go, it's a right click (the menu);
@@ -78,6 +79,9 @@ pub struct Touch {
     pub double: bool,
     /// The last tap (for a double tap).
     last_tap: Option<(Instant, Pos2)>,
+    /// The screen was touched last (not the mouse moved): check boxes
+    /// show, big.
+    pub active: bool,
     /// Grips: a finger put on one drags it right away (set every frame).
     pub grips: Vec<egui::Rect>,
     /// Two fingers: their distance when last measured.
@@ -141,6 +145,11 @@ impl Touch {
             }
         }
         let touching = !self.fingers.is_empty() || events.iter().any(|e| matches!(e, Event::Touch { .. }));
+        if touching {
+            self.active = true;
+        } else if events.iter().any(|e| matches!(e, Event::PointerMoved(_) | Event::MouseWheel { .. })) {
+            self.active = false;
+        }
         for ev in events {
             match ev {
                 Event::Touch { id, phase, pos, .. } => {

@@ -192,8 +192,8 @@ Gamepad input is ignored while Polka is not the focused window. Touch screens, t
 aren't taken for pads (on the Steam Deck the screen's touches stay touches).
 
 **Touch screen.** Two quick taps open (Settings → Open by touch: or one); a single tap points at
-an item, a tap on its icon takes it in or out of the selection, and while anything is chosen any
-tap does; a tap on empty space clears the choice, and held a moment there then moved it draws a
+an item. Used by a finger, the list shows every item's check box, big enough to hit; a tap on it
+takes the item in or out of the selection; a tap on empty space clears the choice, and held a moment there then moved it draws a
 selection rectangle. A
 finger moved up or down scrolls, gliding on after a flick; held still half a second (a ring fills
 under the finger) and let go it's a right click — the menu — and moved on it picks up what's under
@@ -202,7 +202,7 @@ two fingers apart or together make the icons bigger or smaller (in a picture the
 
 **Mouse.** The list's headers (Name, Type, Size, Modified) sort by their column, a second click the
 other way; check boxes (on the selected, under the pointer, and all while anything is selected)
-take items in and out of the selection. Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
+take items in and out of the selection. The grid spreads its icons over the whole width. Click selects (Ctrl toggles, Shift selects a range), double click opens, middle
 click opens a folder in a new tab, the side buttons go back / forward. Drag from empty space
 (right of the names in the list, between icons in the grid) for a selection rectangle; Ctrl
 adds to the selection. Drag items by their icon or name onto a folder, the other pane or a

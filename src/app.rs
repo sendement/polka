@@ -1369,9 +1369,6 @@ pub struct App {
     pub touch: crate::touch::Touch,
     /// Two fingers apart / together since the icons last changed size.
     pub pinch: f32,
-    /// What a finger's tap last took in or out (side, entry, when): a
-    /// double tap puts it back.
-    pub tap_toggled: Option<(usize, usize, std::time::Instant)>,
     /// The help's scrolling asked for by the pad (by so much).
     pub help_scroll: Option<f32>,
     /// Esc went down in the terminal and is still held: its repeats are no
@@ -1501,7 +1498,6 @@ impl App {
             help_scroll: None,
             touch: Default::default(),
             pinch: 1.0,
-            tap_toggled: None,
             esc_down: false,
             sys_clip: None,
             dark_applied: None,

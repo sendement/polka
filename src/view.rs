@@ -1165,6 +1165,7 @@ impl App {
             }
             let dragging = self.drag.is_some();
             let tap = self.touch.tapped.then_some(self.touch.double);
+            let finger = self.touch.active;
             let App { tabs, icons, cfg, drag, spring, .. } = self;
             let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
             // The entry a drag rests on in this side, and how long it has.
@@ -1192,13 +1193,13 @@ impl App {
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
                     let shown = pane.loc.clone();
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown), tap) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown), tap, finger) {
                         events.push((idx, e));
                     }
                 }
             } else {
                 let shown = tabs[tab].pane.loc.clone();
-                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tap) {
+                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tap, finger) {
                     events.push((0, e));
                 }
             }
@@ -1242,7 +1243,6 @@ impl App {
             self.set_side(idx);
             match e {
                 PaneEvent::Toggle(i) => {
-                    self.tap_toggled = Some((idx, i, std::time::Instant::now()));
                     let p = self.pane_mut();
                     if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
                         // A folded volume set goes in or out whole.
@@ -1289,13 +1289,6 @@ impl App {
                     self.activate();
                 }
                 PaneEvent::DoubleTap(i) => {
-                    if self.tap_toggled.take().is_some_and(|(s, j, t)| (s, j) == (idx, i) && t.elapsed().as_secs_f32() < 1.0) {
-                        let p = self.pane_mut();
-                        if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
-                            let on = !p.selected.contains(&name);
-                            p.mark(&name, on);
-                        }
-                    }
                     let p = self.pane_mut();
                     p.cursor = i;
                     p.cursor_hidden = false;
@@ -1504,7 +1497,7 @@ enum PaneEvent {
     /// Middle click: a folder in a new tab.
     NewTab(usize),
     Activate(usize),
-    /// A finger's double tap: opens it (what its first tap chose, undone).
+    /// A finger's double tap: opens it.
     DoubleTap(usize),
     Context(Option<usize>),
     /// Items picked up by the mouse (from this entry).
@@ -1518,7 +1511,7 @@ enum PaneEvent {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tap: Option<bool>) -> Vec<PaneEvent> {
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tap: Option<bool>, finger: bool) -> Vec<PaneEvent> {
     let mut events = Vec::new();
     // Dragged items over this pane: dropped on release.
     let whole = ui.max_rect();
@@ -1571,8 +1564,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
     let grid_h = grid_icon + 18.0 + 2.0 * grid_font * 1.3;
     let list_row = (list_icon + 8.0).max(list_font + 14.0);
     // A check box, the icon, the name.
-    const CHECK_W: f32 = 22.0;
-    let name_x = CHECK_W + list_icon + 20.0;
+    let check_w = if finger { 40.0 } else { 22.0 };
+    let name_x = check_w + list_icon + 20.0;
     // Narrow panes (dual mode, big fonts) drop the type column first, then
     // the date, so names keep room. Column x positions are offsets from the
     // right edge.
@@ -1596,6 +1589,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
         100.0 * k
     };
     let cols = if grid { ((width - 8.0) / grid_w).floor().max(1.0) as usize } else { 1 };
+    // The room a further column doesn't fit in goes between the columns.
+    let grid_w = if grid { (width - 8.0) / cols as f32 } else { grid_w };
     pane.cols = cols;
     let row_h = if grid { grid_h } else { list_row };
     let rows = pane.entries.len().div_ceil(cols);
@@ -1716,7 +1711,6 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 }
                 let path = pane.loc.entry_path(&e.name);
                 let hot;
-                let icon_at;
                 let icon_size = if grid { grid_icon } else { list_icon };
                 let thumb = match (&path, e.mtime) {
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
@@ -1733,7 +1727,6 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let big = |r: Rect| Rect::from_center_size(r.center(), r.size() * grow);
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
-                    icon_at = ir;
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
@@ -1750,9 +1743,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                         volume_tag(ui, m, None, at, Align2::RIGHT_TOP, font, in_set, vol_c);
                     }
                 } else {
-                    let ir = Rect::from_min_size(pos2(rect.min.x + CHECK_W + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
-                    // (The check box's room too: a finger is wide.)
-                    icon_at = Rect::from_min_max(pos2(rect.min.x, ir.min.y), ir.max);
+                    let ir = Rect::from_min_size(pos2(rect.min.x + check_w + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
@@ -1796,26 +1787,32 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 // The check box: shown on the selected, under the mouse, and
                 // all along while anything is selected; a click takes the item
                 // in or out, the rest stays (and isn't a click on the row).
+                // With a finger (no pointer to hover) they're always there,
+                // big enough to hit.
                 let mut checked = false;
-                if sel || pointer.is_some_and(|p| rect.contains(p)) || !pane.selected.is_empty() {
+                if finger || sel || pointer.is_some_and(|p| rect.contains(p)) || !pane.selected.is_empty() {
+                    let side = if finger { if grid { 28.0 } else { 26.0 } } else if grid { 16.0 } else { 15.0 };
                     let cb = if grid {
-                        Rect::from_min_size(rect.min + vec2(6.0, 6.0), Vec2::splat(16.0))
+                        // Beside the icon when the cell has room for it.
+                        let x = (rect.center().x - icon_size / 2.0 - side - 2.0).clamp(rect.min.x + 4.0, rect.min.x + 6.0 + side);
+                        Rect::from_min_size(pos2(x, rect.min.y + 6.0), Vec2::splat(side))
                     } else {
-                        Rect::from_center_size(pos2(rect.min.x + 6.0 + CHECK_W / 2.0, rect.center().y), Vec2::splat(15.0))
+                        Rect::from_center_size(pos2(rect.min.x + 6.0 + check_w / 2.0, rect.center().y), Vec2::splat(side))
                     };
                     // (Drags too: pressing it never picks the row up.)
-                    let cr = ui.interact(cb.expand(3.0), ui.id().with(("check", i)), Sense::click_and_drag());
+                    let cr = ui.interact(cb.expand(if finger { 8.0 } else { 3.0 }), ui.id().with(("check", i)), Sense::click_and_drag());
                     let v = ui.visuals();
                     let a = v.selection.bg_fill;
                     if sel {
                         ui.painter().rect_filled(cb, 3.0, a);
-                        let s = Stroke::new(2.0, Color32::WHITE);
-                        let (p0, p1, p2) = (cb.left_center() + vec2(3.5, 0.5), cb.center_bottom() + vec2(-1.0, -4.0), cb.right_top() + vec2(-3.5, 4.0));
+                        let k = side / 15.0;
+                        let s = Stroke::new(2.0 * k.sqrt(), Color32::WHITE);
+                        let (p0, p1, p2) = (cb.left_center() + vec2(3.5, 0.5) * k, cb.center_bottom() + vec2(-1.0, -4.0) * k, cb.right_top() + vec2(-3.5, 4.0) * k);
                         ui.painter().line_segment([p0, p1], s);
                         ui.painter().line_segment([p1, p2], s);
                     } else {
                         if grid {
-                            ui.painter().rect_filled(cb, 3.0, v.extreme_bg_color.gamma_multiply(0.85));
+                            ui.painter().rect_filled(cb, 3.0, v.extreme_bg_color.gamma_multiply(0.6));
                         }
                         ui.painter().rect_stroke(cb, 3.0, Stroke::new(1.3, if cr.hovered() { a } else { v.weak_text_color() }), StrokeKind::Inside);
                     }
@@ -1844,14 +1841,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 }
                 if checked {
                 } else if let (true, Some(double)) = (r.clicked(), tap) {
-                    // A finger: a tap on the icon (or any, while choosing)
-                    // takes it in or out; else it opens it, or, opening on
-                    // two taps, points at it.
-                    let on_icon = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| icon_at.expand(6.0).contains(p));
+                    // A finger: it opens it, or, opening on two taps, points
+                    // at it (only its check box chooses).
                     events.push(if double && cfg.touch_double {
                         PaneEvent::DoubleTap(i)
-                    } else if on_icon || !pane.selected.is_empty() {
-                        PaneEvent::Toggle(i)
                     } else if cfg.touch_double {
                         PaneEvent::Click(i, false, false)
                     } else {

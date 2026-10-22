@@ -5532,8 +5532,8 @@ fn touch_screens() {
     assert!(h.state().overlay.is_none() && h.state().pane().loc == Location::Local(dir.clone()), "the pinch tapped something");
     shot(&mut h, "tc1-pinched");
 
-    // Opening on two taps: a tap on a name points at it, on an icon
-    // chooses it (then any tap does); two taps open.
+    // Opening on two taps: a tap points at an item, one on its check box
+    // (big, always shown with a finger) chooses it; two taps open.
     h.state_mut().cfg.touch_double = true;
     h.state_mut().cfg.list_icon = icon;
     settle(&mut h);
@@ -5543,17 +5543,17 @@ fn touch_screens() {
         idle(h, 60);
     };
     let name_at = |r: egui::Rect| egui::pos2(r.min.x + 110.0, r.center().y);
-    let icon_at = |r: egui::Rect| egui::pos2(r.min.x + 12.0, r.center().y);
+    let box_at = |r: egui::Rect| egui::pos2(r.min.x + 26.0, r.center().y);
     let p = name_at(row_of(&h, "Album"));
     tap(&mut h, p);
     assert_eq!(h.state().pane().loc, Location::Local(dir.clone()), "one tap opened it");
     assert_eq!(h.state().pane().current().unwrap().name, "Album");
     assert!(h.state().pane().selected.is_empty());
     idle(&mut h, 500);
-    let p = icon_at(row_of(&h, "Box"));
+    let p = box_at(row_of(&h, "Box"));
     tap(&mut h, p);
     idle(&mut h, 500);
-    let p = name_at(row_of(&h, "file00.txt"));
+    let p = box_at(row_of(&h, "file00.txt"));
     tap(&mut h, p);
     let sel = |h: &Harness<'static, App>| {
         let mut v: Vec<String> = h.state().pane().selected.iter().cloned().collect();
@@ -5563,7 +5563,13 @@ fn touch_screens() {
     assert_eq!(sel(&h), ["Box", "file00.txt"]);
     shot(&mut h, "tc2-chosen");
     idle(&mut h, 500);
-    let p = name_at(row_of(&h, "file00.txt"));
+    // A tap elsewhere only points.
+    let p = name_at(row_of(&h, "file01.txt"));
+    tap(&mut h, p);
+    assert_eq!(sel(&h), ["Box", "file00.txt"]);
+    assert_eq!(h.state().pane().current().unwrap().name, "file01.txt");
+    idle(&mut h, 500);
+    let p = box_at(row_of(&h, "file00.txt"));
     tap(&mut h, p);
     assert_eq!(sel(&h), ["Box"]);
     idle(&mut h, 500);
@@ -5576,7 +5582,19 @@ fn touch_screens() {
     let cfg = h.state().cfg.clone();
     h.state_mut().pane_mut().go_up(&cfg);
     settle(&mut h);
-    assert!(!h.state().pane().selected.contains("Album"), "the double tap left it chosen");
+    assert!(!h.state().pane().selected.contains("Album"), "the double tap chose it");
+    // The grid with a finger: big boxes, the row's spare room between
+    // the columns.
+    h.state_mut().cfg.view = crate::config::ViewMode::Grid;
+    settle(&mut h);
+    shot(&mut h, "tc2-grid");
+    let p = h.state().pane();
+    let (a, b) = (p.drawn[0].1, p.drawn[1].1);
+    let cols = p.cols as f32;
+    let spare = (a.min.x + cols * (b.min.x - a.min.x)) - (a.min.x + (cols - 1.0) * (b.min.x - a.min.x) + a.width());
+    assert!(spare < 12.0, "room left over on the right: {spare}");
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    settle(&mut h);
 
     // The sidebar's edge pulled left: it folds; tapped: it unfolds.
     assert!(!h.state().cfg.sidebar_collapsed);
