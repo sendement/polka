@@ -191,6 +191,12 @@ the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu c
 Gamepad input is ignored while Polka is not the focused window. Touch screens, touchpads and pens
 aren't taken for pads (on the Steam Deck the screen's touches stay touches).
 
+**Touch screen.** A tap opens (while something is chosen it takes the item in or out); a
+finger moved up or down scrolls, gliding on after a flick; held still half a second (a ring fills
+under the finger) and let go it's a right click — the menu — and moved on it picks up what's under
+it to drag; a quick swipe sideways goes back or forward, from the left edge it shows the sidebar;
+two fingers apart or together make the icons bigger or smaller (in a picture they zoom it).
+
 **Mouse.** The list's headers (Name, Type, Size, Modified) sort by their column, a second click the
 other way; check boxes (on the selected, under the pointer, and all while anything is selected)
 take items in and out of the selection. Click selects (Ctrl toggles, Shift selects a range), double click opens, middle

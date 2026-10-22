@@ -45,7 +45,12 @@ const SIDE_W: f32 = 210.0;
 
 impl eframe::App for App {
     /// Pointer events of drags from and to other programs.
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        // A finger on the screen: gestures, not a mouse.
+        raw.events = self.touch_feed(std::mem::take(&mut raw.events));
+        if self.touch.busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
         raw.events.append(&mut self.dnd_inject);
         // X11 has the files only at the drop (and no position): the panel.
         if !raw.dropped_files.is_empty() && self.overlay.is_none() {
@@ -97,6 +102,7 @@ impl eframe::App for App {
             self.draw_jobs(&ctx);
         }
         self.draw_overlay(&ctx);
+        self.draw_touch_hold(&ctx);
 
         // Closing the window with unsaved text asks first.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit {
@@ -224,6 +230,26 @@ impl App {
         if let Some(a) = act {
             self.terminal_act(a);
         }
+    }
+
+    /// A finger held still: a ring fills up under it till the long press
+    /// (the menu, or picking things up).
+    fn draw_touch_hold(&self, ctx: &egui::Context) {
+        let Some((pos, t)) = self.touch.holding() else { return };
+        if t < 0.2 {
+            return;
+        }
+        let p = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, egui::Id::new("touch-hold")));
+        let v = ctx.global_style().visuals.clone();
+        let r = 30.0;
+        p.circle_stroke(pos, r, Stroke::new(3.0, v.widgets.noninteractive.bg_stroke.color.gamma_multiply(0.8)));
+        let k = (t - 0.2) / 0.8;
+        let n = (48.0 * k).ceil() as usize + 1;
+        let pts: Vec<Pos2> = (0..=n).map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * k * i as f32 / n as f32;
+            pos + vec2(a.cos(), a.sin()) * r
+        }).collect();
+        p.add(egui::Shape::line(pts, Stroke::new(4.0, v.selection.bg_fill)));
     }
 
     fn osk_keyboard(&mut self, key: Key) {
@@ -1069,6 +1095,7 @@ impl App {
                 return;
             }
             let dragging = self.drag.is_some();
+            let tapped = self.touch.tapped;
             let App { tabs, icons, cfg, drag, spring, .. } = self;
             let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
             // The entry a drag rests on in this side, and how long it has.
@@ -1096,13 +1123,13 @@ impl App {
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
                     let shown = pane.loc.clone();
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown)) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown), tapped) {
                         events.push((idx, e));
                     }
                 }
             } else {
                 let shown = tabs[tab].pane.loc.clone();
-                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown)) {
+                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tapped) {
                     events.push((0, e));
                 }
             }
@@ -1406,7 +1433,7 @@ enum PaneEvent {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>) -> Vec<PaneEvent> {
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tapped: bool) -> Vec<PaneEvent> {
     let mut events = Vec::new();
     // Dragged items over this pane: dropped on release.
     let whole = ui.max_rect();
@@ -1729,6 +1756,9 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 if checked {
                 } else if r.double_clicked() {
                     events.push(PaneEvent::Activate(i));
+                } else if r.clicked() && tapped {
+                    // A finger's tap opens (or, choosing, takes it in or out).
+                    events.push(if pane.selected.is_empty() { PaneEvent::Activate(i) } else { PaneEvent::Toggle(i) });
                 } else if r.clicked() {
                     let m = ui.input(|i| i.modifiers);
                     events.push(PaneEvent::Click(i, m.command, m.shift));

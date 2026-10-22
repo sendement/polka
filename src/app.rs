@@ -1363,6 +1363,10 @@ pub struct App {
     pub net_pw: HashMap<String, String>,
     /// Connections being made.
     pub net_busy: HashSet<String>,
+    /// The touch screen's gestures (a tap, scrolling, long press, swipes).
+    pub touch: crate::touch::Touch,
+    /// Two fingers apart / together since the icons last changed size.
+    pub pinch: f32,
     /// The help's scrolling asked for by the pad (by so much).
     pub help_scroll: Option<f32>,
     /// Esc went down in the terminal and is still held: its repeats are no
@@ -1490,6 +1494,8 @@ impl App {
             phones: Vec::new(),
             closed_tabs: Vec::new(),
             help_scroll: None,
+            touch: Default::default(),
+            pinch: 1.0,
             esc_down: false,
             sys_clip: None,
             dark_applied: None,

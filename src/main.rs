@@ -34,6 +34,7 @@ mod steam;
 mod steam_add;
 mod terminal;
 mod thumbs;
+mod touch;
 mod trashbin;
 mod usage;
 mod vfs;

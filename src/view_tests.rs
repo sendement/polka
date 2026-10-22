@@ -5377,3 +5377,156 @@ fn empty_pane_click_screens() {
     h.state_mut().overlay = None;
     h.state_mut().run(crate::app::Cmd::ToggleDual);
 }
+
+/// The touch screen: a tap opens a folder, a finger moved up scrolls, a
+/// long press gives the menu, held and moved it carries a file onto a
+/// folder, a swipe goes back, two fingers apart make the icons bigger.
+#[test]
+#[ignore]
+fn touch_screens() {
+    use crate::app::Overlay;
+    use crate::touch::finger;
+    use crate::vfs::Location;
+    use egui::{Event, TouchPhase};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("touch");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Album")).unwrap();
+    std::fs::create_dir_all(dir.join("Box")).unwrap();
+    for i in 0..60 {
+        std::fs::write(dir.join(format!("file{i:02}.txt")), "x").unwrap();
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    // What the window system gives for a finger, through the gestures.
+    let feed = |h: &mut Harness<'static, App>, evs: Vec<Event>| {
+        // egui-winit makes a mouse of the first finger too.
+        let mut all = Vec::new();
+        for e in evs {
+            if let Event::Touch { phase, pos, .. } = &e {
+                let (phase, pos) = (*phase, *pos);
+                all.push(e);
+                match phase {
+                    TouchPhase::Start => {
+                        all.push(Event::PointerMoved(pos));
+                        all.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    }
+                    TouchPhase::Move => all.push(Event::PointerMoved(pos)),
+                    _ => {
+                        all.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+                        all.push(Event::PointerGone);
+                    }
+                }
+            } else {
+                all.push(e);
+            }
+        }
+        let out = h.state_mut().touch_feed(all);
+        if std::env::var_os("POLKA_TOUCH_DEBUG").is_some() {
+            eprintln!("{out:?}");
+        }
+        for e in out {
+            h.event(e);
+        }
+        h.step();
+    };
+    let idle = |h: &mut Harness<'static, App>, ms: u64| {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            let out = h.state_mut().touch_feed(Vec::new());
+            for e in out {
+                h.event(e);
+            }
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    };
+    let row_of = |h: &Harness<'static, App>, name: &str| {
+        let p = h.state().pane();
+        let i = p.entries.iter().position(|e| e.name == name).unwrap();
+        p.drawn.iter().find(|d| d.0 == i).unwrap().1
+    };
+    // A finger moved up: the list scrolls (and glides on).
+    let before = h.state().pane().scroll_y;
+    let r = row_of(&h, "file05.txt");
+    let (x, y) = (r.center().x, r.center().y + 200.0);
+    feed(&mut h, vec![finger(1, TouchPhase::Start, x, y)]);
+    for k in 1..=6 {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        feed(&mut h, vec![finger(1, TouchPhase::Move, x, y - k as f32 * 40.0)]);
+    }
+    feed(&mut h, vec![finger(1, TouchPhase::End, x, y - 240.0)]);
+    // (Gliding on till it stops.)
+    idle(&mut h, 1800);
+    let after = h.state().pane().scroll_y;
+    assert!(after > before + 200.0, "didn't scroll: {before} → {after}");
+    assert!(h.state().pane().selected.is_empty() && h.state().drag.is_none(), "the drag selected or picked up");
+    // A long press on a file in view: its menu.
+    let (held, r) = {
+        let p = h.state().pane();
+        let d = p.drawn[p.drawn.len() / 2];
+        (p.entries[d.0].name.clone(), d.1)
+    };
+    feed(&mut h, vec![finger(1, TouchPhase::Start, r.center().x, r.center().y)]);
+    idle(&mut h, 650);
+    shot(&mut h, "tc0-hold");
+    feed(&mut h, vec![finger(1, TouchPhase::End, r.center().x, r.center().y)]);
+    idle(&mut h, 100);
+    assert!(matches!(h.state().overlay, Some(Overlay::Menu(_))), "no menu on a long press");
+    assert_eq!(h.state().pane().current().unwrap().name, held);
+    h.state_mut().overlay = None;
+    // Back to the top: a tap on Album opens it.
+    h.state_mut().pane_mut().scroll_y = 0.0;
+    h.state_mut().pane_mut().cursor = 0;
+    h.state_mut().pane_mut().scroll_to_cursor = true;
+    settle(&mut h);
+    // Held and moved: file00.txt carried onto Box.
+    let from = row_of(&h, "file00.txt");
+    let onto = row_of(&h, "Box");
+    let start = egui::pos2(from.min.x + 60.0, from.center().y);
+    feed(&mut h, vec![finger(1, TouchPhase::Start, start.x, start.y)]);
+    idle(&mut h, 650);
+    for k in 1..=5 {
+        let p = start + (onto.center() - start) * (k as f32 / 5.0);
+        feed(&mut h, vec![finger(1, TouchPhase::Move, p.x, p.y)]);
+    }
+    assert!(h.state().drag.is_some(), "nothing picked up");
+    feed(&mut h, vec![finger(1, TouchPhase::End, onto.center().x, onto.center().y)]);
+    idle(&mut h, 100);
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    assert!(labels.iter().any(|l| l == crate::i18n::tr("Move here")), "no drop menu: {labels:?}");
+    h.state_mut().overlay = None;
+    h.state_mut().drag = None;
+    settle(&mut h);
+    let r = row_of(&h, "Album");
+    feed(&mut h, vec![finger(1, TouchPhase::Start, r.center().x, r.center().y)]);
+    feed(&mut h, vec![finger(1, TouchPhase::End, r.center().x + 2.0, r.center().y)]);
+    idle(&mut h, 100);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.join("Album")), "a tap didn't open it");
+    // A swipe to the right: back.
+    let mid = egui::pos2(700.0, 400.0);
+    feed(&mut h, vec![finger(1, TouchPhase::Start, mid.x, mid.y)]);
+    feed(&mut h, vec![finger(1, TouchPhase::Move, mid.x + 80.0, mid.y + 4.0)]);
+    feed(&mut h, vec![finger(1, TouchPhase::End, mid.x + 200.0, mid.y + 6.0)]);
+    settle(&mut h);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.clone()), "a swipe didn't go back");
+    // Two fingers apart: bigger icons.
+    let icon = h.state().cfg.list_icon;
+    feed(&mut h, vec![finger(1, TouchPhase::Start, 600.0, 400.0), finger(2, TouchPhase::Start, 700.0, 400.0)]);
+    for k in 1..=4 {
+        feed(&mut h, vec![finger(2, TouchPhase::Move, 700.0 + k as f32 * 30.0, 400.0)]);
+    }
+    feed(&mut h, vec![finger(2, TouchPhase::End, 820.0, 400.0), finger(1, TouchPhase::End, 600.0, 400.0)]);
+    idle(&mut h, 100);
+    assert!(h.state().cfg.list_icon > icon, "pinching didn't grow the icons");
+    assert!(h.state().overlay.is_none() && h.state().pane().loc == Location::Local(dir.clone()), "the pinch tapped something");
+    shot(&mut h, "tc1-pinched");
+}
