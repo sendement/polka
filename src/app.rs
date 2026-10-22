@@ -1112,7 +1112,10 @@ pub mod row {
     pub const REMEMBER_RIGHT: usize = 15;
     pub const TOUCH_OPEN: usize = 16;
     pub const TITLEBAR: usize = 17;
-    pub const CLOSE: usize = 18;
+    pub const WIN_STYLE: usize = 18;
+    pub const WIN_SIDE: usize = 19;
+    pub const WIN_ORDER: usize = 20;
+    pub const CLOSE: usize = 21;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -3445,7 +3448,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::TOUCH_OPEN | row::TITLEBAR => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER => self.settings_step(row, 0.0),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -3643,6 +3646,17 @@ impl App {
                 self.cfg.system_titlebar = !self.cfg.system_titlebar;
                 self.cfg.save();
                 self.ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.cfg.system_titlebar));
+            }
+            // (✕ steps on.)
+            row::WIN_STYLE => {
+                use crate::titlebar::STYLES;
+                let at = STYLES.iter().position(|s| *s == self.cfg.win_style).unwrap_or(0) as isize;
+                self.cfg.win_style = STYLES[(at + if d == 0.0 { 1 } else { d as isize }).rem_euclid(STYLES.len() as isize) as usize];
+            }
+            row::WIN_SIDE => self.cfg.win_left = !self.cfg.win_left,
+            row::WIN_ORDER => {
+                let n = crate::titlebar::ORDERS.len() as isize;
+                self.cfg.win_order = (self.cfg.win_order as isize + if d == 0.0 { 1 } else { d as isize }).rem_euclid(n) as u8;
             }
             row::LAYOUTS => {
                 if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {

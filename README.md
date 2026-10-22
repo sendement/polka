@@ -220,8 +220,10 @@ changes made by other programs (looked at every couple of seconds): what's added
 up, the cursor and selection stay put.
 
 **Window.** Settings → System title bar off: Polka's top bar is the title bar. It gets the window's
-minimize / maximize / close buttons, looking like the desktop's own (Breeze icons on KDE, Adwaita's
-round buttons on GNOME, else the icon theme's); drag the address bar (or the room around it) to move
+minimize / maximize / close buttons. Settings → Window buttons picks their look, each previewed: as
+the desktop's own (Breeze on KDE, Adwaita's round buttons on GNOME, else the icon theme's), Breeze,
+Adwaita, Ubuntu (an orange close), macOS traffic lights, Windows 11, the icon theme's or simple lines;
+also which side they sit on and their order; drag the address bar (or the room around it) to move
 the window, double click it to maximize; the window's edges resize it.
 
 **Sidebar.** Its edge pulled to the left folds it to icons, pulled back out unfolds it (a click

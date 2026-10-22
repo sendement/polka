@@ -93,6 +93,11 @@ pub struct Config {
     /// The desktop's title bar on the window; else Polka's own top bar is
     /// it (dragged by the address, with its own buttons).
     pub system_titlebar: bool,
+    /// Polka's own title bar: its buttons' look, order (one of
+    /// titlebar::ORDERS) and side.
+    pub win_style: crate::titlebar::Style,
+    pub win_order: u8,
+    pub win_left: bool,
 }
 
 /// The terminal page.
@@ -232,6 +237,9 @@ impl Default for Config {
             right_dir: None,
             touch_double: true,
             system_titlebar: true,
+            win_style: crate::titlebar::Style::Auto,
+            win_order: 0,
+            win_left: false,
         }
     }
 }

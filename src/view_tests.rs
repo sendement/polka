@@ -5618,4 +5618,29 @@ fn touch_screens() {
     h.state_mut().cfg.system_titlebar = false;
     settle(&mut h);
     shot(&mut h, "tc4-titlebar");
+    // Their looks in the settings, previewed; ↓ to the order, → steps it.
+    h.state_mut().run(crate::app::Cmd::Settings);
+    settle(&mut h);
+    while matches!(&h.state().overlay, Some(Overlay::Settings(st)) if st.row != crate::app::row::WIN_STYLE) {
+        h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Down));
+        settle(&mut h);
+    }
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Right));
+    settle(&mut h);
+    assert_eq!(h.state().cfg.win_style, crate::titlebar::Style::Breeze);
+    let pick = crate::titlebar::STYLES.iter().position(|s| *s == crate::titlebar::Style::Macos).unwrap();
+    for _ in 1..pick {
+        h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Right));
+    }
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Down));
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Accept));
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Down));
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Right));
+    settle(&mut h);
+    shot(&mut h, "tc5-win-settings");
+    let c = &h.state().cfg;
+    assert!(c.win_style == crate::titlebar::Style::Macos && c.win_left && c.win_order == 1, "{:?} {} {}", c.win_style, c.win_left, c.win_order);
+    h.state_mut().overlay = None;
+    settle(&mut h);
+    shot(&mut h, "tc6-mac-left");
 }

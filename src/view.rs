@@ -399,7 +399,8 @@ impl App {
         let dual = cfg.dual;
         let active = self.side();
         let own = !cfg.system_titlebar;
-        let desk = crate::titlebar::desktop();
+        let look = crate::titlebar::Look::of(&cfg);
+        let win_w = if own { crate::titlebar::buttons_width(look.style) } else { 0.0 };
         let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
         egui::Panel::top("top").frame(frame).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
@@ -424,7 +425,8 @@ impl App {
             } else {
                 &["sidebar-collapse-left", "view-left-close", "sidebar-show", "view-sidebar"]
             };
-            let mut x = row.min.x;
+            // The window's buttons first when they're on the left.
+            let mut x = row.min.x + if look.left { win_w } else { 0.0 };
             let left: [(&[&str], &str, &str, TopAction); 4] = [
                 (side_names, "☰", tr("Sidebar"), TopAction::Sidebar),
                 (&["go-previous", "arrow-left"], "◀", tr("Back"), TopAction::Back),
@@ -442,11 +444,12 @@ impl App {
             // Right, pinned: the window's buttons (with no title bar),
             // search, dual pane, menu.
             if own {
-                if let Some(b) = crate::titlebar::buttons(ui, &mut self.icons, desk, row.max.x, row.center().y) {
+                let x0 = if look.left { row.min.x } else { row.max.x - win_w + 10.0 };
+                if let Some(b) = crate::titlebar::buttons(ui, &mut self.icons, look, x0, row.center().y) {
                     act = Some(TopAction::Window(b));
                 }
             }
-            let mut rx = row.max.x - TOOL_BTN - if own { crate::titlebar::buttons_width(desk) } else { 0.0 };
+            let mut rx = row.max.x - TOOL_BTN - if look.left { 0.0 } else { win_w };
             let right: [(&[&str], &str, &str, bool, TopAction); 3] = [
                 (&["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false, TopAction::Menu),
                 (&["view-split-left-right", "view-dual"], "◫", tr("Dual pane"), dual, TopAction::Dual),
@@ -2972,6 +2975,8 @@ fn spring_bar(ui: &Ui, rect: Rect, t: f32) {
 
 pub enum SettingsEvent {
     LayoutChip(usize),
+    /// A window buttons' look picked.
+    WinStyle(usize),
     Row(usize),
     Step(usize, f32),
     Pick(usize),
@@ -3016,6 +3021,11 @@ impl App {
             SettingsEvent::Toggle(r) => {
                 st.row = r;
                 self.settings_step(r, 0.0);
+            }
+            SettingsEvent::WinStyle(i) => {
+                st.row = row::WIN_STYLE;
+                self.cfg.win_style = crate::titlebar::STYLES[i];
+                self.cfg.save();
             }
             SettingsEvent::EditorRow(r) => {
                 if let Some(ed) = st.editor.as_mut() {
@@ -3374,6 +3384,54 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::TITLEBAR));
+    }
+
+    // Its buttons (shown without the system's title bar): the look, each
+    // tile a preview…
+    use crate::titlebar::{ORDERS, STYLES, preview};
+    let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
+    const PER: usize = 4;
+    let lines = STYLES.len().div_ceil(PER);
+    let (rect, r) = settings_row(ui, 44.0 + 66.0 * lines as f32, st.row == row::WIN_STYLE, "win-style");
+    if r.clicked() {
+        ev = Some(SettingsEvent::Row(row::WIN_STYLE));
+    }
+    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Window buttons"), label_font.clone(), v.text_color());
+    let tile_w = (SETTINGS_W - 28.0 - (PER as f32 - 1.0) * 8.0) / PER as f32;
+    for (i, style) in STYLES.iter().enumerate() {
+        let (line, col) = (i / PER, i % PER);
+        let tile = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (tile_w + 8.0), rect.min.y + 38.0 + line as f32 * 66.0), vec2(tile_w, 60.0));
+        let resp = ui.interact(tile, ui.id().with(("win-style", i)), Sense::click());
+        let on = cfg.win_style == *style;
+        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+        let stroke = if on && st.row == row::WIN_STYLE { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+        ui.painter().rect(tile, 8.0, fill, stroke, StrokeKind::Inside);
+        preview(ui, icons, *style, &order, Rect::from_min_size(tile.min, vec2(tile.width(), 36.0)), 0.75);
+        ui.painter().text(pos2(tile.center().x, tile.max.y - 13.0), Align2::CENTER_CENTER, style.name(), FontId::proportional(13.0), v.text_color());
+        if resp.clicked() {
+            ev = Some(SettingsEvent::WinStyle(i));
+        }
+    }
+
+    // …their side…
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::WIN_SIDE, "win-side");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Window buttons side"), label_font.clone(), v.text_color());
+    let shown = if cfg.win_left { tr("Left") } else { tr("Right") };
+    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::WIN_SIDE));
+    }
+
+    // …and order.
+    let (rect, r) = settings_row(ui, 48.0, st.row == row::WIN_ORDER, "win-order");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Button order"), label_font.clone(), v.text_color());
+    let f = FontId::proportional(15.0);
+    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "▶", f.clone(), v.strong_text_color());
+    let shown = Rect::from_min_max(pos2(rect.max.x - 210.0, rect.min.y), pos2(rect.max.x - 36.0, rect.max.y));
+    preview(ui, icons, cfg.win_style, &order, shown, 1.0);
+    ui.painter().text(pos2(shown.min.x - 4.0, rect.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::WIN_ORDER));
     }
 
     // Close.
