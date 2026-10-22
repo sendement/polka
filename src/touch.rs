@@ -2,13 +2,15 @@
 //! at once, so a drag would select or drag files); here that's undone and
 //! the finger's moves read as gestures instead:
 //!
-//! - a tap: a click (the file list opens on it);
+//! - a tap: a click (the file list opens on it, or on two taps, as set);
+//!   two taps quickly at one place: a double tap;
 //! - a finger moved up or down: scrolling, gliding on after a flick;
 //! - held still half a second: let go, it's a right click (the menu);
 //!   moved on, it picks up what's under it (a mouse drag);
 //! - a quick swipe sideways: back / forward (from the left edge: the
 //!   sidebar);
-//! - two fingers apart or together: bigger or smaller icons.
+//! - two fingers apart or together: bigger or smaller icons;
+//! - put on a grip (the sidebar's edge): pressed at once, a mouse drag.
 
 use std::time::{Duration, Instant};
 
@@ -21,6 +23,9 @@ const SLOP: f32 = 12.0;
 /// A swipe: this far sideways, this quickly.
 const SWIPE: f32 = 100.0;
 const SWIPE_TIME: Duration = Duration::from_millis(600);
+/// A second tap this soon, this near: a double tap.
+const DOUBLE_TIME: Duration = Duration::from_millis(450);
+const DOUBLE_NEAR: f32 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -64,10 +69,17 @@ pub struct Touch {
     fingers: Vec<u64>,
     /// Scrolling on after the finger left: velocity, last step.
     glide: Option<(Vec2, Instant, Pos2)>,
-    /// A click's release, sent a frame after its press.
-    release: Option<(Pos2, PointerButton)>,
+    /// A click's release, sent a frame after its press (and whether it
+    /// was a double tap's second).
+    release: Option<(Pos2, PointerButton, bool)>,
     /// The click this frame came from a tap (the file list opens on it).
     pub tapped: bool,
+    /// …the second of a double tap.
+    pub double: bool,
+    /// The last tap (for a double tap).
+    last_tap: Option<(Instant, Pos2)>,
+    /// Grips: a finger put on one drags it right away (set every frame).
+    pub grips: Vec<egui::Rect>,
     /// Two fingers: their distance when last measured.
     pinch: Option<f32>,
     finger_pos: Vec<(u64, Pos2)>,
@@ -103,13 +115,15 @@ impl Touch {
         let mut out = Vec::with_capacity(events.len());
         let mut gestures = Vec::new();
         self.tapped = false;
+        self.double = false;
         // A tap's (or long press's) release, a frame after its press.
         // (The pointer stays over the place till then: a click needs it.)
-        if let Some((pos, b)) = self.release.take() {
+        if let Some((pos, b, double)) = self.release.take() {
             out.push(Event::PointerMoved(pos));
             out.push(button(pos, b, false));
             out.push(Event::PointerGone);
             self.tapped = b == PointerButton::Primary;
+            self.double = double;
         }
         // Held long enough?
         if let Some(p) = self.press.as_mut().filter(|p| p.mode == Mode::Pending && now.duration_since(p.at) >= HOLD) {
@@ -174,7 +188,12 @@ impl Touch {
                 }
                 self.glide = None;
                 if self.fingers.len() == 1 {
-                    self.press = Some(Press { id, start: pos, at: now, last: pos, last_t: now, vel: Vec2::ZERO, mode: Mode::Pending });
+                    let grip = self.grips.iter().any(|g| g.contains(pos));
+                    self.press = Some(Press { id, start: pos, at: now, last: pos, last_t: now, vel: Vec2::ZERO, mode: if grip { Mode::Drag } else { Mode::Pending } });
+                    if grip {
+                        out.push(Event::PointerMoved(pos));
+                        out.push(button(pos, PointerButton::Primary, true));
+                    }
                 } else if let Some(p) = self.press.as_mut() {
                     // A second finger: a pinch; a drag under way lets go.
                     if p.mode == Mode::Drag {
@@ -221,13 +240,17 @@ impl Touch {
                         // A tap: a click (its release next frame).
                         out.push(Event::PointerMoved(pos));
                         out.push(button(pos, PointerButton::Primary, true));
-                        self.release = Some((pos, PointerButton::Primary));
+                        let double = self.last_tap.take().is_some_and(|(t, at)| now.duration_since(t) < DOUBLE_TIME && at.distance(pos) < DOUBLE_NEAR);
+                        if !double {
+                            self.last_tap = Some((now, pos));
+                        }
+                        self.release = Some((pos, PointerButton::Primary, double));
                     }
                     Mode::Held if !cancel => {
                         // A long press: a right click.
                         out.push(Event::PointerMoved(pos));
                         out.push(button(pos, PointerButton::Secondary, true));
-                        self.release = Some((pos, PointerButton::Secondary));
+                        self.release = Some((pos, PointerButton::Secondary, false));
                     }
                     Mode::Scroll if p.vel.length() > 200.0 && now.duration_since(p.last_t) < Duration::from_millis(80) => {
                         self.glide = Some((p.vel, now, pos));
@@ -279,7 +302,18 @@ mod tests {
         let (out, _) = t.filter(vec![finger(1, TouchPhase::End, 101.0, 100.0), button(pos2(101.0, 100.0), PointerButton::Primary, false)], ms(120));
         assert!(is_click(&out, PointerButton::Primary, true) && !is_click(&out, PointerButton::Primary, false));
         let (out, _) = t.filter(vec![], ms(140));
-        assert!(is_click(&out, PointerButton::Primary, false) && t.tapped);
+        assert!(is_click(&out, PointerButton::Primary, false) && t.tapped && !t.double);
+        // Again, soon: a double tap.
+        t.filter(vec![finger(2, TouchPhase::Start, 105.0, 98.0)], ms(250));
+        t.filter(vec![finger(2, TouchPhase::End, 105.0, 98.0)], ms(320));
+        t.filter(vec![], ms(340));
+        assert!(t.tapped && t.double);
+        // A grip: pressed as the finger lands.
+        let mut t = Touch { grips: vec![egui::Rect::from_min_size(pos2(0.0, 0.0), egui::vec2(10.0, 100.0))], ..Default::default() };
+        let (out, _) = t.filter(vec![finger(1, TouchPhase::Start, 5.0, 50.0)], ms(0));
+        assert!(is_click(&out, PointerButton::Primary, true));
+        let (out, _) = t.filter(vec![finger(1, TouchPhase::End, 80.0, 50.0)], ms(100));
+        assert!(is_click(&out, PointerButton::Primary, false));
         // A drag up: wheel events, no press.
         let mut t = Touch::default();
         t.filter(vec![finger(1, TouchPhase::Start, 100.0, 300.0)], ms(0));

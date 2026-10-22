@@ -1110,7 +1110,9 @@ pub mod row {
     pub const INSTALL: usize = 13;
     pub const PASSWORDS: usize = 14;
     pub const REMEMBER_RIGHT: usize = 15;
-    pub const CLOSE: usize = 16;
+    pub const TOUCH_OPEN: usize = 16;
+    pub const TITLEBAR: usize = 17;
+    pub const CLOSE: usize = 18;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1367,6 +1369,9 @@ pub struct App {
     pub touch: crate::touch::Touch,
     /// Two fingers apart / together since the icons last changed size.
     pub pinch: f32,
+    /// What a finger's tap last took in or out (side, entry, when): a
+    /// double tap puts it back.
+    pub tap_toggled: Option<(usize, usize, std::time::Instant)>,
     /// The help's scrolling asked for by the pad (by so much).
     pub help_scroll: Option<f32>,
     /// Esc went down in the terminal and is still held: its repeats are no
@@ -1496,6 +1501,7 @@ impl App {
             help_scroll: None,
             touch: Default::default(),
             pinch: 1.0,
+            tap_toggled: None,
             esc_down: false,
             sys_clip: None,
             dark_applied: None,
@@ -3443,7 +3449,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::TOUCH_OPEN | row::TITLEBAR => self.settings_step(row, 0.0),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -3632,6 +3638,15 @@ impl App {
             row::REMEMBER_RIGHT => {
                 self.cfg.remember_right = !self.cfg.remember_right;
                 self.cfg.save();
+            }
+            row::TOUCH_OPEN => {
+                self.cfg.touch_double = !self.cfg.touch_double;
+                self.cfg.save();
+            }
+            row::TITLEBAR => {
+                self.cfg.system_titlebar = !self.cfg.system_titlebar;
+                self.cfg.save();
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.cfg.system_titlebar));
             }
             row::LAYOUTS => {
                 if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {

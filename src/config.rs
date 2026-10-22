@@ -87,6 +87,12 @@ pub struct Config {
     pub connections: Vec<crate::net::Conn>,
     /// Where the right pane was last.
     pub right_dir: Option<std::path::PathBuf>,
+    /// A finger opens things on a double tap (else on one; then a tap on
+    /// the icon chooses).
+    pub touch_double: bool,
+    /// The desktop's title bar on the window; else Polka's own top bar is
+    /// it (dragged by the address, with its own buttons).
+    pub system_titlebar: bool,
 }
 
 /// The terminal page.
@@ -224,6 +230,8 @@ impl Default for Config {
             remember_right: true,
             connections: Vec::new(),
             right_dir: None,
+            touch_double: true,
+            system_titlebar: true,
         }
     }
 }

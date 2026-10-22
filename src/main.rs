@@ -34,6 +34,7 @@ mod steam;
 mod steam_add;
 mod terminal;
 mod thumbs;
+mod titlebar;
 mod touch;
 mod trashbin;
 mod usage;
@@ -86,7 +87,9 @@ fn main() -> eframe::Result {
             // The window matches its .desktop file (and icon) by this.
             .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "polka".into()))
             .with_inner_size([1100.0, 700.0])
-            .with_min_inner_size([520.0, 360.0]),
+            .with_min_inner_size([520.0, 360.0])
+            // Without the desktop's title bar Polka's top bar serves.
+            .with_decorations(config::Config::load().system_titlebar),
         // No waiting for the display in eglSwapBuffers: on Wayland a window
         // the compositor doesn't show (behind a full-screen game) gets no
         // frame callbacks, so the wait never ended and Polka stopped

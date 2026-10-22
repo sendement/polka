@@ -70,6 +70,7 @@ impl eframe::App for App {
         }
         self.last_frame = Some(std::time::Instant::now());
         let ctx = ui.ctx().clone();
+        self.touch.grips.clear();
         let inputs: Vec<Input> = self.pad_rx.try_iter().collect();
         // The pad is read globally; never act on it while another window
         // (e.g. a game) has focus.
@@ -103,6 +104,9 @@ impl eframe::App for App {
         }
         self.draw_overlay(&ctx);
         self.draw_touch_hold(&ctx);
+        if !self.cfg.system_titlebar && !full {
+            crate::titlebar::resize_edges(&ctx);
+        }
 
         // Closing the window with unsaved text asks first.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit {
@@ -394,11 +398,23 @@ impl App {
         let mut resting: Option<(usize, crate::vfs::Location)> = None;
         let dual = cfg.dual;
         let active = self.side();
+        let own = !cfg.system_titlebar;
+        let desk = crate::titlebar::desktop();
         let frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
         egui::Panel::top("top").frame(frame).show(ui, |ui| {
             let full = ui.available_rect_before_wrap();
             let row = Rect::from_min_size(full.min, vec2(full.width(), TOOL_BTN));
             ui.allocate_rect(row, Sense::hover());
+            // Polka's own title bar: the bar between the buttons moves the
+            // window, a double click fills the screen with it.
+            if own {
+                let bar = ui.interact(row.expand(6.0), ui.id().with("titlebar"), Sense::click_and_drag());
+                if bar.drag_started_by(egui::PointerButton::Primary) {
+                    act = Some(TopAction::MoveWindow);
+                } else if bar.double_clicked() {
+                    act = Some(TopAction::Maximize);
+                }
+            }
             let btn = |x: f32| Rect::from_min_size(pos2(x, row.min.y), Vec2::splat(TOOL_BTN));
             let step = TOOL_BTN + 4.0;
 
@@ -423,8 +439,14 @@ impl App {
             }
             let addr_start = x + 6.0;
 
-            // Right, pinned: search, dual pane, menu.
-            let mut rx = row.max.x - TOOL_BTN;
+            // Right, pinned: the window's buttons (with no title bar),
+            // search, dual pane, menu.
+            if own {
+                if let Some(b) = crate::titlebar::buttons(ui, &mut self.icons, desk, row.max.x, row.center().y) {
+                    act = Some(TopAction::Window(b));
+                }
+            }
+            let mut rx = row.max.x - TOOL_BTN - if own { crate::titlebar::buttons_width(desk) } else { 0.0 };
             let right: [(&[&str], &str, &str, bool, TopAction); 3] = [
                 (&["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false, TopAction::Menu),
                 (&["view-split-left-right", "view-dual"], "◫", tr("Dual pane"), dual, TopAction::Dual),
@@ -485,7 +507,7 @@ impl App {
                 let pane = self.pane_at(idx);
                 let highlight = dual && idx == active && viewing.is_none();
                 let file = viewing.as_ref().map(|(_, n)| n.as_str());
-                let (a, rest) = address_field(ui, rect, pane, highlight, idx, file, self.drag.is_some(), &self.spring, &mut drawn);
+                let (a, rest) = address_field(ui, rect, pane, highlight, idx, file, self.drag.is_some(), &self.spring, &mut drawn, own);
                 if let Some(a) = a {
                     act = Some(a);
                 }
@@ -501,6 +523,9 @@ impl App {
         }
         let Some(act) = act else { return };
         match act {
+            TopAction::MoveWindow => ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag),
+            TopAction::Maximize => crate::titlebar::toggle_maximized(ui.ctx()),
+            TopAction::Window(b) => crate::titlebar::press(ui.ctx(), b),
             TopAction::Sidebar => self.run(Cmd::ToggleSidebar),
             TopAction::Back | TopAction::Forward | TopAction::Up => {
                 self.focus = Focus::Panes;
@@ -930,7 +955,17 @@ impl App {
     // ------------------------------------------------------------ sidebar
 
     fn draw_sidebar(&mut self, ui: &mut Ui) {
-        let collapsed = self.cfg.sidebar_collapsed;
+        let side_icon = self.cfg.side_icon;
+        // Its edge pulled: as wide as it's pulled, folding or unfolding
+        // past the middle; let go, it settles.
+        let (thin, wide) = (side_icon + 32.0, SIDE_W + (side_icon - 20.0).max(0.0) * 3.0);
+        let split = egui::Id::new("side-split");
+        let pulled: Option<f32> = ui.ctx().data(|d| d.get_temp(split));
+        let collapsed = pulled.map_or(self.cfg.sidebar_collapsed, |w| w < (thin + wide) / 2.0);
+        let width = match pulled {
+            Some(w) => ui.ctx().animate_value_with_time(split, w.clamp(thin, wide), 0.0),
+            None => ui.ctx().animate_value_with_time(split, if collapsed { thin } else { wide }, 0.15),
+        };
         let focused = self.focus == Focus::Sidebar && self.overlay.is_none();
         let cur_loc = self.pane().loc.clone();
         let usage_here = self.usage_shown();
@@ -943,11 +978,10 @@ impl App {
         let mut actions = None;
         let mut resting = None;
         let mut rows = Vec::new();
-        let side_icon = self.cfg.side_icon;
         let side_font = side_font(side_icon);
-        egui::Panel::left("sidebar")
+        let panel = egui::Panel::left("sidebar")
             .resizable(false)
-            .exact_size(if collapsed { side_icon + 32.0 } else { SIDE_W + (side_icon - 20.0).max(0.0) * 3.0 })
+            .exact_size(width)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
@@ -1028,6 +1062,9 @@ impl App {
                 });
             });
         self.side_rects = rows;
+        if self.overlay.is_none() {
+            self.side_grip(ui.ctx(), panel.response.rect, (thin, wide));
+        }
         if let Some(i) = dropped {
             self.drop_on_side(i);
         } else if let Some(i) = resting {
@@ -1042,6 +1079,38 @@ impl App {
             self.side_cursor = i;
             self.focus = Focus::Sidebar;
             self.handle(Input::Press(Action::Actions));
+        }
+    }
+
+    /// The sidebar's edge: pulled, the sidebar folds or unfolds (as far as
+    /// it's pulled meanwhile); clicked, it flips.
+    fn side_grip(&mut self, ctx: &egui::Context, panel: Rect, (thin, wide): (f32, f32)) {
+        let split = egui::Id::new("side-split");
+        let grip = Rect::from_min_max(pos2(panel.max.x - 4.0, panel.min.y), pos2(panel.max.x + 4.0, panel.max.y));
+        self.touch.grips.push(grip);
+        let mut flip = false;
+        egui::Area::new(egui::Id::new("side-grip")).order(Order::Foreground).movable(false).fixed_pos(grip.min).show(ctx, |ui| {
+            let (_, r) = ui.allocate_exact_size(grip.size(), Sense::click_and_drag());
+            if r.hovered() || r.dragged() {
+                ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                let x = panel.max.x;
+                ui.painter().line_segment([pos2(x, grip.min.y), pos2(x, grip.max.y)], Stroke::new(3.0, ui.visuals().selection.bg_fill));
+            }
+            if r.dragged() {
+                if let Some(p) = ctx.pointer_latest_pos() {
+                    ctx.data_mut(|d| d.insert_temp(split, p.x - panel.min.x));
+                }
+            }
+            if r.drag_stopped() {
+                if let Some(w) = ctx.data_mut(|d| d.remove_temp::<f32>(split)) {
+                    flip = (w < (thin + wide) / 2.0) != self.cfg.sidebar_collapsed;
+                }
+            } else if r.clicked() {
+                flip = true;
+            }
+        });
+        if flip {
+            self.run(Cmd::ToggleSidebar);
         }
     }
 
@@ -1095,7 +1164,7 @@ impl App {
                 return;
             }
             let dragging = self.drag.is_some();
-            let tapped = self.touch.tapped;
+            let tap = self.touch.tapped.then_some(self.touch.double);
             let App { tabs, icons, cfg, drag, spring, .. } = self;
             let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
             // The entry a drag rests on in this side, and how long it has.
@@ -1123,13 +1192,13 @@ impl App {
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
                     let shown = pane.loc.clone();
-                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown), tapped) {
+                    for e in draw_pane(&mut inner, pane, icons, cfg, is_active && focused, (tab_of[idx], idx), dragging, lifted(idx), springing(idx, &shown), tap) {
                         events.push((idx, e));
                     }
                 }
             } else {
                 let shown = tabs[tab].pane.loc.clone();
-                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tapped) {
+                for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tap) {
                     events.push((0, e));
                 }
             }
@@ -1173,6 +1242,7 @@ impl App {
             self.set_side(idx);
             match e {
                 PaneEvent::Toggle(i) => {
+                    self.tap_toggled = Some((idx, i, std::time::Instant::now()));
                     let p = self.pane_mut();
                     if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
                         // A folded volume set goes in or out whole.
@@ -1216,6 +1286,19 @@ impl App {
                 }
                 PaneEvent::Activate(i) => {
                     self.pane_mut().cursor = i;
+                    self.activate();
+                }
+                PaneEvent::DoubleTap(i) => {
+                    if self.tap_toggled.take().is_some_and(|(s, j, t)| (s, j) == (idx, i) && t.elapsed().as_secs_f32() < 1.0) {
+                        let p = self.pane_mut();
+                        if let Some(name) = p.entries.get(i).map(|e| e.name.clone()) {
+                            let on = !p.selected.contains(&name);
+                            p.mark(&name, on);
+                        }
+                    }
+                    let p = self.pane_mut();
+                    p.cursor = i;
+                    p.cursor_hidden = false;
                     self.activate();
                 }
                 PaneEvent::Context(i) => {
@@ -1421,6 +1504,8 @@ enum PaneEvent {
     /// Middle click: a folder in a new tab.
     NewTab(usize),
     Activate(usize),
+    /// A finger's double tap: opens it (what its first tap chose, undone).
+    DoubleTap(usize),
     Context(Option<usize>),
     /// Items picked up by the mouse (from this entry).
     DragStart(usize),
@@ -1433,7 +1518,7 @@ enum PaneEvent {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tapped: bool) -> Vec<PaneEvent> {
+fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tap: Option<bool>) -> Vec<PaneEvent> {
     let mut events = Vec::new();
     // Dragged items over this pane: dropped on release.
     let whole = ui.max_rect();
@@ -1631,6 +1716,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 }
                 let path = pane.loc.entry_path(&e.name);
                 let hot;
+                let icon_at;
                 let icon_size = if grid { grid_icon } else { list_icon };
                 let thumb = match (&path, e.mtime) {
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
@@ -1647,6 +1733,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let big = |r: Rect| Rect::from_center_size(r.center(), r.size() * grow);
                 if grid {
                     let ir = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 6.0 + icon_size / 2.0), Vec2::splat(icon_size));
+                    icon_at = ir;
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
@@ -1664,6 +1751,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     }
                 } else {
                     let ir = Rect::from_min_size(pos2(rect.min.x + CHECK_W + 10.0, rect.center().y - icon_size / 2.0), Vec2::splat(icon_size));
+                    // (The check box's room too: a finger is wide.)
+                    icon_at = Rect::from_min_max(pos2(rect.min.x, ir.min.y), ir.max);
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
@@ -1754,11 +1843,22 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     }
                 }
                 if checked {
+                } else if let (true, Some(double)) = (r.clicked(), tap) {
+                    // A finger: a tap on the icon (or any, while choosing)
+                    // takes it in or out; else it opens it, or, opening on
+                    // two taps, points at it.
+                    let on_icon = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| icon_at.expand(6.0).contains(p));
+                    events.push(if double && cfg.touch_double {
+                        PaneEvent::DoubleTap(i)
+                    } else if on_icon || !pane.selected.is_empty() {
+                        PaneEvent::Toggle(i)
+                    } else if cfg.touch_double {
+                        PaneEvent::Click(i, false, false)
+                    } else {
+                        PaneEvent::Activate(i)
+                    });
                 } else if r.double_clicked() {
                     events.push(PaneEvent::Activate(i));
-                } else if r.clicked() && tapped {
-                    // A finger's tap opens (or, choosing, takes it in or out).
-                    events.push(if pane.selected.is_empty() { PaneEvent::Activate(i) } else { PaneEvent::Toggle(i) });
                 } else if r.clicked() {
                     let m = ui.input(|i| i.modifiers);
                     events.push(PaneEvent::Click(i, m.command, m.shift));
@@ -2693,6 +2793,10 @@ enum TopAction {
     Focus(usize),
     Go(usize, crate::vfs::Location),
     ClearFilter(usize),
+    /// Polka's own title bar: dragged, double-clicked, its buttons.
+    MoveWindow,
+    Maximize,
+    Window(crate::titlebar::WinButton),
 }
 
 /// Theme size to ask for an icon drawn `pt` points wide, rounded up to a
@@ -2740,15 +2844,23 @@ fn address_field(
     dragging: bool,
     spring: &Option<(crate::app::SpringAt, std::time::Instant, bool)>,
     drawn: &mut Vec<(usize, Rect, crate::vfs::Location)>,
+    title_bar: bool,
 ) -> (Option<TopAction>, Option<(usize, crate::vfs::Location)>) {
     let mut rest = None;
     let mut act = None;
-    let bg = ui.interact(rect, ui.id().with(("addr", idx)), Sense::click());
+    // Being the title bar, the address moves the window when dragged.
+    let sense = if title_bar { Sense::click_and_drag() } else { Sense::click() };
+    let moved = |r: &egui::Response| r.drag_started_by(egui::PointerButton::Primary);
+    let bg = ui.interact(rect, ui.id().with(("addr", idx)), sense);
     let v = ui.visuals().clone();
     let stroke = if highlight { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };
     ui.painter().rect(rect, 8.0, v.extreme_bg_color, stroke, StrokeKind::Inside);
-    if bg.clicked() {
+    if title_bar && bg.double_clicked() {
+        act = Some(TopAction::Maximize);
+    } else if bg.clicked() {
         act = Some(TopAction::Focus(idx));
+    } else if moved(&bg) {
+        act = Some(TopAction::MoveWindow);
     }
     let inner = rect.shrink2(vec2(6.0, 4.0));
     let painter = ui.painter().with_clip_rect(rect.shrink(1.0));
@@ -2813,7 +2925,10 @@ fn address_field(
     for (i, g) in galleys.into_iter().enumerate().skip(first) {
         let w = g.size().x + pad;
         let r = Rect::from_min_size(pos2(x, inner.min.y), vec2(w, inner.height()));
-        let resp = ui.interact(r, ui.id().with(("crumb", idx, i)), Sense::click());
+        let resp = ui.interact(r, ui.id().with(("crumb", idx, i)), sense);
+        if moved(&resp) {
+            act = Some(TopAction::MoveWindow);
+        }
         if resp.hovered() {
             painter.rect_filled(r, 6.0, v.widgets.hovered.weak_bg_fill);
         }
@@ -3245,6 +3360,27 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
+    }
+
+    // A finger opens on one tap or two.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::TOUCH_OPEN, "touch-open");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Open by touch"), label_font.clone(), v.text_color());
+    let shown = if cfg.touch_double { tr("Double tap") } else { tr("One tap") };
+    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::TOUCH_OPEN));
+    }
+
+    // The desktop's title bar, or Polka's top bar as one.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::TITLEBAR, "titlebar");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("System title bar"), label_font.clone(), v.text_color());
+    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+    if cfg.system_titlebar {
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+    }
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::TITLEBAR));
     }
 
     // Close.

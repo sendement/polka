@@ -5401,6 +5401,8 @@ fn touch_screens() {
     let mut cfg = h.state().cfg.clone();
     cfg.dual = false;
     cfg.view = crate::config::ViewMode::List;
+    // (Opening on one tap; two further down.)
+    cfg.touch_double = false;
     h.state_mut().cfg = cfg;
     settle(&mut h);
     // What the window system gives for a finger, through the gestures.
@@ -5529,4 +5531,73 @@ fn touch_screens() {
     assert!(h.state().cfg.list_icon > icon, "pinching didn't grow the icons");
     assert!(h.state().overlay.is_none() && h.state().pane().loc == Location::Local(dir.clone()), "the pinch tapped something");
     shot(&mut h, "tc1-pinched");
+
+    // Opening on two taps: a tap on a name points at it, on an icon
+    // chooses it (then any tap does); two taps open.
+    h.state_mut().cfg.touch_double = true;
+    h.state_mut().cfg.list_icon = icon;
+    settle(&mut h);
+    let tap = |h: &mut Harness<'static, App>, p: egui::Pos2| {
+        feed(h, vec![finger(1, TouchPhase::Start, p.x, p.y)]);
+        feed(h, vec![finger(1, TouchPhase::End, p.x, p.y)]);
+        idle(h, 60);
+    };
+    let name_at = |r: egui::Rect| egui::pos2(r.min.x + 110.0, r.center().y);
+    let icon_at = |r: egui::Rect| egui::pos2(r.min.x + 12.0, r.center().y);
+    let p = name_at(row_of(&h, "Album"));
+    tap(&mut h, p);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.clone()), "one tap opened it");
+    assert_eq!(h.state().pane().current().unwrap().name, "Album");
+    assert!(h.state().pane().selected.is_empty());
+    idle(&mut h, 500);
+    let p = icon_at(row_of(&h, "Box"));
+    tap(&mut h, p);
+    idle(&mut h, 500);
+    let p = name_at(row_of(&h, "file00.txt"));
+    tap(&mut h, p);
+    let sel = |h: &Harness<'static, App>| {
+        let mut v: Vec<String> = h.state().pane().selected.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    assert_eq!(sel(&h), ["Box", "file00.txt"]);
+    shot(&mut h, "tc2-chosen");
+    idle(&mut h, 500);
+    let p = name_at(row_of(&h, "file00.txt"));
+    tap(&mut h, p);
+    assert_eq!(sel(&h), ["Box"]);
+    idle(&mut h, 500);
+    // Two taps on Album: opened, and not left chosen.
+    let p = name_at(row_of(&h, "Album"));
+    tap(&mut h, p);
+    tap(&mut h, p);
+    settle(&mut h);
+    assert_eq!(h.state().pane().loc, Location::Local(dir.join("Album")), "two taps didn't open it");
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().go_up(&cfg);
+    settle(&mut h);
+    assert!(!h.state().pane().selected.contains("Album"), "the double tap left it chosen");
+
+    // The sidebar's edge pulled left: it folds; tapped: it unfolds.
+    assert!(!h.state().cfg.sidebar_collapsed);
+    let grip = h.state().touch.grips[0];
+    let at = grip.center();
+    feed(&mut h, vec![finger(1, TouchPhase::Start, at.x, at.y)]);
+    for k in 1..=5 {
+        feed(&mut h, vec![finger(1, TouchPhase::Move, at.x - k as f32 * 30.0, at.y)]);
+    }
+    shot(&mut h, "tc3-pulling");
+    feed(&mut h, vec![finger(1, TouchPhase::End, at.x - 150.0, at.y)]);
+    settle(&mut h);
+    assert!(h.state().cfg.sidebar_collapsed, "pulling didn't fold the sidebar");
+    let at = h.state().touch.grips[0].center();
+    idle(&mut h, 500);
+    tap(&mut h, at);
+    settle(&mut h);
+    assert!(!h.state().cfg.sidebar_collapsed, "a tap on the edge didn't unfold it");
+
+    // No system title bar: the window's buttons on Polka's top bar.
+    h.state_mut().cfg.system_titlebar = false;
+    settle(&mut h);
+    shot(&mut h, "tc4-titlebar");
 }

@@ -114,14 +114,19 @@ impl Icons {
     /// `name-symbolic`; monochrome icons (GTK symbolic, KDE ColorScheme-Text)
     /// are recoloured to `color` so they read on any background.
     pub fn ui_icon(&mut self, candidates: &[&str], size: u16, color: egui::Color32) -> Option<String> {
-        let key = format!("ui:{}/{}@{size}#{:?}", self.theme, candidates.join(","), color.to_array());
+        let theme = self.theme.clone();
+        self.ui_icon_in(&theme, candidates, size, color)
+    }
+
+    /// The same from a given theme (and what it inherits).
+    pub fn ui_icon_in(&mut self, theme: &str, candidates: &[&str], size: u16, color: egui::Color32) -> Option<String> {
+        let key = format!("ui:{theme}/{}@{size}#{:?}", candidates.join(","), color.to_array());
         if let Some(v) = self.names.get(&key) {
             return v.clone();
         }
-        let theme = self.theme.clone();
         let found = candidates.iter().find_map(|c| {
             [c.to_string(), format!("{c}-symbolic")].into_iter().find_map(|n| {
-                freedesktop_icons::lookup(&n).with_theme(&theme).with_size(size).with_cache().find()
+                freedesktop_icons::lookup(&n).with_theme(theme).with_size(size).with_cache().find()
             })
         });
         let uri = found.map(|p| recolored(&p, color).unwrap_or_else(|| uri(&p)));

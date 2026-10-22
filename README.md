@@ -191,7 +191,10 @@ the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu c
 Gamepad input is ignored while Polka is not the focused window. Touch screens, touchpads and pens
 aren't taken for pads (on the Steam Deck the screen's touches stay touches).
 
-**Touch screen.** A tap opens (while something is chosen it takes the item in or out); a
+**Touch screen.** Two quick taps open (Settings → Open by touch: or one); a single tap points at
+an item, a tap on its icon takes it in or out of the selection, and while anything is chosen any
+tap does; a tap on empty space clears the choice, and held a moment there then moved it draws a
+selection rectangle. A
 finger moved up or down scrolls, gliding on after a flick; held still half a second (a ring fills
 under the finger) and let go it's a right click — the menu — and moved on it picks up what's under
 it to drag; a quick swipe sideways goes back or forward, from the left edge it shows the sidebar;
@@ -216,7 +219,13 @@ set is selected whole; an unfolded one volume by volume. Running operations show
 changes made by other programs (looked at every couple of seconds): what's added or removed shows
 up, the cursor and selection stay put.
 
-**Sidebar.** ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to
+**Window.** Settings → System title bar off: Polka's top bar is the title bar. It gets the window's
+minimize / maximize / close buttons, looking like the desktop's own (Breeze icons on KDE, Adwaita's
+round buttons on GNOME, else the icon theme's); drag the address bar (or the room around it) to move
+the window, double click it to maximize; the window's edges resize it.
+
+**Sidebar.** Its edge pulled to the left folds it to icons, pulled back out unfolds it (a click
+or tap on the edge flips it). ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to
 it. Places, pinned folders, **drives** (every partition that isn't the system's, mounted
 or not: ✕ mounts and opens one, △ has Mount / Unmount / Eject through udisks, which asks polkit for
 a password when needed) and tools. △ on any entry chooses its icon (a theme icon or your own
