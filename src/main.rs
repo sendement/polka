@@ -23,6 +23,7 @@ mod packages;
 mod sandbox;
 mod schemes;
 mod sidebar;
+mod status;
 mod net;
 mod openwith;
 mod phones;

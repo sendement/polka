@@ -715,6 +715,8 @@ impl App {
                     s += &format!(" · {} {}", p.selected.len(), tr("selected"));
                 }
                 ui.label(s);
+                self.status_figures(ui);
+                let p = self.pane();
                 if let Some(m) = p.current().and_then(|e| p.volumes.get(&e.name)) {
                     ui.separator();
                     let t = format!("{} {} {} {} · {}", tr("Volume"), m.index + 1, tr("of"), m.count, m.archive);
@@ -738,6 +740,65 @@ impl App {
             });
             ui.add_space(3.0);
         });
+    }
+
+    /// Past the item count: the disk's space and what the folder holds, an
+    /// icon and a number each (what each is, on hover).
+    fn status_figures(&mut self, ui: &mut Ui) {
+        use crate::status::{Counts, FIGURES, Figure};
+        let shown = self.cfg.status;
+        let p = self.pane();
+        let n = p.entries.len();
+        if !matches!(&self.status_counts, Some((l, k, _)) if *l == p.loc && *k == n) {
+            self.status_counts = Some((p.loc.clone(), n, Counts::of(&p.entries)));
+        }
+        let counts = self.status_counts.as_ref().map(|c| c.2).unwrap_or_default();
+        let dir = self.pane().loc.local_path().map(|d| d.to_path_buf());
+        let space = match (shown.space, dir) {
+            (true, Some(d)) => self.status_space.of(&d, ui.ctx()),
+            _ => None,
+        };
+        let px = lookup_px(ui, 16.0);
+        for f in FIGURES {
+            if !shown.get(f) {
+                continue;
+            }
+            let (text, tip, used) = match f {
+                Figure::Space => {
+                    let Some((total, used)) = space else { continue };
+                    let free = total.saturating_sub(used);
+                    let tip = format!("{}: {} · {}: {} · {}: {}", tr("Used"), human_size(used), tr("Free"), human_size(free), tr("Total"), human_size(total));
+                    (format!("{} / {}", human_size(used), human_size(free)), tip, Some(used as f32 / total.max(1) as f32))
+                }
+                _ => match counts.get(f) {
+                    0 => continue,
+                    k => (k.to_string(), format!("{}: {k}", f.label()), None),
+                },
+            };
+            ui.add_space(8.0);
+            let icon = self.icons.named(f.icons(), px);
+            let r = ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                match icon {
+                    Some(u) => {
+                        ui.add(egui::Image::new(u).fit_to_exact_size(Vec2::splat(16.0)));
+                    }
+                    None => {
+                        ui.label("•");
+                    }
+                }
+                // The disk: how full, as a little bar.
+                if let Some(t) = used {
+                    let (bar, _) = ui.allocate_exact_size(vec2(30.0, 6.0), Sense::hover());
+                    let v = ui.visuals();
+                    let c = if t > 0.9 { v.error_fg_color } else { v.selection.bg_fill };
+                    ui.painter().rect_filled(bar, 3.0, v.widgets.inactive.weak_bg_fill);
+                    ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * t.clamp(0.0, 1.0), bar.height())), 3.0, c);
+                }
+                ui.add(egui::Label::new(text).selectable(false));
+            });
+            ui.interact(r.response.rect, ui.id().with(("status-figure", f as u8)), Sense::hover()).on_hover_text(tip);
+        }
     }
 
     /// Running operations as cards over the bottom right corner: what goes

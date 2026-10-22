@@ -98,6 +98,8 @@ pub struct Config {
     pub win_style: crate::titlebar::Style,
     pub win_order: u8,
     pub win_left: bool,
+    /// The status bar's figures.
+    pub status: crate::status::Shown,
 }
 
 /// The terminal page.
@@ -240,6 +242,7 @@ impl Default for Config {
             win_style: crate::titlebar::Style::Auto,
             win_order: 0,
             win_left: false,
+            status: crate::status::Shown::default(),
         }
     }
 }

@@ -5644,3 +5644,49 @@ fn touch_screens() {
     settle(&mut h);
     shot(&mut h, "tc6-mac-left");
 }
+
+/// The status bar's figures: the disk and what the folder holds, each on
+/// hover saying what it is; View → Status bar hides them one by one.
+#[test]
+#[ignore]
+fn status_screens() {
+    use crate::status::Figure;
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("status");
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["Album", "Box"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    for f in ["a.jpg", "b.PNG", "c.heic", "clip.mkv", "pack.zip", "notes.txt"] {
+        std::fs::write(dir.join(f), "x").unwrap();
+    }
+    let mut h = harness(dir.clone());
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.status = crate::status::Shown::default();
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    // (The disk is looked at off the UI thread.)
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    assert_eq!(h.state().status_counts.as_ref().map(|c| c.2), Some(crate::status::Counts { folders: 2, pictures: 3, videos: 1, archives: 1 }));
+    let tip = format!("{}: 3", crate::i18n::tr("Pictures"));
+    let hovered = {
+        let n = h.get_by_label("3");
+        n.rect()
+    };
+    h.event(egui::Event::PointerMoved(hovered.center()));
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        h.step();
+    }
+    shot(&mut h, "st0-status");
+    assert!(h.query_by_label(&tip).is_some(), "no tooltip");
+    h.state_mut().run(crate::app::Cmd::ToggleStatus(Figure::Pictures));
+    settle(&mut h);
+    assert!(!h.state().cfg.status.pictures);
+    assert!(h.query_by_label("3").is_none(), "pictures still shown");
+}

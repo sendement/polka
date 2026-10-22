@@ -620,6 +620,8 @@ pub enum Cmd {
     ToggleDual,
     ToggleHidden,
     ToggleThumbnails,
+    /// A figure of the status bar shown or not.
+    ToggleStatus(crate::status::Figure),
     IconThemes,
     SetIconTheme(Option<String>),
     /// A theme and the colour of its folders (the theme picker).
@@ -683,6 +685,8 @@ pub enum Cmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubMenu {
     View,
+    /// The status bar's figures (in View).
+    Status,
     Sort,
     /// A folder of templates (index into `App::templates`).
     Templates(usize),
@@ -1372,6 +1376,10 @@ pub struct App {
     pub touch: crate::touch::Touch,
     /// Two fingers apart / together since the icons last changed size.
     pub pinch: f32,
+    /// The status bar's disk space, and its counts (for this folder and
+    /// listing: where, how many entries).
+    pub status_space: crate::status::Space,
+    pub status_counts: Option<(Location, usize, crate::status::Counts)>,
     /// The help's scrolling asked for by the pad (by so much).
     pub help_scroll: Option<f32>,
     /// Esc went down in the terminal and is still held: its repeats are no
@@ -1501,6 +1509,8 @@ impl App {
             help_scroll: None,
             touch: Default::default(),
             pinch: 1.0,
+            status_space: Default::default(),
+            status_counts: None,
             esc_down: false,
             sys_clip: None,
             dark_applied: None,
@@ -3349,9 +3359,11 @@ impl App {
                     toggle(tr("Sidebar"), Cmd::ToggleSidebar, !c.sidebar_collapsed),
                     toggle(tr("Show hidden files"), Cmd::ToggleHidden, c.show_hidden),
                     toggle(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
+                    item(tr("Status bar"), Cmd::Submenu(SubMenu::Status)),
                     item(tr("Icon theme…"), Cmd::IconThemes),
                 ],
             ),
+            SubMenu::Status => (tr("Status bar").to_string(), crate::status::FIGURES.iter().map(|f| toggle(f.label(), Cmd::ToggleStatus(*f), c.status.get(*f))).collect()),
             SubMenu::Templates(i) => {
                 let title = if i == 0 { tr("New document").to_string() } else { self.templates[i].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
                 (title, self.templates_menu(i))
@@ -4326,6 +4338,10 @@ impl App {
                 self.cfg.icon_theme = id;
                 self.cfg.save();
                 self.refresh_sidebar();
+            }
+            Cmd::ToggleStatus(f) => {
+                self.cfg.status.flip(f);
+                self.cfg.save();
             }
             Cmd::ToggleThumbnails => {
                 self.cfg.thumbnails = !self.cfg.thumbnails;
