@@ -2714,6 +2714,26 @@ fn fake_steam(root: &std::path::Path) {
     let icon = root.join("appcache/librarycache/10/0123456789abcdef0123456789abcdef01234567.jpg");
     std::fs::create_dir_all(icon.parent().unwrap()).unwrap();
     image::RgbImage::from_fn(32, 32, |x, y| image::Rgb([200, (x * 8) as u8, (y * 8) as u8])).save(&icon).unwrap();
+    // Screenshots of Half-Life 2, and Counter-Strike's recordings: a
+    // background one and a clip (DASH, as Steam writes them).
+    let shots = root.join("userdata/42/760/remote/20/screenshots");
+    for n in ["20261025173001_1.jpg", "20261025173005_1.jpg"] {
+        std::fs::create_dir_all(shots.join("thumbnails")).unwrap();
+        image::RgbImage::from_fn(64, 36, |x, _| image::Rgb([(x * 4) as u8, 120, 200])).save(shots.join(n)).unwrap();
+    }
+    let rec = root.join("userdata/42/gamerecordings");
+    for dir in ["video/bg_10_20261024_090102", "clips/clip_10_20261025_173007/video/bg_10_20261025_172900"] {
+        let d = rec.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30", "-t", "2", "-c:v", "libx264", "-f", "dash", "-seg_duration", "1"])
+            .arg(d.join("session.mpd"))
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            w(d.join("session.mpd"), b"<MPD/>");
+        }
+    }
 }
 
 /// Steam in the sidebar: its games and prefixes by name, in and back out.
@@ -2741,7 +2761,7 @@ fn steam(h: &mut Harness<'static, App>) {
     press(h, &[Action::Right]);
     let names = |h: &Harness<'static, App>| h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
     assert_eq!(h.state().pane().loc, Location::Steam(View::Root));
-    assert_eq!(names(h), vec![tr("Games").to_string(), tr("Prefixes").to_string()]);
+    assert_eq!(names(h), vec![tr("Games").to_string(), tr("Prefixes").to_string(), tr("Screenshots").to_string(), tr("Recordings").to_string()]);
     shot(h, "s0-steam");
     // Games from both libraries, one without a manifest by its folder.
     press(h, &[Action::Accept]);
@@ -2784,6 +2804,38 @@ fn steam(h: &mut Harness<'static, App>) {
     shot(h, "s3-prefix-inside");
     press(h, &[Action::Back, Action::Back]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Prefixes));
+    // Screenshots by game: the real folder.
+    press(h, &[Action::Back, Action::Down, Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Screenshots));
+    assert_eq!(names(h), vec!["Half-Life 2"]);
+    press(h, &[Action::Accept]);
+    let shots = std::fs::canonicalize(root.join("userdata/42/760/remote/20/screenshots")).unwrap();
+    assert_eq!(h.state().pane().loc, Location::Local(shots));
+    settle(h);
+    shot(h, "s4-screenshots");
+    press(h, &[Action::Back]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Screenshots));
+    // Recordings by game, then each one, newest first; one plays.
+    press(h, &[Action::Back, Action::Down, Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Recordings));
+    assert_eq!(names(h), vec!["Counter-Strike"]);
+    press(h, &[Action::Accept]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Recorded(10)));
+    assert_eq!(names(h), vec![format!("2026-10-25 17:30:07 · {}", tr("Clip")), "2026-10-24 09:01:02".to_string()]);
+    let crumbs: Vec<String> = h.state().pane().loc.crumbs().into_iter().map(|(l, _)| l).collect();
+    assert_eq!(crumbs, vec!["Steam".to_string(), tr("Recordings").to_string(), "Counter-Strike".into()]);
+    settle(h);
+    shot(h, "s5-recordings");
+    press(h, &[Action::Accept]);
+    assert!(h.state().tabs[h.state().tab].viewer.is_some(), "the recording didn't open");
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        h.step();
+    }
+    shot(h, "s6-recording-plays");
+    press(h, &[Action::Back]);
+    press(h, &[Action::Back]);
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Recordings));
     unsafe { std::env::remove_var("POLKA_STEAM_ROOT") };
     h.state_mut().refresh_sidebar();
 }

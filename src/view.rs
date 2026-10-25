@@ -2161,6 +2161,10 @@ fn type_name(e: &crate::vfs::Entry, path: Option<&std::path::Path>) -> String {
     if e.is_dir {
         return tr("Folder").to_string();
     }
+    // A Steam recording: named by its date.
+    if path.is_some_and(crate::steam::is_recording) {
+        return format!("{} (DASH)", tr("Video"));
+    }
     let lower = e.name.to_lowercase();
     // .tar.gz and the like: the whole compound extension.
     let (_, ext) = crate::ops::split_ext(&e.name);

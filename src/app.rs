@@ -233,8 +233,10 @@ impl Pane {
                 if !cfg.show_hidden {
                     v.retain(|e| !e.hidden());
                 }
-                // Search results keep their breadth-first order (near first).
-                if !matches!(self.loc, Location::Search { .. }) {
+                // Search results keep their breadth-first order (near first);
+                // Steam's folder its own, a game's recordings newest first.
+                use crate::steam::View;
+                if !matches!(self.loc, Location::Search { .. } | Location::Steam(View::Root | View::Recorded(_))) {
                     sort_entries(&mut v, cfg);
                 }
                 self.all = v;
@@ -2942,7 +2944,15 @@ impl App {
             return;
         }
         match &p.loc {
-            Location::Steam(_) => {}
+            // A recording: played here, or by the desktop's player.
+            Location::Steam(_) => {
+                let Some(path) = p.entry_path(&e) else { return };
+                if crate::viewer::kind_in(&path, &e.name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
+                    self.view_current();
+                } else if let Err(err) = crate::launch::open(&path) {
+                    self.toast(format!("{}: {err}", tr("Failed")), true);
+                }
+            }
             Location::Local(_) | Location::Search { .. } => {
                 let path = p.entry_path(&e).expect("local entry");
                 // A package (checked by its content) installs on ✕, as set.
@@ -3018,8 +3028,8 @@ impl App {
             Some(crate::viewer::image::is_picture)
         } else if crate::viewer::audio::is_audio(&e.name) {
             Some(|_, n| crate::viewer::audio::is_audio(n))
-        } else if crate::viewer::video::is_video(&e.name) {
-            Some(|_, n| crate::viewer::video::is_video(n))
+        } else if crate::viewer::video::is_video(&e.name) || crate::steam::is_recording(&path) {
+            Some(|p, n| crate::viewer::video::is_video(n) || crate::steam::is_recording(p))
         } else {
             None
         };

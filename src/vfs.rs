@@ -49,9 +49,9 @@ impl Location {
             }
             Location::Archive { archive, inner } => format!("{}/{}", archive.display(), inner),
             Location::Search { root, query, .. } => format!("{} — \u{1F50D} {query}", root.display()),
-            Location::Steam(v) => match v {
-                crate::steam::View::Root => "Steam".to_string(),
-                v => format!("Steam/{}", crate::steam::view_name(*v)),
+            Location::Steam(v) => match crate::steam::parent(*v) {
+                None => "Steam".to_string(),
+                Some((up, name)) => format!("{}/{name}", up.display()),
             },
         }
     }
@@ -68,7 +68,7 @@ impl Location {
                 _ => archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             },
             Location::Search { query, .. } => format!("\u{1F50D} {query}"),
-            Location::Steam(v) => crate::steam::view_name(*v).to_string(),
+            Location::Steam(v) => crate::steam::view_name(*v),
         };
         // A game's folder or prefix goes by the game's name.
         if let Location::Local(p) = self {
@@ -118,8 +118,7 @@ impl Location {
                 Some((Location::Archive { archive: archive.clone(), inner: parent }, name))
             }
             Location::Search { root, .. } => Some((Location::Local(root.clone()), String::new())),
-            Location::Steam(crate::steam::View::Root) => None,
-            Location::Steam(v) => Some((Location::Steam(crate::steam::View::Root), crate::steam::view_name(*v).to_string())),
+            Location::Steam(v) => crate::steam::parent(*v),
         }
     }
 
@@ -131,8 +130,7 @@ impl Location {
                 inner: if inner.is_empty() { name.to_string() } else { format!("{inner}/{name}") },
             },
             Location::Search { root, .. } => Location::Local(root.join(name)),
-            Location::Steam(crate::steam::View::Root) => Location::Steam(crate::steam::root_child(name).unwrap_or(crate::steam::View::Root)),
-            Location::Steam(v) => Location::Local(crate::steam::resolve(*v, name).unwrap_or_default()),
+            Location::Steam(v) => crate::steam::join(*v, name),
         }
     }
 
@@ -150,8 +148,7 @@ impl Location {
             Location::Local(p) => Some(p.join(name)),
             Location::Search { root, .. } => Some(root.join(name)),
             Location::Archive { .. } => None,
-            Location::Steam(crate::steam::View::Root) => None,
-            Location::Steam(v) => crate::steam::resolve(*v, name),
+            Location::Steam(v) => crate::steam::entry_path(*v, name),
         }
     }
 

@@ -1,6 +1,8 @@
-//! Steam in the sidebar: two folders, the installed games (from every
-//! library) and the Proton prefixes, named after their games instead of the
-//! app ids Steam gives their folders.
+//! Steam in the sidebar: the installed games (from every library), the
+//! Proton prefixes, the screenshots and the game recordings, each by game,
+//! named after their games instead of the app ids Steam gives their folders.
+//! A game's screenshots are their real folder; its recordings (DASH videos,
+//! a session.mpd and its chunks each) are listed one by one, to play.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,11 @@ pub enum View {
     Root,
     Games,
     Prefixes,
+    Screenshots,
+    /// Games with recordings…
+    Recordings,
+    /// …and one's recordings (by app id).
+    Recorded(u32),
 }
 
 /// A game folder or a prefix, under the name shown for it.
@@ -21,6 +28,8 @@ pub struct Item {
     pub name: String,
     pub path: PathBuf,
     pub appid: Option<u32>,
+    /// A file (a recording): its size.
+    pub size: Option<u64>,
 }
 
 /// Steam installs found (native, ~/.steam links, Flatpak), each once.
@@ -390,6 +399,124 @@ fn unique(items: &mut [Item]) {
     }
 }
 
+/// The accounts' folders (userdata/<id>) of every install.
+fn userdata(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for r in roots {
+        let Ok(rd) = std::fs::read_dir(r.join("userdata")) else { continue };
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().parse::<u64>().is_ok() && e.path().is_dir() {
+                out.push(e.path());
+            }
+        }
+    }
+    out
+}
+
+/// Games' screenshot folders (with something in them): app id, folder.
+fn screenshot_dirs(users: &[PathBuf]) -> Vec<(u32, PathBuf)> {
+    let mut out = Vec::new();
+    for u in users {
+        let Ok(rd) = std::fs::read_dir(u.join("760/remote")) else { continue };
+        for e in rd.flatten() {
+            let Ok(id) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+            let dir = e.path().join("screenshots");
+            let any = std::fs::read_dir(&dir).is_ok_and(|mut r| r.any(|f| f.is_ok_and(|f| f.path().is_file())));
+            if any {
+                out.push((id, dir));
+            }
+        }
+    }
+    out
+}
+
+/// A game recording: one session.mpd.
+#[derive(Clone, Debug)]
+struct Rec {
+    appid: u32,
+    mpd: PathBuf,
+    /// "2026-10-25 17:30:07".
+    when: String,
+    /// Saved as a clip (else the background recording).
+    clip: bool,
+}
+
+/// Where an account's recordings are: gamerecordings, and a folder of its
+/// own if one is set (a path under a "…record…" key of its settings).
+fn recording_dirs(user: &Path) -> Vec<PathBuf> {
+    let mut out = vec![user.join("gamerecordings")];
+    if let Ok(t) = std::fs::read_to_string(user.join("config/localconfig.vdf")) {
+        for (k, v) in t.lines().filter_map(kv_line) {
+            let p = PathBuf::from(&v);
+            if k.to_lowercase().contains("record") && p.is_absolute() && p.is_dir() && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The app id and time from folders named like clip_<appid>_<date>_<time>
+/// or bg_<appid>_<date>_<time> above a session.mpd (a clip's, else the
+/// nearest), and whether it's in a clip's.
+fn parse_rec(mpd: &Path, base: &Path) -> Option<Rec> {
+    let mut found: Option<(u32, String)> = None;
+    let mut clip = false;
+    for dir in mpd.ancestors().skip(1).take_while(|d| d.starts_with(base) && *d != base) {
+        let name = dir.file_name()?.to_string_lossy();
+        let parts: Vec<&str> = name.split('_').collect();
+        if parts.len() < 4 || !["clip", "bg", "timeline"].contains(&parts[0]) {
+            continue;
+        }
+        let (Ok(id), d, t) = (parts[1].parse::<u32>(), parts[2], parts[3]) else { continue };
+        // (A clip goes by its own time, not its recording's.)
+        let is_clip = parts[0] == "clip";
+        if is_clip && !clip {
+            found = None;
+        }
+        clip |= is_clip;
+        if found.is_none() && d.len() == 8 && t.len() >= 6 && d.bytes().chain(t.bytes()).all(|b| b.is_ascii_digit()) {
+            found = Some((id, format!("{}-{}-{} {}:{}:{}", &d[..4], &d[4..6], &d[6..], &t[..2], &t[2..4], &t[4..6])));
+        }
+    }
+    let (appid, when) = found?;
+    Some(Rec { appid, mpd: mpd.to_path_buf(), when, clip })
+}
+
+fn recordings(users: &[PathBuf]) -> Vec<Rec> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if e.file_name() == "session.mpd" {
+                out.push(p);
+            } else if depth > 0 && e.file_type().is_ok_and(|t| t.is_dir()) {
+                walk(&p, depth - 1, out);
+            }
+        }
+    }
+    let mut out: Vec<Rec> = Vec::new();
+    for u in users {
+        for base in recording_dirs(u) {
+            let mut mpds = Vec::new();
+            walk(&base, 5, &mut mpds);
+            for r in mpds.iter().filter_map(|m| parse_rec(m, &base)) {
+                if !out.iter().any(|o| o.mpd == r.mpd) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    // Newest first.
+    out.sort_by(|a, b| b.when.cmp(&a.when));
+    out
+}
+
+/// What a recording's chunks take together.
+fn dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir).map(|rd| rd.flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum()).unwrap_or(0)
+}
+
 fn build() -> Cache {
     let roots = roots();
     let libs = libraries();
@@ -408,7 +535,7 @@ fn build() -> Cache {
                 continue;
             }
             if m.dir.is_dir() {
-                games.push(Item { name: m.name.clone(), path: m.dir.clone(), appid: Some(m.appid) });
+                games.push(Item { name: m.name.clone(), path: m.dir.clone(), appid: Some(m.appid), size: None });
             }
         }
         // Folders in common without a manifest still show: named by the app
@@ -430,8 +557,8 @@ fn build() -> Cache {
                     continue;
                 }
                 match known {
-                    Some((id, i)) => games.push(Item { name: i.name.clone().unwrap_or(dir), path: p, appid: Some(*id) }),
-                    None => games.push(Item { name: dir, path: p, appid: None }),
+                    Some((id, i)) => games.push(Item { name: i.name.clone().unwrap_or(dir), path: p, appid: Some(*id), size: None }),
+                    None => games.push(Item { name: dir, path: p, appid: None, size: None }),
                 }
             }
         }
@@ -453,8 +580,12 @@ fn build() -> Cache {
             names.entry(*k).or_insert_with(|| n.clone());
         }
     }
+    let users = userdata(&roots);
+    let shots = screenshot_dirs(&users);
+    let recs = recordings(&users);
     let mut shortcut_exe: HashMap<u32, PathBuf> = HashMap::new();
-    if ids.iter().any(|(id, _)| !names.contains_key(id)) {
+    let unnamed = |id: &u32| !names.contains_key(id);
+    if ids.iter().any(|(id, _)| unnamed(id)) || shots.iter().any(|(id, _)| unnamed(id)) || recs.iter().any(|r| unnamed(&r.appid)) {
         for r in &roots {
             for (k, (v, exe)) in shortcut_names(r) {
                 names.entry(k).or_insert(v);
@@ -470,10 +601,30 @@ fn build() -> Cache {
             (0, None) => crate::i18n::tr("Shared prefix").to_string(),
             (_, None) => format!("{} {id}", crate::i18n::tr("Unknown game")),
         };
-        prefixes.push(Item { name, path, appid: Some(id) });
+        prefixes.push(Item { name, path, appid: Some(id), size: None });
     }
+    let game_name = |id: u32| names.get(&id).cloned().unwrap_or_else(|| format!("{} {id}", crate::i18n::tr("Unknown game")));
+    let mut screenshots: Vec<Item> = shots.into_iter().map(|(id, path)| Item { name: game_name(id), path, appid: Some(id), size: None }).collect();
+    screenshots.sort_by_key(|i| i.name.to_lowercase());
+    // Recordings: the games that have some, then each one's.
+    let mut recorded: Vec<Item> = Vec::new();
+    let mut each: HashMap<u32, Vec<Item>> = HashMap::new();
+    for r in recs {
+        if !recorded.iter().any(|i| i.appid == Some(r.appid)) {
+            recorded.push(Item { name: game_name(r.appid), path: PathBuf::new(), appid: Some(r.appid), size: None });
+        }
+        let name = if r.clip { format!("{} · {}", r.when, crate::i18n::tr("Clip")) } else { r.when.clone() };
+        let size = r.mpd.parent().map_or(0, dir_size);
+        each.entry(r.appid).or_default().push(Item { name, path: r.mpd, appid: Some(r.appid), size: Some(size) });
+    }
+    recorded.sort_by_key(|i| i.name.to_lowercase());
     unique(&mut games);
     unique(&mut prefixes);
+    unique(&mut screenshots);
+    unique(&mut recorded);
+    for list in each.values_mut() {
+        unique(list);
+    }
     let mut c = Cache { built: true, ..Default::default() };
     // A game's exe gives the icon to its folder and its prefix.
     let mut exe_of: HashMap<u32, PathBuf> = shortcut_exe;
@@ -485,7 +636,7 @@ fn build() -> Cache {
             c.icons.insert(g.path.clone(), (Some(e), None));
         }
     }
-    for (view, list) in [(View::Games, &games), (View::Prefixes, &prefixes)] {
+    for (view, list) in [(View::Games, &games), (View::Prefixes, &prefixes), (View::Screenshots, &screenshots)] {
         for i in list {
             c.by_path.insert(i.path.clone(), (view, i.name.clone()));
             let exe = i.appid.and_then(|a| exe_of.get(&a).cloned());
@@ -497,6 +648,11 @@ fn build() -> Cache {
     }
     c.lists.insert(View::Games, games);
     c.lists.insert(View::Prefixes, prefixes);
+    c.lists.insert(View::Screenshots, screenshots);
+    c.lists.insert(View::Recordings, recorded);
+    for (id, list) in each {
+        c.lists.insert(View::Recorded(id), list);
+    }
     c
 }
 
@@ -507,11 +663,50 @@ fn ensure() {
     }
 }
 
-pub fn view_name(v: View) -> &'static str {
+/// A Steam folder's name (a game's, for its recordings).
+pub fn view_name(v: View) -> String {
     match v {
-        View::Root => "Steam",
-        View::Games => crate::i18n::tr("Games"),
-        View::Prefixes => crate::i18n::tr("Prefixes"),
+        View::Root => "Steam".into(),
+        View::Games => crate::i18n::tr("Games").into(),
+        View::Prefixes => crate::i18n::tr("Prefixes").into(),
+        View::Screenshots => crate::i18n::tr("Screenshots").into(),
+        View::Recordings => crate::i18n::tr("Recordings").into(),
+        View::Recorded(id) => {
+            ensure();
+            let c = cache().lock().unwrap();
+            c.lists.get(&View::Recordings).and_then(|l| l.iter().find(|i| i.appid == Some(id))).map_or_else(|| id.to_string(), |i| i.name.clone())
+        }
+    }
+}
+
+/// Where a Steam folder sits, and its name there.
+pub fn parent(v: View) -> Option<(Location, String)> {
+    match v {
+        View::Root => None,
+        View::Recorded(_) => Some((Location::Steam(View::Recordings), view_name(v))),
+        _ => Some((Location::Steam(View::Root), view_name(v))),
+    }
+}
+
+/// An entry of a Steam folder, opened.
+pub fn join(v: View, name: &str) -> Location {
+    match v {
+        View::Root => Location::Steam(root_child(name).unwrap_or(View::Root)),
+        View::Recordings => {
+            ensure();
+            let c = cache().lock().unwrap();
+            let id = c.lists.get(&View::Recordings).and_then(|l| l.iter().find(|i| i.name == name)).and_then(|i| i.appid);
+            id.map_or(Location::Steam(View::Recordings), |id| Location::Steam(View::Recorded(id)))
+        }
+        _ => Location::Local(resolve(v, name).unwrap_or_default()),
+    }
+}
+
+/// The real file or folder behind an entry (none for what's only Polka's).
+pub fn entry_path(v: View, name: &str) -> Option<PathBuf> {
+    match v {
+        View::Root | View::Recordings => None,
+        _ => resolve(v, name),
     }
 }
 
@@ -530,7 +725,7 @@ pub fn list(v: View) -> std::io::Result<Vec<Entry>> {
         }
     };
     if v == View::Root {
-        return Ok(vec![dir(view_name(View::Games), None), dir(view_name(View::Prefixes), None)]);
+        return Ok(ROOT_VIEWS.iter().map(|v| dir(&view_name(*v), None)).collect());
     }
     let fresh = build();
     let items = fresh.lists.get(&v).cloned().unwrap_or_default();
@@ -538,7 +733,14 @@ pub fn list(v: View) -> std::io::Result<Vec<Entry>> {
     if roots().is_empty() {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Steam"));
     }
-    Ok(items.iter().map(|i| dir(&i.name, Some(&i.path))).collect())
+    Ok(items
+        .iter()
+        .map(|i| match i.size {
+            // A recording: a video to play.
+            Some(size) => Entry { is_dir: false, size, mode: 0o644, ..dir(&i.name, Some(&i.path)) },
+            None => dir(&i.name, (!i.path.as_os_str().is_empty()).then_some(i.path.as_path())),
+        })
+        .collect())
 }
 
 /// The real folder behind an entry.
@@ -550,8 +752,11 @@ pub fn resolve(v: View, name: &str) -> Option<PathBuf> {
 
 /// A sub-folder of the root view by its shown name.
 pub fn root_child(name: &str) -> Option<View> {
-    [View::Games, View::Prefixes].into_iter().find(|v| view_name(*v) == name)
+    ROOT_VIEWS.into_iter().find(|v| view_name(*v) == name)
 }
+
+/// The Steam folder's folders.
+const ROOT_VIEWS: [View; 4] = [View::Games, View::Prefixes, View::Screenshots, View::Recordings];
 
 /// For a game folder or prefix: the Steam folder it's listed in, and its
 /// name there.
@@ -567,6 +772,11 @@ pub fn listed_in(p: &Path) -> Option<(View, String)> {
 pub fn icon(p: &Path) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
     let c = cache().lock().ok()?;
     c.icons.get(p).cloned()
+}
+
+/// Is it a Steam recording (a DASH manifest)?
+pub fn is_recording(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "session.mpd")
 }
 
 /// Locations under a Steam view keep their way back to it.
@@ -600,6 +810,16 @@ mod tests {
             }))
         });
         assert_eq!(seen, vec![("shortcuts/0/appid".to_string(), "7".to_string()), ("shortcuts/0/AppName".to_string(), "Game".to_string())]);
+    }
+
+    #[test]
+    fn recording_names() {
+        let base = Path::new("/u/gamerecordings");
+        let r = parse_rec(&base.join("clips/clip_2277560_20261025_173007/video/bg_2277560_20261025_172900/session.mpd"), base).unwrap();
+        assert_eq!((r.appid, r.when.as_str(), r.clip), (2277560, "2026-10-25 17:30:07", true));
+        let r = parse_rec(&base.join("video/bg_570_20261024_090102/session.mpd"), base).unwrap();
+        assert_eq!((r.appid, r.when.as_str(), r.clip), (570, "2026-10-24 09:01:02", false));
+        assert!(parse_rec(&base.join("video/other/session.mpd"), base).is_none());
     }
 
     #[test]

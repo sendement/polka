@@ -37,7 +37,7 @@ pub fn kind(path: &Path, name: &str) -> Option<Kind> {
     if audio::is_audio(name) {
         return Some(Kind::Audio);
     }
-    if video::is_video(name) {
+    if video::is_video(name) || crate::steam::is_recording(path) {
         return Some(Kind::Video);
     }
     if crate::launch::runs(path) || crate::vfs::is_archive_name(name) {

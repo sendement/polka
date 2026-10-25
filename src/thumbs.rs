@@ -14,7 +14,8 @@ const MAX_QUEUE: usize = 256;
 const MAX_IMAGE_BYTES: u64 = 150 << 20;
 
 const IMAGE_EXT: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "ico", "tif", "tiff", "heic", "heif", "hif", "avif", "jxl"];
-const VIDEO_EXT: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp"];
+// (mpd: Steam's game recordings.)
+const VIDEO_EXT: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp", "mpd"];
 
 #[derive(Clone)]
 enum Slot {

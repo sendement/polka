@@ -232,6 +232,10 @@ impl Icons {
             c.extend(["folder", "inode-directory"]);
             return self.named(&c, size);
         }
+        // A Steam recording goes by a date, not a file name.
+        if path.is_some_and(crate::steam::is_recording) {
+            return self.named(&["video-x-generic", "video"], size);
+        }
         let lower = e.name.to_lowercase();
         if let Some(p) = path {
             if lower.ends_with(".desktop") || lower.ends_with(".exe") || lower.ends_with(".dll") {
