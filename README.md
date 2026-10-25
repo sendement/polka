@@ -259,8 +259,8 @@ tagged items gets a Tags column in the list; the grid shows a dot per tag. Searc
 filter take `#tag` words: `#work report` finds items tagged *work* with *report* in the name;
 □ (or 🔍) on a tag in the Tags dialog looks for it from the current folder down.
 
-**Converting.** △ → Convert… on any files: they're sorted into pictures, sound, video and
-archives; each kind shows its files (thumbnails), then the format they become — archives with the
+**Converting.** △ → Convert… on any files: they're sorted into pictures, sound, video,
+archives and tables; each kind shows its files (thumbnails), then the format they become — archives with the
 archive dialog's own settings (format, method, level, split, password) — and what can't be
 converted is listed last with why. Each kind gets a format of its own — a mix of PNG, JPEG and WebP all become PNG (the
 ones already PNG stay as they are), while the songs picked along with them become MP3. Pictures:
@@ -273,6 +273,15 @@ results go beside the originals. Plain pictures and archives need nothing else; 
 pictures best (HEIC, AVIF, the camera's rotation), libheif's `heif-dec` / `heif-enc` and `avifenc`
 fill in without it; sound and video need ffmpeg. HEIC, AVIF and JPEG XL also open in the viewer and
 get thumbnails.
+
+**Tables.** CSV (any separator: found by itself, or chosen — a preview shows how the first CSV reads
+with it; UTF-8, UTF-16 or Windows-1251), TSV and spreadsheets (xlsx, xlsm, xls, xlsb, ods) convert to
+CSV (with a separator of your choice), XLSX, ODS, TSV, JSON (objects by the header's names),
+Markdown or HTML; plain numbers become numbers in a spreadsheet ("007" stays text), a workbook's
+sheets stay sheets (or become a file each). A simple table — a header row, then data — can be cut
+every 100 … 1 000 000 rows, the header on each part (`name 1.csv`, `name 2.csv`…), and several
+with the same columns (case aside, any order) glued into one (`name (merged).csv`), cut too if
+asked. Nothing extra is needed; xls is read only.
 
 **Phones.** An Android phone (with USB set to *File transfer*) or an iPhone / iPad plugged in
 shows up in the sidebar's Phones section, faded until it's opened; ✕ mounts and opens it, △ →

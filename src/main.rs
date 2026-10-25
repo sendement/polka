@@ -29,6 +29,7 @@ mod openwith;
 mod phones;
 mod phones_ui;
 mod net_ui;
+mod table;
 mod tags;
 mod tags_ui;
 mod steam;

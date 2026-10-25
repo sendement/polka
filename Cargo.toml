@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.40.1"
+version = "0.41.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -32,6 +32,11 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 dirs = "7"
 mime_guess = "2"
+# Tables: spreadsheets read (xlsx, xls, xlsb, ods), xlsx written, CSV.
+calamine = { version = "0.37", features = ["dates"] }
+rust_xlsxwriter = "0.101"
+csv = "1.4"
+encoding_rs = "0.8"
 crossbeam-channel = "0.5"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 md5 = "0.8"

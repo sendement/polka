@@ -5789,3 +5789,92 @@ fn status_screens() {
     assert!(h.query_by_label("2").is_some(), "the folders went first");
     assert!(h.query_by_label("3").is_none(), "nothing gave way");
 }
+
+/// Tables: two CSVs (a semicolon one, a comma one, its columns in another
+/// order and case) and a workbook, previewed, glued into one and cut into
+/// parts; a CSV into a workbook, numbers as numbers.
+#[test]
+#[ignore]
+fn tables_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::convert::Target;
+    use crate::table::{Delim, Format};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("tables");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.csv"), "Name;Age;City\nАнна;30;Москва\nBob;41;\"Paris; France\"\nCid;007;Oslo\n").unwrap();
+    std::fs::write(dir.join("b.csv"), "city,NAME,age\nRome,Dan,25\nKyiv,Eve,33\n").unwrap();
+    {
+        let mut wb = rust_xlsxwriter::Workbook::new();
+        let ws = wb.add_worksheet();
+        for (c, h) in ["name", "Age", "CITY"].iter().enumerate() {
+            ws.write_string(0, c as u16, *h).unwrap();
+        }
+        ws.write_string(1, 0, "Fay").unwrap();
+        ws.write_number(1, 1, 52).unwrap();
+        ws.write_string(1, 2, "Riga").unwrap();
+        wb.save(dir.join("c.xlsx")).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    settle(&mut h);
+    for n in ["a.csv", "b.csv", "c.xlsx"] {
+        h.state_mut().pane_mut().selected.insert(n.to_string());
+    }
+    h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!("no dialog") };
+        assert_eq!(d.found, Some(Delim::Semicolon));
+        assert_eq!(d.preview.as_ref().unwrap()[2], vec!["Bob", "41", "Paris; France"]);
+        assert!(d.mergeable.is_ok(), "{:?}", d.mergeable);
+        assert_eq!(d.groups[0].target(), Target::Table(Format::Xlsx));
+    }
+    shot(&mut h, "tb0-dialog");
+    // The separator chosen by hand: the preview reads with it.
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.row = crate::convert_ui::CRow::DelimIn;
+    }
+    press(&mut h, &[Action::Right]);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert_eq!(d.table.delim_in, Delim::Comma);
+        assert_eq!(d.preview.as_ref().unwrap()[0], vec!["Name;Age;City"]);
+    }
+    shot(&mut h, "tb1-comma");
+    // Back to automatic; glued, cut every 2 rows, as CSV with semicolons.
+    press(&mut h, &[Action::Left]);
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Csv)).unwrap();
+        d.table.merge = true;
+        d.table.split = Some(2);
+        d.table.delim_out = Delim::Semicolon;
+    }
+    settle(&mut h);
+    shot(&mut h, "tb2-glue");
+    h.state_mut().convert_start();
+    wait_jobs(&mut h);
+    let merged = crate::i18n::tr("merged");
+    let parts: Vec<String> = (1..=3).map(|k| std::fs::read_to_string(dir.join(format!("a ({merged}) {k}.csv"))).unwrap_or_else(|e| panic!("part {k}: {e}"))).collect();
+    assert_eq!(parts[0], "Name;Age;City\nАнна;30;Москва\nBob;41;\"Paris; France\"\n");
+    assert_eq!(parts[1], "Name;Age;City\nCid;007;Oslo\nDan;25;Rome\n");
+    assert_eq!(parts[2], "Name;Age;City\nEve;33;Kyiv\nFay;52;Riga\n");
+    // A CSV into a workbook: numbers as numbers, "007" as it is.
+    h.state_mut().pane_mut().selected.clear();
+    settle(&mut h);
+    h.state_mut().pane_mut().selected.insert("a.csv".to_string());
+    h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
+    // (The last choice, CSV, is kept for tables.)
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        assert_eq!(d.groups[0].target(), Target::Table(Format::Csv));
+        d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Xlsx)).unwrap();
+    }
+    h.state_mut().convert_start();
+    wait_jobs(&mut h);
+    let back = crate::table::read(&dir.join("a.xlsx"), Delim::Auto).unwrap();
+    use crate::table::Cell;
+    assert_eq!(back[0].rows[1], vec![Cell::Text("Анна".into()), Cell::Num(30.0), Cell::Text("Москва".into())]);
+    assert_eq!(back[0].rows[3][1], Cell::Text("007".into()));
+}

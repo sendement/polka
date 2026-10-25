@@ -1,6 +1,6 @@
 //! Converting files in bulk: pictures (iPhone's HEIC too), sound, video
-//! (also to sound) and archives (repacked, multi-volume sets as one;
-//! password-protected ones aren't touched). Whatever the system has does
+//! (also to sound), archives (repacked, multi-volume sets as one;
+//! password-protected ones aren't touched) and tables (see table.rs). Whatever the system has does
 //! the work: ImageMagick, ffmpeg, libheif's tools, 7-Zip; plain pictures
 //! and archives need nothing but Polka.
 
@@ -18,9 +18,10 @@ pub enum Group {
     Audio,
     Video,
     Archive,
+    Table,
 }
 
-pub const GROUPS: [Group; 4] = [Group::Image, Group::Audio, Group::Video, Group::Archive];
+pub const GROUPS: [Group; 5] = [Group::Image, Group::Audio, Group::Video, Group::Archive, Group::Table];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -43,6 +44,7 @@ pub enum Target {
     Webm,
     Mov,
     Archive(ArchiveFormat),
+    Table(crate::table::Format),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -77,6 +79,8 @@ pub fn group_of(name: &str) -> Option<Group> {
         Some(Group::Audio)
     } else if crate::viewer::video::EXTS.contains(&e.as_str()) {
         Some(Group::Video)
+    } else if crate::table::is_table(name) {
+        Some(Group::Table)
     } else if crate::vfs::is_archive_name(name) || crate::volumes::parse(name).is_some() {
         Some(Group::Archive)
     } else {
@@ -112,6 +116,7 @@ impl Target {
                 ArchiveFormat::TarGz => "tar.gz",
                 ArchiveFormat::TarXz => "tar.xz",
             },
+            Target::Table(f) => f.label(),
         }
     }
 
@@ -136,6 +141,7 @@ impl Target {
             Target::Webm => ".webm",
             Target::Mov => ".mov",
             Target::Archive(f) => f.ext(),
+            Target::Table(f) => f.ext(),
         }
     }
 
@@ -152,6 +158,8 @@ impl Target {
             Target::Tiff => matches!(e.as_str(), "tif" | "tiff"),
             Target::Heic => matches!(e.as_str(), "heic" | "heif" | "hif"),
             Target::Archive(_) => name.to_lowercase().ends_with(self.ext()),
+            // (A CSV may be wanted with another separator.)
+            Target::Table(crate::table::Format::Csv) => false,
             _ => format!(".{e}") == self.ext(),
         }
     }
@@ -215,6 +223,7 @@ pub fn targets(g: Group) -> Vec<Target> {
             v.extend([Target::Archive(ArchiveFormat::TarZst), Target::Archive(ArchiveFormat::TarGz), Target::Archive(ArchiveFormat::TarXz)]);
             v
         }
+        Group::Table => crate::table::FORMATS.iter().map(|f| Target::Table(*f)).collect(),
         _ => Vec::new(),
     }
 }
@@ -281,11 +290,25 @@ pub fn needless(src: &Path, target: Target) -> bool {
 
 /// Convert them, one by one. The originals that worked go to the trash if
 /// asked to.
-pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts, job: &Job) -> std::io::Result<()> {
+pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts, table_opts: &crate::table::Opts, job: &Job) -> std::io::Result<()> {
     job.items.store(true, Ordering::Relaxed);
     job.total.store(items.len() as u64, Ordering::Relaxed);
     let mut failed: Vec<String> = Vec::new();
     let mut done: Vec<PathBuf> = Vec::new();
+    // Tables go together (they may be glued into one).
+    let (tables, items): (Vec<&Item>, Vec<&Item>) = items.iter().partition(|i| matches!(i.target, Target::Table(_)));
+    if let Some(Target::Table(f)) = tables.first().map(|i| i.target) {
+        let paths: Vec<PathBuf> = tables.iter().map(|i| i.src.clone()).collect();
+        match crate::table::convert(&paths, f, table_opts, job) {
+            Ok(_) => done.extend(paths),
+            Err(e) if job.cancel.load(Ordering::Relaxed) => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, e)),
+            Err(e) => {
+                crate::log::line(format!("converting tables: {e}"));
+                failed.push(e);
+            }
+        }
+        job.done.fetch_add(tables.len() as u64, Ordering::Relaxed);
+    }
     for it in items {
         if job.cancel.load(Ordering::Relaxed) {
             return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
@@ -296,7 +319,7 @@ pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts,
             Some(Group::Image) => image(&it.src, &out, it.target, it.quality),
             Some(Group::Audio) | Some(Group::Video) => media(&it.src, &out, it.target, it.quality, job),
             Some(Group::Archive) => archive(&it.src, &out, it.target, archive_opts),
-            None => Err("not convertible".into()),
+            Some(Group::Table) | None => Err("not convertible".into()),
         };
         match r {
             Ok(()) => done.push(it.src.clone()),
