@@ -774,6 +774,17 @@ pub fn icon(p: &Path) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
     c.icons.get(p).cloned()
 }
 
+/// A recording's name for a file of its own: the game's and its own
+/// ("Portal 2026-10-25 17-30-07").
+pub fn recording_title(mpd: &Path) -> Option<String> {
+    ensure();
+    let c = cache().lock().ok()?;
+    let (view, item) = c.lists.iter().find_map(|(v, l)| matches!(v, View::Recorded(_)).then(|| l.iter().find(|i| i.path == mpd).map(|i| (*v, i)))?)?;
+    let View::Recorded(id) = view else { return None };
+    let game = c.lists.get(&View::Recordings)?.iter().find(|i| i.appid == Some(id))?.name.clone();
+    Some(format!("{game} {}", item.name).replace(':', "-"))
+}
+
 /// Is it a Steam recording (a DASH manifest)?
 pub fn is_recording(path: &Path) -> bool {
     path.file_name().is_some_and(|n| n == "session.mpd")

@@ -131,7 +131,8 @@ their games' names — non-Steam shortcuts and uninstalled games included. **Scr
 games with screenshots, each opening its real folder (`userdata/<id>/760/remote/<appid>/screenshots`);
 **Recordings** lists the games with Steam game recordings, then each one's (background recordings
 and clips, by date, newest first), played in Polka's video player (they're DASH videos: a
-`session.mpd` and its chunks). Going up from a game's folder or prefix comes back to the list.
+`session.mpd` and its chunks); △ → Convert… makes ordinary videos of them in Videos/Steam, named
+after the game and time (MP4 and MOV as they are, quick and lossless). Going up from a game's folder or prefix comes back to the list.
 
 △ → "Add to Steam" on a Windows program (`.exe`, `.bat`, `.msi`) or a `.desktop` launcher puts it in
 the library as a non-Steam game, with its icon (the exe's own, or the launcher's theme icon) and,

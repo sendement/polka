@@ -66,6 +66,10 @@ fn ext(name: &str) -> String {
 
 /// What kind of file it is, for converting.
 pub fn group_of(name: &str) -> Option<Group> {
+    // A Steam game recording.
+    if name == "session.mpd" || name.ends_with("/session.mpd") {
+        return Some(Group::Video);
+    }
     let e = ext(name);
     if IMAGE_OWN.contains(&e.as_str()) || IMAGE_TOOL.contains(&e.as_str()) {
         Some(Group::Image)
@@ -237,8 +241,15 @@ pub struct Item {
     pub quality: Quality,
 }
 
-/// Where the converted file goes: beside it, named after it.
+/// Where the converted file goes: beside it, named after it (a Steam
+/// recording: into Videos/Steam, named after its game and time).
 pub fn out_path(src: &Path, target: Target) -> PathBuf {
+    if crate::steam::is_recording(src) {
+        let dir = dirs::video_dir().or_else(|| dirs::home_dir().map(|h| h.join("Videos"))).unwrap_or_else(|| PathBuf::from("/tmp")).join("Steam");
+        let _ = std::fs::create_dir_all(&dir);
+        let stem = crate::steam::recording_title(src).unwrap_or_else(|| "Steam".into());
+        return crate::ops::unique_path(&dir, &format!("{stem}{}", target.ext()));
+    }
     let dir = src.parent().unwrap_or(Path::new("/"));
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let stem = if group_of(&name) == Some(Group::Archive) {
@@ -301,6 +312,8 @@ pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts,
         }
         job.done.fetch_add(1, Ordering::Relaxed);
     }
+    // (Steam's recordings stay: Steam keeps track of them.)
+    done.retain(|p| !crate::steam::is_recording(p));
     if trash && !done.is_empty() {
         // A set goes whole.
         let all: Vec<PathBuf> = done.iter().flat_map(|p| crate::volumes::set_of(p).map(|s| s.files).unwrap_or_else(|| vec![p.clone()])).collect();
@@ -464,6 +477,15 @@ pub fn decode(src: &Path) -> Result<image::DynamicImage, String> {
 // ---------------------------------------------------------------- sound and video
 
 fn media(src: &Path, out: &Path, t: Target, q: Quality, job: &Job) -> Result<(), String> {
+    // A Steam recording is H.264 (or HEVC, AV1) and AAC already: into an
+    // MP4 or MOV as it is, quick and lossless; encoded only if that fails.
+    if crate::steam::is_recording(src) && matches!(t, Target::Mp4 | Target::Mov) {
+        let mut c = tool("ffmpeg");
+        c.args(["-nostdin", "-v", "error", "-y", "-i"]).arg(arg(src)).args(["-map", "0:v:0?", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart"]).arg(arg(out));
+        if run_tool(c).is_ok() {
+            return Ok(());
+        }
+    }
     let pick = |h: &'static str, b: &'static str, s: &'static str| match q {
         Quality::High => h,
         Quality::Balanced => b,

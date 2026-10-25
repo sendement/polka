@@ -92,9 +92,17 @@ impl ConvertDlg {
                 v.push(CRow::Quality(i));
             }
         }
-        v.push(CRow::Trash);
+        if self.can_trash() {
+            v.push(CRow::Trash);
+        }
         v.push(CRow::Buttons);
         v
+    }
+
+    /// Anything whose original could go to the trash (Steam's recordings
+    /// never do).
+    pub fn can_trash(&self) -> bool {
+        self.groups.iter().flat_map(|g| &g.items).any(|p| !crate::steam::is_recording(p))
     }
 
     fn move_row(&mut self, d: isize) {
@@ -335,7 +343,8 @@ fn tiles(ui: &mut Ui, items: &[(&Path, Option<&str>)], icons: &mut crate::icons:
         // A multi-volume set by its whole name.
         let name = match crate::volumes::set_of(path) {
             Some(set) => format!("{} ({})", set.archive, crate::i18n::volumes(set.files.len())),
-            None => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            // A Steam recording by its game and time.
+            None => crate::steam::recording_title(path).unwrap_or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
         };
         let meta = std::fs::metadata(path).ok();
         let mtime = meta.as_ref().map(|m| std::os::unix::fs::MetadataExt::mtime(m));
@@ -507,15 +516,17 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
             }
             ui.add_space(8.0);
         }
-        let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Trash, ("conv", "trash"));
-        if r.clicked() {
-            ev = Some((CRow::Trash, 0));
-        }
-        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Move the originals to the trash"), font.clone(), v.text_color());
-        let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-        ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-        if d.trash {
-            ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+        if d.can_trash() {
+            let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Trash, ("conv", "trash"));
+            if r.clicked() {
+                ev = Some((CRow::Trash, 0));
+            }
+            ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Move the originals to the trash"), font.clone(), v.text_color());
+            let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+            ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+            if d.trash {
+                ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+            }
         }
         ui.add_space(8.0);
         // What can't be converted, and why.

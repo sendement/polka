@@ -2805,7 +2805,8 @@ fn steam(h: &mut Harness<'static, App>) {
     press(h, &[Action::Back, Action::Back]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Prefixes));
     // Screenshots by game: the real folder.
-    press(h, &[Action::Back, Action::Down, Action::Accept]);
+    press(h, &[Action::Back]);
+    press(h, &[Action::Down, Action::Accept]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Screenshots));
     assert_eq!(names(h), vec!["Half-Life 2"]);
     press(h, &[Action::Accept]);
@@ -2816,7 +2817,8 @@ fn steam(h: &mut Harness<'static, App>) {
     press(h, &[Action::Back]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Screenshots));
     // Recordings by game, then each one, newest first; one plays.
-    press(h, &[Action::Back, Action::Down, Action::Accept]);
+    press(h, &[Action::Back]);
+    press(h, &[Action::Down, Action::Accept]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Recordings));
     assert_eq!(names(h), vec!["Counter-Strike"]);
     press(h, &[Action::Accept]);
@@ -2834,6 +2836,32 @@ fn steam(h: &mut Harness<'static, App>) {
     }
     shot(h, "s6-recording-plays");
     press(h, &[Action::Back]);
+    // △ → Convert…: into Videos/Steam, by game and time, as it is (MP4).
+    assert_eq!(h.state().pane().loc, Location::Steam(View::Recorded(10)));
+    let videos = dir.join("videos");
+    let _ = std::fs::remove_dir_all(&videos);
+    let cfg_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap();
+    std::fs::write(cfg_home.join("user-dirs.dirs"), format!("XDG_VIDEOS_DIR=\"{}\"\n", videos.display())).unwrap();
+    press(h, &[Action::Actions]);
+    let labels: Vec<(String, bool)> = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| (i.label.clone(), i.enabled)).collect(),
+        _ => Vec::new(),
+    };
+    assert!(labels.iter().any(|(l, on)| l == tr("Convert…") && *on), "no Convert…: {labels:?}");
+    h.state_mut().overlay = None;
+    h.state_mut().run(crate::app::Cmd::ConvertAsk);
+    settle(h);
+    shot(h, "s7-recording-convert");
+    match &h.state().overlay {
+        Some(crate::app::Overlay::Convert(d)) => assert_eq!(d.groups[0].target(), crate::convert::Target::Mp4),
+        _ => panic!("no convert dialog"),
+    }
+    h.state_mut().convert_start();
+    wait_jobs(h);
+    let out = videos.join(format!("Steam/Counter-Strike 2026-10-25 17-30-07 · {}.mp4", tr("Clip")));
+    let probe = std::process::Command::new("ffprobe").args(["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]).arg(&out).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "h264", "{}", out.display());
+    let _ = std::fs::remove_file(cfg_home.join("user-dirs.dirs"));
     press(h, &[Action::Back]);
     assert_eq!(h.state().pane().loc, Location::Steam(View::Recordings));
     unsafe { std::env::remove_var("POLKA_STEAM_ROOT") };

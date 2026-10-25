@@ -3226,8 +3226,10 @@ impl App {
         add(tr("Rename"), Cmd::Rename, single && editable);
         add(tr("Open with…"), Cmd::OpenExternal, local && targets.iter().any(|e| !e.is_dir));
         add(tr("Tags…"), Cmd::TagsAsk, any && local);
-        let convertible = targets.iter().any(|e| !e.is_dir && crate::convert::group_of(&e.name).is_some());
-        add(tr("Convert…"), Cmd::ConvertAsk, convertible && local);
+        // (A Steam recording goes by its time, not its file's name.)
+        let recording = |e: &Entry| p.entry_path(e).is_some_and(|x| crate::steam::is_recording(&x));
+        let convertible = targets.iter().any(|e| !e.is_dir && (crate::convert::group_of(&e.name).is_some() || recording(e)));
+        add(tr("Convert…"), Cmd::ConvertAsk, convertible && (local || targets.iter().all(recording)));
         if local {
             add(tr("Move to trash"), Cmd::TrashAsk, any);
         }
