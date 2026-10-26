@@ -314,7 +314,6 @@ pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts,
                 failed.push(e);
             }
         }
-        job.done.fetch_add(tables.len() as u64, Ordering::Relaxed);
     }
     for it in items {
         if job.cancel.load(Ordering::Relaxed) {

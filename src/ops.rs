@@ -203,6 +203,14 @@ impl Job {
         }
     }
 
+    /// Note what's being done now, in words.
+    pub fn now_doing(&self, what: &str) {
+        if let Ok(mut c) = self.current.try_lock() {
+            c.clear();
+            c.push_str(what);
+        }
+    }
+
     pub fn fraction(&self) -> f32 {
         let t = self.total.load(Ordering::Relaxed);
         if t == 0 { 0.0 } else { (self.done.load(Ordering::Relaxed) as f64 / t as f64).min(1.0) as f32 }

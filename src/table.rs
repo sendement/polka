@@ -765,17 +765,20 @@ fn cut(s: Sheet, n: usize) -> Vec<Sheet> {
 /// Convert tables: each by itself, or glued into one; cut if asked. The
 /// files written, next to the (first) original.
 pub fn convert(paths: &[PathBuf], f: Format, o: &Opts, job: &crate::ops::Job) -> Result<Vec<PathBuf>, String> {
+    use std::sync::atomic::Ordering;
     let mut written = Vec::new();
     // What goes into one output: (folder, name stem, sheets).
     let mut outputs: Vec<(PathBuf, String, Vec<Sheet>)> = Vec::new();
     let stem_of = |p: &Path| crate::ops::split_ext(&p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).0.to_string();
     let dir_of = |p: &Path| p.parent().unwrap_or(Path::new("/")).to_path_buf();
+    // Each table read is a step of the progress (the job counts them)…
     if o.merge && paths.len() > 1 {
         let mut firsts = Vec::new();
         for p in paths {
             job.now_on(p);
             let sheets = read(p, o.delim_in)?;
             firsts.push(sheets.into_iter().next().ok_or("empty")?);
+            job.done.fetch_add(1, Ordering::Relaxed);
         }
         let mut glued = glue(firsts)?;
         // (Columns in the first table's order: as the preview had them.)
@@ -791,40 +794,47 @@ pub fn convert(paths: &[PathBuf], f: Format, o: &Opts, job: &crate::ops::Job) ->
                 sheets.iter_mut().for_each(|s| shape(s, &o.cols));
             }
             outputs.push((dir_of(p), stem_of(p), sheets));
+            job.done.fetch_add(1, Ordering::Relaxed);
         }
     }
+    // Cut: a file per part (each sheet's parts, in a workbook too).
+    let mut files: Vec<(PathBuf, String, Vec<Sheet>)> = Vec::new();
     for (dir, stem, sheets) in outputs {
-        if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        let several_sheets = sheets.len() > 1;
+        if f.workbook() && o.split.is_none() {
+            files.push((dir, stem, sheets));
+            continue;
+        }
+        for s in sheets {
+            let sheet_tag = if several_sheets { format!(" - {}", s.name.replace('/', "∕")) } else { String::new() };
+            let parts = match o.split {
+                Some(n) => cut(s, n),
+                None => vec![s],
+            };
+            let many = parts.len() > 1;
+            let total = parts.len();
+            for (k, part) in parts.into_iter().enumerate() {
+                let tag = if many { o.numbering.tag(k + 1, total) } else { String::new() };
+                files.push((dir.clone(), format!("{stem}{sheet_tag}{tag}"), vec![part]));
+            }
+        }
+    }
+    // …and each file written another: "a 03.csv · 3 / 12".
+    job.total.fetch_add(files.len() as u64, Ordering::Relaxed);
+    let n = files.len();
+    for (k, (dir, name, sheets)) in files.into_iter().enumerate() {
+        if job.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        // Cut: a file per part (each sheet's parts, in a workbook too).
-        let several_sheets = sheets.len() > 1;
-        let mut files: Vec<(String, Vec<Sheet>)> = Vec::new();
-        if f.workbook() && o.split.is_none() {
-            files.push((stem.clone(), sheets));
-        } else {
-            for s in sheets {
-                let sheet_tag = if several_sheets { format!(" - {}", s.name.replace('/', "∕")) } else { String::new() };
-                let parts = match o.split {
-                    Some(n) => cut(s, n),
-                    None => vec![s],
-                };
-                let many = parts.len() > 1;
-                let total = parts.len();
-                for (k, part) in parts.into_iter().enumerate() {
-                    let tag = if many { o.numbering.tag(k + 1, total) } else { String::new() };
-                    files.push((format!("{stem}{sheet_tag}{tag}"), vec![part]));
-                }
-            }
+        let out = crate::ops::unique_path(&dir, &format!("{name}{}", f.ext()));
+        let shown = out.file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+        job.now_doing(&if n > 1 { format!("{shown} · {} / {n}", k + 1) } else { shown });
+        if let Err(e) = write(&out, &sheets, f, o.delim_out) {
+            let _ = std::fs::remove_file(&out);
+            return Err(e);
         }
-        for (name, sheets) in files {
-            let out = crate::ops::unique_path(&dir, &format!("{name}{}", f.ext()));
-            if let Err(e) = write(&out, &sheets, f, o.delim_out) {
-                let _ = std::fs::remove_file(&out);
-                return Err(e);
-            }
-            written.push(out);
-        }
+        written.push(out);
+        job.done.fetch_add(1, Ordering::Relaxed);
     }
     Ok(written)
 }
@@ -875,6 +885,24 @@ mod tests {
         assert_eq!(s.rows[1], vec![Cell::Plain("007".into()), Cell::Num(1000.5), Cell::Date(day(2024, 3, 1))]);
         assert_eq!(s.rows[2][1], t("x"));
         assert!(!ColType::Number.fits(&t("x")) && ColType::Number.fits(&Cell::Empty));
+    }
+
+    #[test]
+    fn progress_counts_parts() {
+        let dir = std::env::temp_dir().join(format!("polka-table-progress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("t.csv"), "A,B\n1,2\n3,4\n5,6\n7,8\n9,10\n").unwrap();
+        let job = crate::ops::Job::detached();
+        // (The job counts the table to read; parts come on top.)
+        job.total.store(1, std::sync::atomic::Ordering::Relaxed);
+        let o = Opts { split: Some(2), ..Default::default() };
+        let out = convert(&[dir.join("t.csv")], Format::Csv, &o, &job).unwrap();
+        assert_eq!(out.len(), 3);
+        let (done, total) = (job.done.load(std::sync::atomic::Ordering::Relaxed), job.total.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!((done, total), (4, 4));
+        assert_eq!(*job.current.lock().unwrap(), "t 3.csv · 3 / 3");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
