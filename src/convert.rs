@@ -248,6 +248,8 @@ pub struct Item {
     pub target: Target,
     /// Its kind's own quality (for the lossy formats).
     pub quality: Quality,
+    /// A table's group (they convert together, with that group's settings).
+    pub batch: usize,
 }
 
 /// Where the converted file goes: beside it, named after it (a Steam
@@ -290,16 +292,21 @@ pub fn needless(src: &Path, target: Target) -> bool {
 
 /// Convert them, one by one. The originals that worked go to the trash if
 /// asked to.
-pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts, table_opts: &crate::table::Opts, job: &Job) -> std::io::Result<()> {
+pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts, table_opts: &[crate::table::Opts], job: &Job) -> std::io::Result<()> {
     job.items.store(true, Ordering::Relaxed);
     job.total.store(items.len() as u64, Ordering::Relaxed);
     let mut failed: Vec<String> = Vec::new();
     let mut done: Vec<PathBuf> = Vec::new();
-    // Tables go together (they may be glued into one).
+    // Tables go a group at a time (they may be glued into one).
     let (tables, items): (Vec<&Item>, Vec<&Item>) = items.iter().partition(|i| matches!(i.target, Target::Table(_)));
-    if let Some(Target::Table(f)) = tables.first().map(|i| i.target) {
+    for (b, opts) in table_opts.iter().enumerate() {
+        let tables: Vec<&&Item> = tables.iter().filter(|i| i.batch == b).collect();
+        let Some(Target::Table(f)) = tables.first().map(|i| i.target) else { continue };
+        if job.cancel.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+        }
         let paths: Vec<PathBuf> = tables.iter().map(|i| i.src.clone()).collect();
-        match crate::table::convert(&paths, f, table_opts, job) {
+        match crate::table::convert(&paths, f, opts, job) {
             Ok(_) => done.extend(paths),
             Err(e) if job.cancel.load(Ordering::Relaxed) => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, e)),
             Err(e) => {

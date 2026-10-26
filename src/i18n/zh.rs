@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "第 %n 部分"),
     ("%n of %t", "%n / %t"),
     ("Numbering", "编号方式"),
+    ("Looking at the files…", "正在查看文件…"),
+    ("Please wait…", "请稍候…"),
     ("Columns: %n", "列数：%n"),
     ("merged", "合并"),
     ("Whole lines", "整行"),

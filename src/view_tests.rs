@@ -53,6 +53,26 @@ fn settle(h: &mut Harness<'static, App>) {
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(40));
     }
+    // The Convert dialog looks at its files on another thread.
+    for _ in 0..200 {
+        match &h.state().overlay {
+            Some(crate::app::Overlay::Convert(d)) if d.busy() => {
+                h.step();
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => break,
+        }
+    }
+    h.step();
+}
+
+/// A group of tables' settings in the Convert dialog (the first group).
+fn tb(d: &crate::convert_ui::ConvertDlg) -> &crate::convert_ui::TableSide {
+    d.groups.iter().find_map(|g| g.table.as_ref()).expect("tables")
+}
+
+fn tbm(d: &mut crate::convert_ui::ConvertDlg) -> &mut crate::convert_ui::TableSide {
+    d.groups.iter_mut().find_map(|g| g.table.as_mut()).expect("tables")
 }
 
 fn press(h: &mut Harness<'static, App>, actions: &[Action]) {
@@ -5081,6 +5101,7 @@ fn convert_screens() {
     h.state_mut().cfg = cfg;
     h.state_mut().run(Cmd::SelectAll);
     h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
     let groups = |h: &Harness<'static, App>| match &h.state().overlay {
         Some(Overlay::Convert(d)) => d.groups.iter().map(|g| (g.group, g.items.len())).collect::<Vec<_>>(),
         _ => panic!("no dialog"),
@@ -5166,6 +5187,7 @@ fn convert_screens() {
     let i = h.state().pane().entries.iter().position(|e| e.name == "plain.zip").unwrap();
     h.state_mut().pane_mut().cursor = i;
     h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         d.arch.format = crate::ops::ArchiveFormat::Zip;
         d.row = crate::convert_ui::CRow::Password;
@@ -5186,6 +5208,7 @@ fn convert_screens() {
     let i = h.state().pane().entries.iter().position(|e| e.name == "clip.mov").unwrap();
     h.state_mut().pane_mut().cursor = i;
     h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
     pick(&mut h, Group::Video, Target::Mp4);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         d.groups[0].quality = crate::convert::Quality::Small;
@@ -5204,6 +5227,7 @@ fn convert_screens() {
     let i = h.state().pane().entries.iter().position(|e| e.name == "IMG_0001.HEIC").unwrap();
     h.state_mut().pane_mut().cursor = i;
     h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
     pick(&mut h, Group::Image, Target::Jpg);
     press(&mut h, &[Action::Menu]);
     wait_jobs(&mut h);
@@ -5805,6 +5829,8 @@ fn tables_screens() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.csv"), "Name;Age;City\nАнна;30;Москва\nBob;41;\"Paris; France\"\nCid;007;Oslo\n").unwrap();
     std::fs::write(dir.join("b.csv"), "city,NAME,age\nRome,Dan,25\nKyiv,Eve,33\n").unwrap();
+    std::fs::write(dir.join("e.csv"), "1;2\n3;4\n5;6\n").unwrap();
+    std::fs::write(dir.join("f.csv"), "7;8\n").unwrap();
     std::fs::write(dir.join("d.csv"), "Id;Sum;When;Note\n007;1 000,5;01.03.2024;ok\n012;12,25;15.04.2024 10:30;x\n3;oops;never;\n").unwrap();
     {
         let mut wb = rust_xlsxwriter::Workbook::new();
@@ -5827,31 +5853,31 @@ fn tables_screens() {
     settle(&mut h);
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!("no dialog") };
-        assert_eq!(d.found, Some(Delim::Semicolon));
-        assert_eq!(d.preview.as_ref().unwrap().rows[2].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Bob", "41", "Paris; France"]);
-        assert!(d.mergeable.is_ok(), "{:?}", d.mergeable);
+        assert_eq!(tb(d).found, Some(Delim::Semicolon));
+        assert_eq!(tb(d).preview.as_ref().unwrap().rows[2].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Bob", "41", "Paris; France"]);
+        assert!(tb(d).mergeable.is_ok(), "{:?}", tb(d).mergeable);
         assert_eq!(d.groups[0].target(), Target::Table(Format::Xlsx));
     }
     shot(&mut h, "tb0-dialog");
     // The separator chosen by hand: the preview reads with it.
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
-        d.row = crate::convert_ui::CRow::DelimIn;
+        d.row = crate::convert_ui::CRow::DelimIn(0);
     }
     press(&mut h, &[Action::Right]);
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
-        assert_eq!(d.table.delim_in, Delim::Comma);
-        assert_eq!(d.preview.as_ref().unwrap().rows[0].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Name;Age;City"]);
+        assert_eq!(tb(d).opts.delim_in, Delim::Comma);
+        assert_eq!(tb(d).preview.as_ref().unwrap().rows[0].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Name;Age;City"]);
     }
     shot(&mut h, "tb1-comma");
     // Back to automatic; glued, cut every 2 rows, as CSV with semicolons.
     press(&mut h, &[Action::Left]);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Csv)).unwrap();
-        d.table.merge = true;
-        d.table.split = Some(2);
-        d.table.delim_out = Delim::Semicolon;
-        d.table.numbering = crate::table::Numbering::Underscore;
+        tbm(d).opts.merge = true;
+        tbm(d).opts.split = Some(2);
+        tbm(d).opts.delim_out = Delim::Semicolon;
+        tbm(d).opts.numbering = crate::table::Numbering::Underscore;
     }
     settle(&mut h);
     shot(&mut h, "tb2-glue");
@@ -5889,21 +5915,21 @@ fn tables_screens() {
     use crate::convert_ui::CRow;
     use crate::table::ColType;
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
-        assert_eq!(d.table.cols, vec![ColType::Auto; 4]);
+        assert_eq!(tb(d).opts.cols, vec![ColType::Auto; 4]);
         // (The numbering kept from last time.)
-        assert_eq!(d.table.numbering, crate::table::Numbering::Underscore);
+        assert_eq!(tb(d).opts.numbering, crate::table::Numbering::Underscore);
         d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Xlsx)).unwrap();
         // The columns folded at first.
-        assert!(!d.rows().contains(&CRow::Col(0)));
-        d.row = CRow::ColsAll;
+        assert!(!d.rows().contains(&CRow::Col(0, 0)));
+        d.row = CRow::ColsAll(0);
     }
     shot(&mut h, "tb3-folded");
     // Unfolded; Id → Text; ↓ Sum → Number; ↓ When → Date.
     press(&mut h, &[Action::Accept, Action::Down, Action::Right, Action::Down, Action::Right, Action::Right, Action::Down, Action::Right, Action::Right, Action::Right]);
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
-        assert_eq!(d.table.cols, vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto]);
-        assert_eq!(d.row, CRow::Col(2));
+        assert_eq!(tb(d).opts.cols, vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto]);
+        assert_eq!(d.row, CRow::Col(0, 2));
     }
     shot(&mut h, "tb4-columns");
     h.state_mut().convert_start();
@@ -5920,7 +5946,7 @@ fn tables_screens() {
     settle(&mut h);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Ods)).unwrap();
-        d.table.cols = vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto];
+        tbm(d).opts.cols = vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto];
     }
     h.state_mut().convert_start();
     wait_jobs(&mut h);
@@ -5928,26 +5954,71 @@ fn tables_screens() {
     assert_eq!(back[0].rows[1][1], Cell::Num(1000.5));
     assert!(matches!(back[0].rows[1][2], Cell::Date(_)), "{:?}", back[0].rows[1][2]);
     assert_eq!(back[0].rows[1][0], Cell::Text("007".into()));
-    // Tables with other columns: gluing out of reach, cutting still there,
-    // folded columns telling what was set.
-    for n in ["a.csv", "d.csv"] {
+    // Tables with other columns: a group each, with its own settings and
+    // preview.
+    for n in ["a.csv", "d.csv", "b.csv"] {
+        h.state_mut().pane_mut().selected.insert(n.to_string());
+    }
+    h.state_mut().run(Cmd::ConvertAsk);
+    // (At first, still looking: Convert waits.)
+    match &h.state().overlay {
+        Some(Overlay::Convert(d)) => assert!(d.busy()),
+        _ => panic!("no dialog at once"),
+    }
+    h.state_mut().convert_start();
+    assert!(matches!(h.state().overlay, Some(Overlay::Convert(_))), "started while looking");
+    settle(&mut h);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert!(!d.busy());
+        let sets: Vec<Vec<String>> = d.groups.iter().map(|g| g.items.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect()).collect();
+        assert_eq!(sets, vec![vec!["a.csv".to_string(), "b.csv".to_string()], vec!["d.csv".to_string()]]);
+        assert_eq!(d.groups[1].table.as_ref().unwrap().header, Some(vec!["Id".to_string(), "Sum".into(), "When".into(), "Note".into()]));
+        let rows = d.rows();
+        assert!(rows.contains(&CRow::Merge(0)) && !rows.contains(&CRow::Merge(1)) && rows.contains(&CRow::ColsAll(1)));
+    }
+    shot(&mut h, "tb5-groups-top");
+    // The second group's own separator: the first one's stays.
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.row = CRow::DelimIn(1);
+    }
+    press(&mut h, &[Action::Right]);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert_eq!(d.groups[0].table.as_ref().unwrap().opts.delim_in, Delim::Auto);
+        assert_eq!(d.groups[1].table.as_ref().unwrap().opts.delim_in, Delim::Comma);
+    }
+    shot(&mut h, "tb5-two-groups");
+    // Tables without a header row: together, never glued, cut all the same.
+    h.state_mut().overlay = None;
+    h.state_mut().pane_mut().selected.clear();
+    for n in ["e.csv", "f.csv"] {
         h.state_mut().pane_mut().selected.insert(n.to_string());
     }
     h.state_mut().run(Cmd::ConvertAsk);
     settle(&mut h);
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
-        assert!(d.mergeable.is_err());
+        assert_eq!(d.groups.len(), 1);
+        assert!(tb(d).mergeable.is_err() && tb(d).header.is_none());
         let rows = d.rows();
-        assert!(!rows.contains(&CRow::Merge) && rows.contains(&CRow::SplitRows));
+        assert!(!rows.contains(&CRow::Merge(0)) && rows.contains(&CRow::SplitRows(0)));
     }
-    crate::convert_ui::clicked(h.state_mut(), CRow::Merge, 0);
+    crate::convert_ui::clicked(h.state_mut(), CRow::Merge(0), 0);
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
-        assert!(!d.table.merge);
-        d.table.split = Some(100);
-        d.table.cols = vec![ColType::Text, ColType::Auto, ColType::Number];
-        d.row = CRow::Numbering;
+        assert!(!tb(d).opts.merge);
+        d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Csv)).unwrap();
+        tbm(d).opts.split = Some(100);
+        d.row = CRow::Numbering(0);
     }
     press(&mut h, &[Action::Right]);
-    shot(&mut h, "tb5-no-glue");
+    shot(&mut h, "tb6-no-header");
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        tbm(d).opts.split = Some(2);
+        tbm(d).opts.numbering = crate::table::Numbering::Paren;
+    }
+    h.state_mut().convert_start();
+    wait_jobs(&mut h);
+    assert_eq!(std::fs::read_to_string(dir.join("e (1).csv")).unwrap(), "1,2\n3,4\n");
+    assert_eq!(std::fs::read_to_string(dir.join("e (2).csv")).unwrap(), "5,6\n");
 }

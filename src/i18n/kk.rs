@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "%n-бөлік"),
     ("%n of %t", "%n / %t"),
     ("Numbering", "Нөмірлеу"),
+    ("Looking at the files…", "Файлдар қаралуда…"),
+    ("Please wait…", "Күте тұрыңыз…"),
     ("Columns: %n", "Бағандар: %n"),
     ("merged", "біріктірілген"),
     ("Whole lines", "Тұтас жолдар"),

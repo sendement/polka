@@ -1810,6 +1810,7 @@ impl App {
         self.tick_usage();
         self.tick_terminal();
         self.dnd_tick();
+        self.convert_poll();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             {

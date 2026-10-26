@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "%n-qism"),
     ("%n of %t", "%n / %t"),
     ("Numbering", "Raqamlash"),
+    ("Looking at the files…", "Fayllar ko‘rib chiqilmoqda…"),
+    ("Please wait…", "Kuting…"),
     ("Columns: %n", "Ustunlar: %n"),
     ("merged", "birlashtirilgan"),
     ("Whole lines", "Butun qatorlar"),

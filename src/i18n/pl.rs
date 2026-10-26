@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "część %n"),
     ("%n of %t", "%n z %t"),
     ("Numbering", "Numeracja"),
+    ("Looking at the files…", "Sprawdzam pliki…"),
+    ("Please wait…", "Proszę czekać…"),
     ("Columns: %n", "Kolumny: %n"),
     ("merged", "sklejone"),
     ("Whole lines", "Całe wiersze"),

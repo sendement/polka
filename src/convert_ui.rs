@@ -22,6 +22,71 @@ pub struct GroupRow {
     pub pick: usize,
     /// Its own quality (pictures, sound and video).
     pub quality: Quality,
+    /// Tables: theirs (each set of the same columns is a group of its own).
+    pub table: Option<TableSide>,
+}
+
+/// A group of tables' own settings, and how its first CSV reads.
+pub struct TableSide {
+    pub opts: crate::table::Opts,
+    /// Their columns' names (none: no header row).
+    pub header: Option<Vec<String>>,
+    /// The first CSV's first rows as read now (or why not), and the
+    /// separator found for it.
+    pub preview: Result<crate::table::Sheet, String>,
+    pub found: Option<crate::table::Delim>,
+    /// Whether they can be glued (else why not).
+    pub mergeable: Result<(), String>,
+    /// The columns' own rows shown (folded under "All columns").
+    pub cols_open: bool,
+    /// Being read again (with another separator), as reading number `turn`.
+    pub reading: bool,
+    pub turn: u64,
+}
+
+impl TableSide {
+    fn take(&mut self, l: Look) {
+        self.preview = l.preview;
+        self.found = l.found;
+        self.mergeable = l.mergeable;
+        // A column each (kept while their number stays).
+        let n = self.preview.as_ref().map(|s| s.rows.iter().map(|r| r.len()).max().unwrap_or(0)).unwrap_or(0);
+        if self.opts.cols.len() != n {
+            self.opts.cols = vec![crate::table::ColType::Auto; n];
+        }
+        if self.mergeable.is_err() {
+            self.opts.merge = false;
+        }
+        self.reading = false;
+    }
+}
+
+/// How a group of tables reads with a separator.
+pub struct Look {
+    preview: Result<crate::table::Sheet, String>,
+    found: Option<crate::table::Delim>,
+    mergeable: Result<(), String>,
+}
+
+/// The first CSV among them (the preview shows it).
+fn csv_of(items: &[PathBuf]) -> Option<&Path> {
+    items.iter().find(|p| p.file_name().is_some_and(|n| crate::table::is_csv(&n.to_string_lossy()))).map(|p| p.as_path())
+}
+
+/// Reads them (slow for big ones: off the window's thread).
+fn look(items: &[PathBuf], delim: crate::table::Delim) -> Look {
+    let (preview, found) = match csv_of(items) {
+        Some(p) => (crate::table::preview(p, delim, 6), crate::table::delim_for(p, delim).ok().map(crate::table::Delim::of)),
+        None => (Ok(Default::default()), None),
+    };
+    let mergeable = if items.len() > 1 { crate::table::mergeable(items, delim) } else { Err(String::new()) };
+    Look { preview, found, mergeable }
+}
+
+/// What comes back from the other thread.
+pub enum Ready {
+    Opened(Result<(Vec<GroupRow>, Vec<(PathBuf, String)>), String>),
+    Table { group: usize, turn: u64, look: Look },
 }
 
 impl GroupRow {
@@ -51,15 +116,16 @@ pub enum CRow {
     Quality(usize),
     /// Tables: the separator CSV is read with (a preview under it), the one
     /// it's written with, rows to cut at, gluing them into one.
-    DelimIn,
-    /// What CSV's columns become: all at once, then each (by index).
-    ColsAll,
-    Col(usize),
-    DelimOut,
-    SplitRows,
+    DelimIn(usize),
+    /// What CSV's columns become: all at once, then each (by group, then
+    /// column).
+    ColsAll(usize),
+    Col(usize, usize),
+    DelimOut(usize),
+    SplitRows(usize),
     /// How the parts are numbered (when cut).
-    Numbering,
-    Merge,
+    Numbering(usize),
+    Merge(usize),
     Trash,
     Buttons,
 }
@@ -72,20 +138,17 @@ pub struct ConvertDlg {
     pub trash: bool,
     /// Left out, and why (password-protected, a tool missing, not a kind
     /// that converts).
-    pub refused: Vec<(PathBuf, &'static str)>,
+    pub refused: Vec<(PathBuf, String)>,
     pub row: CRow,
     /// On the buttons' row: Convert, Cancel.
     pub button: usize,
-    /// How tables convert.
-    pub table: crate::table::Opts,
-    /// The first CSV's first rows as read now (or why not), and the
-    /// separator found for it.
-    pub preview: Result<crate::table::Sheet, String>,
-    pub found: Option<crate::table::Delim>,
-    /// Whether the tables can be glued (else why not).
-    pub mergeable: Result<(), String>,
-    /// The columns' own rows shown (folded under "All columns").
-    pub cols_open: bool,
+    /// The files still being looked at (on another thread): shown as they
+    /// are till their groups come.
+    pub opening: Option<Vec<PathBuf>>,
+    tx: std::sync::mpsc::Sender<Ready>,
+    rx: std::sync::mpsc::Receiver<Ready>,
+    /// Which opening it is (each scrolls from the top).
+    serial: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -109,27 +172,27 @@ impl ConvertDlg {
                 if f == ArchiveFormat::SevenZ && self.arch.password.is_some() {
                     v.push(CRow::Names);
                 }
-            } else if g.group == Group::Table {
+            } else if let Some(t) = &g.table {
                 v.push(CRow::Target(i));
-                if self.csv_in().is_some() {
-                    v.push(CRow::DelimIn);
-                    if !self.table.cols.is_empty() {
-                        v.push(CRow::ColsAll);
-                        if self.cols_open {
-                            v.extend((0..self.table.cols.len()).map(CRow::Col));
+                if csv_of(&g.items).is_some() {
+                    v.push(CRow::DelimIn(i));
+                    if !t.opts.cols.is_empty() {
+                        v.push(CRow::ColsAll(i));
+                        if t.cols_open {
+                            v.extend((0..t.opts.cols.len()).map(|k| CRow::Col(i, k)));
                         }
                     }
                 }
                 if g.target() == Target::Table(crate::table::Format::Csv) {
-                    v.push(CRow::DelimOut);
+                    v.push(CRow::DelimOut(i));
                 }
-                v.push(CRow::SplitRows);
-                if self.table.split.is_some() {
-                    v.push(CRow::Numbering);
+                v.push(CRow::SplitRows(i));
+                if t.opts.split.is_some() {
+                    v.push(CRow::Numbering(i));
                 }
                 // (Tables that don't glue: shown, not reachable.)
-                if g.items.len() > 1 && self.mergeable.is_ok() {
-                    v.push(CRow::Merge);
+                if g.items.len() > 1 && t.mergeable.is_ok() {
+                    v.push(CRow::Merge(i));
                 }
             } else {
                 v.push(CRow::Target(i));
@@ -143,30 +206,55 @@ impl ConvertDlg {
         v
     }
 
-    /// The first CSV among the tables (the preview shows it).
-    pub fn csv_in(&self) -> Option<&Path> {
-        let g = self.groups.iter().find(|g| g.group == Group::Table)?;
-        g.items.iter().find(|p| p.file_name().is_some_and(|n| crate::table::is_csv(&n.to_string_lossy()))).map(|p| p.as_path())
+    /// A group's tables read again as its separator now says (on another
+    /// thread): the preview, whether they glue.
+    fn refresh_table(&mut self, i: usize) {
+        let g = &mut self.groups[i];
+        let Some(t) = g.table.as_mut() else { return };
+        t.turn += 1;
+        t.reading = true;
+        let (items, delim, turn, tx) = (g.items.clone(), t.opts.delim_in, t.turn, self.tx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Ready::Table { group: i, turn, look: look(&items, delim) });
+        });
     }
 
-    /// Read again as the separator now says: the preview, whether they glue.
-    pub fn refresh_tables(&mut self) {
-        let Some(g) = self.groups.iter().find(|g| g.group == Group::Table) else { return };
-        let delim = self.table.delim_in;
-        let items = g.items.clone();
-        if let Some(p) = self.csv_in().map(|p| p.to_path_buf()) {
-            self.preview = crate::table::preview(&p, delim, 6);
-            self.found = crate::table::delim_for(&p, delim).ok().map(crate::table::Delim::of);
-            // A column each (kept while their number stays).
-            let n = self.preview.as_ref().map(|s| s.rows.iter().map(|r| r.len()).max().unwrap_or(0)).unwrap_or(0);
-            if self.table.cols.len() != n {
-                self.table.cols = vec![crate::table::ColType::Auto; n];
+    /// Still looking at the files (the Convert button waits).
+    pub fn busy(&self) -> bool {
+        self.opening.is_some() || self.groups.iter().any(|g| g.table.as_ref().is_some_and(|t| t.reading))
+    }
+
+    /// Take in what the other thread found. False: there's nothing to
+    /// convert (the reason given).
+    fn take(&mut self, r: Ready) -> Result<(), String> {
+        match r {
+            Ready::Opened(Ok((groups, refused))) => {
+                self.groups = groups;
+                self.refused = refused;
+                self.opening = None;
+                let format = self.groups.iter().find(|g| g.group == Group::Archive).and_then(|g| match g.target() {
+                    Target::Archive(f) => Some(f),
+                    _ => None,
+                });
+                self.arch = CompressOpts::new(format.unwrap_or(ArchiveFormat::Zip));
+                self.sync_archive();
+                self.row = self.rows()[0];
+            }
+            Ready::Opened(Err(why)) => return Err(why),
+            Ready::Table { group, turn, look } => {
+                if let Some(t) = self.groups.get_mut(group).and_then(|g| g.table.as_mut()).filter(|t| t.turn == turn) {
+                    t.take(look);
+                }
+                // (A row gone with the columns: back onto one there is.)
+                if !self.rows().contains(&self.row) {
+                    self.row = CRow::ColsAll(group);
+                    if !self.rows().contains(&self.row) {
+                        self.row = CRow::DelimIn(group);
+                    }
+                }
             }
         }
-        self.mergeable = if items.len() > 1 { crate::table::mergeable(&items, delim) } else { Err(String::new()) };
-        if self.mergeable.is_err() {
-            self.table.merge = false;
-        }
+        Ok(())
     }
 
     /// Anything whose original could go to the trash (Steam's recordings
@@ -222,29 +310,46 @@ impl ConvertDlg {
                 let at = QUALITIES.iter().position(|q| *q == g.quality).unwrap_or(1) as isize;
                 g.quality = QUALITIES[(at + d).clamp(0, 2) as usize];
             }
-            CRow::DelimIn => {
-                self.table.delim_in = cycle(&crate::table::DELIMS, self.table.delim_in, d);
-                self.refresh_tables();
+            CRow::DelimIn(i) => {
+                if let Some(t) = self.groups[i].table.as_mut() {
+                    t.opts.delim_in = cycle(&crate::table::DELIMS, t.opts.delim_in, d);
+                    self.refresh_table(i);
+                }
             }
-            CRow::ColsAll => {
-                let cols = &mut self.table.cols;
-                let now = if cols.iter().all(|c| *c == cols[0]) { cols[0] } else { crate::table::ColType::Auto };
-                let t = cycle(&crate::table::COL_TYPES, now, d);
-                cols.iter_mut().for_each(|c| *c = t);
+            CRow::ColsAll(i) => {
+                if let Some(cols) = self.groups[i].table.as_mut().map(|t| &mut t.opts.cols).filter(|c| !c.is_empty()) {
+                    let now = if cols.iter().all(|c| *c == cols[0]) { cols[0] } else { crate::table::ColType::Auto };
+                    let t = cycle(&crate::table::COL_TYPES, now, d);
+                    cols.iter_mut().for_each(|c| *c = t);
+                }
             }
-            CRow::Col(k) => {
-                if let Some(c) = self.table.cols.get_mut(k) {
+            CRow::Col(i, k) => {
+                if let Some(c) = self.groups[i].table.as_mut().and_then(|t| t.opts.cols.get_mut(k)) {
                     *c = cycle(&crate::table::COL_TYPES, *c, d);
                 }
             }
-            CRow::DelimOut => self.table.delim_out = cycle(&crate::table::DELIMS[1..], self.table.delim_out, d),
-            CRow::SplitRows => {
-                let mut all: Vec<Option<usize>> = vec![None];
-                all.extend(crate::table::SPLITS.iter().map(|n| Some(*n)));
-                self.table.split = cycle(&all, self.table.split, d);
+            CRow::DelimOut(i) => {
+                if let Some(t) = self.groups[i].table.as_mut() {
+                    t.opts.delim_out = cycle(&crate::table::DELIMS[1..], t.opts.delim_out, d);
+                }
             }
-            CRow::Numbering => self.table.numbering = cycle(&crate::table::NUMBERINGS, self.table.numbering, d),
-            CRow::Merge => self.table.merge = !self.table.merge && self.mergeable.is_ok(),
+            CRow::SplitRows(i) => {
+                if let Some(t) = self.groups[i].table.as_mut() {
+                    let mut all: Vec<Option<usize>> = vec![None];
+                    all.extend(crate::table::SPLITS.iter().map(|n| Some(*n)));
+                    t.opts.split = cycle(&all, t.opts.split, d);
+                }
+            }
+            CRow::Numbering(i) => {
+                if let Some(t) = self.groups[i].table.as_mut() {
+                    t.opts.numbering = cycle(&crate::table::NUMBERINGS, t.opts.numbering, d);
+                }
+            }
+            CRow::Merge(i) => {
+                if let Some(t) = self.groups[i].table.as_mut() {
+                    t.opts.merge = !t.opts.merge && t.mergeable.is_ok();
+                }
+            }
             CRow::Trash => self.trash = !self.trash,
             CRow::Buttons => self.button = (self.button as isize + d).clamp(0, 1) as usize,
             _ => {}
@@ -272,85 +377,53 @@ fn quality_name(q: Quality) -> &'static str {
 
 impl App {
     /// "Convert…" on the chosen files.
+    /// Opens at once; what the files are (archives probed, tables read
+    /// and grouped by their columns) comes from another thread.
     pub fn convert_open(&mut self) {
         let paths = self.local_targets();
-        let mut groups: Vec<GroupRow> = Vec::new();
-        let mut refused = Vec::new();
-        let mut sets = HashSet::new();
-        for p in paths {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let Some(g) = crate::convert::group_of(&name).filter(|_| !p.is_dir()) else {
-                refused.push((p, if crate::convert::group_of(&name).is_some() { tr("Folder") } else { tr("doesn't convert") }));
-                continue;
-            };
-            // A multi-volume set is one archive: its first volume.
-            let p = if g == Group::Archive {
-                let first = crate::volumes::first(&p);
-                if !sets.insert(first.clone()) {
-                    continue;
-                }
-                first
-            } else {
-                p
-            };
-            if let Some(why) = crate::convert::refusal(&p, &name) {
-                refused.push((p, why));
-                continue;
-            }
-            match groups.iter_mut().find(|r| r.group == g) {
-                Some(r) => r.items.push(p),
-                None => {
-                    let targets = crate::convert::targets(g);
-                    if targets.is_empty() {
-                        refused.push((p, tr("needs ffmpeg")));
-                        continue;
-                    }
-                    // The last choice for this kind, else a usual one: HEIC
-                    // from a phone mostly becomes JPEG.
-                    let usual = match g {
-                        Group::Image if name.to_lowercase().ends_with(".heic") => Target::Jpg,
-                        Group::Image => Target::Png,
-                        Group::Audio => Target::Mp3,
-                        Group::Video => Target::Mp4,
-                        Group::Archive => Target::Archive(ArchiveFormat::Zip),
-                        // A spreadsheet mostly wants to be a CSV, a CSV a spreadsheet.
-                        Group::Table if crate::table::is_csv(&name) => Target::Table(crate::table::Format::Xlsx),
-                        Group::Table => Target::Table(crate::table::Format::Csv),
-                    };
-                    let want = self.convert_last.iter().find(|(k, _)| *k == g).map(|(_, t)| *t).unwrap_or(usual);
-                    let pick = targets.iter().position(|t| *t == want).unwrap_or(0);
-                    groups.push(GroupRow { group: g, items: vec![p], targets, pick, quality: Quality::Balanced });
-                }
-            }
+        if paths.is_empty() {
+            return self.toast(tr("Nothing here can be converted"), true);
         }
-        groups.sort_by_key(|r| crate::convert::GROUPS.iter().position(|g| *g == r.group));
-        if groups.is_empty() {
-            let why = refused.first().map(|(p, w)| format!("{}: {w}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).unwrap_or_else(|| tr("Nothing here can be converted").to_string());
-            return self.toast(why, true);
-        }
-        let format = groups.iter().find(|g| g.group == Group::Archive).and_then(|g| match g.target() {
-            Target::Archive(f) => Some(f),
-            _ => None,
-        });
-        let arch = CompressOpts::new(format.unwrap_or(ArchiveFormat::Zip));
-        let mut d = ConvertDlg {
-            groups,
-            arch,
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d = ConvertDlg {
+            groups: Vec::new(),
+            arch: CompressOpts::new(ArchiveFormat::Zip),
             trash: false,
-            refused,
+            refused: Vec::new(),
             row: CRow::Buttons,
             button: 0,
-            table: Default::default(),
-            preview: Ok(Default::default()),
-            found: None,
-            mergeable: Err(String::new()),
-            cols_open: false,
+            opening: Some(paths.clone()),
+            tx: tx.clone(),
+            rx,
+            serial: {
+                static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
         };
-        d.table.numbering = self.convert_numbering;
-        d.row = d.rows()[0];
-        d.sync_archive();
-        d.refresh_tables();
+        let (last, numbering) = (self.convert_last.clone(), self.convert_numbering);
+        std::thread::spawn(move || {
+            let _ = tx.send(Ready::Opened(prepare(paths, &last, numbering)));
+        });
         self.overlay = Some(Overlay::Convert(Box::new(d)));
+    }
+
+    /// What came from the other thread (each frame).
+    pub fn convert_poll(&mut self) {
+        let Some(Overlay::Convert(d)) = self.overlay.as_mut() else { return };
+        let mut gone = None;
+        while let Ok(r) = d.rx.try_recv() {
+            if let Err(why) = d.take(r) {
+                gone = Some(why);
+            }
+        }
+        let busy = d.busy();
+        if let Some(why) = gone {
+            self.overlay = None;
+            return self.toast(why, true);
+        }
+        if busy {
+            self.ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
     }
 
     pub fn convert_input(&mut self, a: Action) {
@@ -398,7 +471,11 @@ impl App {
                 k.secret = true;
                 self.overlay = Some(Overlay::Osk(k));
             }
-            CRow::ColsAll => d.cols_open = !d.cols_open,
+            CRow::ColsAll(i) => {
+                if let Some(t) = d.groups[i].table.as_mut() {
+                    t.cols_open = !t.cols_open;
+                }
+            }
             _ => d.step(row, 1),
         }
     }
@@ -415,21 +492,32 @@ impl App {
     /// Off it goes, as a job.
     pub fn convert_start(&mut self) {
         let Some(Overlay::Convert(d)) = self.overlay.take() else { return };
+        // (Not before the files have been looked at.)
+        if d.busy() {
+            self.overlay = Some(Overlay::Convert(d));
+            return;
+        }
         let mut items = Vec::new();
+        // Each group of tables goes as one batch, with its own settings.
+        let mut tables = Vec::new();
         for g in &d.groups {
             // Archives: as their settings say.
             let t = if g.group == Group::Archive { Target::Archive(d.arch.format) } else { g.target() };
             self.convert_last.retain(|(k, _)| *k != g.group);
             self.convert_last.push((g.group, t));
-            let reshaped = (g.group == Group::Archive && (d.arch.split.is_some() || d.arch.password.is_some())) || (g.group == Group::Table && (d.table.split.is_some() || d.table.merge));
-            items.extend(g.items.iter().filter(|p| !crate::convert::needless(p, t) || reshaped).map(|p| crate::convert::Item { src: p.clone(), target: t, quality: g.quality }));
+            let reshaped = (g.group == Group::Archive && (d.arch.split.is_some() || d.arch.password.is_some())) || g.table.as_ref().is_some_and(|t| t.opts.split.is_some() || t.opts.merge);
+            let batch = tables.len();
+            if let Some(t) = &g.table {
+                tables.push(t.opts.clone());
+                self.convert_numbering = t.opts.numbering;
+            }
+            items.extend(g.items.iter().filter(|p| !crate::convert::needless(p, t) || reshaped).map(|p| crate::convert::Item { src: p.clone(), target: t, quality: g.quality, batch }));
         }
         if items.is_empty() {
             return self.toast(tr("Already in that format"), false);
         }
-        self.convert_numbering = d.table.numbering;
         self.pane_mut().selected.clear();
-        self.start(Op::Convert { items, trash: d.trash, archive: d.arch.clone(), table: d.table.clone() });
+        self.start(Op::Convert { items, trash: d.trash, archive: d.arch.clone(), tables });
     }
 }
 
@@ -440,6 +528,105 @@ const TILE_LINES: usize = 2;
 const TILE: Vec2 = Vec2::new(92.0, 74.0);
 /// Left out: room for why, on two lines.
 const TILE_WHY: f32 = 96.0;
+
+/// Sorts the files into kinds (left out what can't convert, and why);
+/// tables split further by their columns (case and order aside), each set
+/// a group with its own settings.
+fn prepare(paths: Vec<PathBuf>, last: &[(Group, Target)], numbering: crate::table::Numbering) -> Result<(Vec<GroupRow>, Vec<(PathBuf, String)>), String> {
+    let mut groups: Vec<GroupRow> = Vec::new();
+    let mut refused: Vec<(PathBuf, String)> = Vec::new();
+    let mut sets = HashSet::new();
+    // Tables by their columns: (key, header, files).
+    let mut tables: Vec<(Option<Vec<String>>, Option<Vec<String>>, Vec<PathBuf>)> = Vec::new();
+    for p in paths {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(g) = crate::convert::group_of(&name).filter(|_| !p.is_dir()) else {
+            refused.push((p, if crate::convert::group_of(&name).is_some() { tr("Folder") } else { tr("doesn't convert") }.to_string()));
+            continue;
+        };
+        // A multi-volume set is one archive: its first volume.
+        let p = if g == Group::Archive {
+            let first = crate::volumes::first(&p);
+            if !sets.insert(first.clone()) {
+                continue;
+            }
+            first
+        } else {
+            p
+        };
+        if let Some(why) = crate::convert::refusal(&p, &name) {
+            refused.push((p, why.to_string()));
+            continue;
+        }
+        if g == Group::Table {
+            let header = match crate::table::header_of(&p) {
+                Ok(h) => h,
+                Err(e) => {
+                    refused.push((p, e));
+                    continue;
+                }
+            };
+            let key = header.as_ref().map(|h| {
+                let mut k: Vec<String> = h.iter().map(|x| x.to_lowercase()).collect();
+                k.sort();
+                k
+            });
+            match tables.iter_mut().find(|t| t.0 == key) {
+                Some(t) => t.2.push(p),
+                None => tables.push((key, header, vec![p])),
+            }
+            continue;
+        }
+        match groups.iter_mut().find(|r| r.group == g) {
+            Some(r) => r.items.push(p),
+            None => {
+                let targets = crate::convert::targets(g);
+                if targets.is_empty() {
+                    refused.push((p, tr("needs ffmpeg").to_string()));
+                    continue;
+                }
+                // The last choice for this kind, else a usual one: HEIC
+                // from a phone mostly becomes JPEG.
+                let usual = match g {
+                    Group::Image if name.to_lowercase().ends_with(".heic") => Target::Jpg,
+                    Group::Image => Target::Png,
+                    Group::Audio => Target::Mp3,
+                    Group::Video => Target::Mp4,
+                    Group::Archive => Target::Archive(ArchiveFormat::Zip),
+                    Group::Table => Target::Table(crate::table::Format::Csv),
+                };
+                let want = last.iter().find(|(k, _)| *k == g).map(|(_, t)| *t).unwrap_or(usual);
+                let pick = targets.iter().position(|t| *t == want).unwrap_or(0);
+                groups.push(GroupRow { group: g, items: vec![p], targets, pick, quality: Quality::Balanced, table: None });
+            }
+        }
+    }
+    for (_, header, items) in tables {
+        let targets = crate::convert::targets(Group::Table);
+        // A spreadsheet mostly wants to be a CSV, a CSV a spreadsheet.
+        let csv = items.first().is_some_and(|p| crate::table::is_csv(&p.to_string_lossy()));
+        let usual = Target::Table(if csv { crate::table::Format::Xlsx } else { crate::table::Format::Csv });
+        let want = last.iter().find(|(k, _)| *k == Group::Table).map(|(_, t)| *t).unwrap_or(usual);
+        let pick = targets.iter().position(|t| *t == want).unwrap_or(0);
+        let mut side = TableSide {
+            opts: crate::table::Opts { numbering, ..Default::default() },
+            header,
+            preview: Ok(Default::default()),
+            found: None,
+            mergeable: Err(String::new()),
+            cols_open: false,
+            reading: false,
+            turn: 0,
+        };
+        side.take(look(&items, crate::table::Delim::Auto));
+        groups.push(GroupRow { group: Group::Table, items, targets, pick, quality: Quality::Balanced, table: Some(side) });
+    }
+    groups.sort_by_key(|r| crate::convert::GROUPS.iter().position(|g| *g == r.group));
+    if groups.is_empty() {
+        return Err(refused.first().map(|(p, w)| format!("{}: {w}", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).unwrap_or_else(|| tr("Nothing here can be converted").to_string()));
+    }
+    Ok((groups, refused))
+}
 
 /// The files as tiles: their thumbnail or icon, the name, maybe why not.
 fn tiles(ui: &mut Ui, items: &[(&Path, Option<&str>)], icons: &mut crate::icons::Icons, dim: bool) {
@@ -560,11 +747,33 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
         rect
     };
     let max_h = (ui.ctx().content_rect().height() - 200.0).max(240.0);
-    egui::ScrollArea::vertical().id_salt("convert").max_height(max_h).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt(("convert", d.serial)).max_height(max_h).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
+        // Still looking at them: as they are, a moment.
+        if let Some(paths) = &d.opening {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(egui::RichText::new(format!("{} · {}", tr("Looking at the files…"), paths.len())).strong());
+            });
+            let items: Vec<(&Path, Option<&str>)> = paths.iter().map(|p| (p.as_path(), None)).collect();
+            tiles(ui, &items, icons, true);
+        }
         for (i, g) in d.groups.iter().enumerate() {
-            // The kind's files first…
-            ui.label(egui::RichText::new(format!("{} · {}", group_name(g.group), g.items.len())).strong());
+            // A block each (a line between).
+            if i > 0 {
+                let (r, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 9.0), Sense::hover());
+                ui.painter().hline(r.x_range().shrink(14.0), r.center().y, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color));
+            }
+            // The kind's files first (tables: with their columns)…
+            let mut head = format!("{} · {}", group_name(g.group), g.items.len());
+            match g.table.as_ref().map(|t| &t.header) {
+                Some(Some(h)) => head += &format!(" · {}", h.join(", ")),
+                Some(None) => head += &format!(" · {}", tr("no header row")),
+                None => {}
+            }
+            let gal = crate::view::elided(ui, &head, egui::TextStyle::Body.resolve(ui.style()), v.strong_text_color(), crate::view::SETTINGS_W - 10.0, 1);
+            let (r, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, gal.size().y), Sense::hover());
+            ui.painter().galley(r.min, gal, v.strong_text_color());
             let items: Vec<(&Path, Option<&str>)> = g.items.iter().map(|p| (p.as_path(), None)).collect();
             tiles(ui, &items, icons, false);
             // …then what they become.
@@ -619,7 +828,9 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
                 }
                 chips(ui, rect, row, g.targets.iter().enumerate().map(|(k, t)| (t.label().to_string(), k == g.pick)).collect(), &mut ev);
                 if g.group == Group::Table {
-                    table_rows(ui, d, g, &stepper, &mut ev);
+                    if let Some(t) = &g.table {
+                        table_rows(ui, d, i, g, t, &stepper, &mut ev);
+                    }
                     ui.add_space(8.0);
                     continue;
                 }
@@ -673,14 +884,19 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
     });
     // The buttons (the pad: ← → and ✕ on their row, or Start).
     let (rect, _) = crate::view::settings_row(ui, 44.0, d.row == CRow::Buttons, ("conv", "buttons"));
-    for (i, n) in [tr("Convert"), tr("Cancel")].iter().enumerate() {
+    let busy = d.busy();
+    let go = if busy { tr("Please wait…") } else { tr("Convert") };
+    for (i, n) in [go, tr("Cancel")].iter().enumerate() {
         let w = 150.0;
         let b = Rect::from_min_size(pos2(rect.max.x - (2 - i) as f32 * (w + 8.0), rect.center().y - 15.0), vec2(w, 30.0));
         let br = ui.interact(b, ui.id().with(("conv-btn", i)), Sense::click());
         let on = (d.row == CRow::Buttons && d.button == i) || (i == 0 && d.row != CRow::Buttons);
-        let fill = if on { v.selection.bg_fill } else if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
+        // (Convert waits, faded, till the files have been looked at.)
+        let waits = busy && i == 0;
+        let fill = if on && !waits { v.selection.bg_fill } else if br.hovered() && !waits { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
         ui.painter().rect(b, 6.0, fill, Stroke::NONE, StrokeKind::Inside);
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, *n, font.clone(), if on { v.selection.stroke.color } else { v.text_color() });
+        let c = if waits { v.weak_text_color() } else if on { v.selection.stroke.color } else { v.text_color() };
+        ui.painter().text(b.center(), Align2::CENTER_CENTER, *n, font.clone(), c);
         if br.clicked() {
             ev = Some((CRow::Buttons, 10 + i as isize));
         }
@@ -691,15 +907,15 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
 /// Tables' settings: CSV's separator in (with what it reads as, and a
 /// preview) and its columns' types, the separator out, rows to cut at,
 /// gluing.
-fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut Ui, CRow, &str, String, &mut Option<(CRow, isize)>) -> Rect, ev: &mut Option<(CRow, isize)>) {
+fn table_rows(ui: &mut Ui, d: &ConvertDlg, i: usize, g: &GroupRow, t: &TableSide, stepper: &dyn Fn(&mut Ui, CRow, &str, String, &mut Option<(CRow, isize)>) -> Rect, ev: &mut Option<(CRow, isize)>) {
     use crate::table::{Cell, ColType, Delim};
     let v = ui.visuals().clone();
-    if d.csv_in().is_some() {
-        let value = match (d.table.delim_in, d.found) {
+    if csv_of(&g.items).is_some() {
+        let value = match (t.opts.delim_in, t.found) {
             (Delim::Auto, Some(f)) => format!("{} ({})", Delim::Auto.label(), f.label().trim()),
             (x, _) => x.label().trim().to_string(),
         };
-        stepper(ui, CRow::DelimIn, tr("CSV separator"), value, ev);
+        stepper(ui, CRow::DelimIn(i), tr("CSV separator"), value, ev);
         // How the first CSV reads with it: a few rows, a few columns (the
         // column being set among them), as their types make them.
         const ROW_H: f32 = 20.0;
@@ -708,10 +924,10 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
         let area = Rect::from_min_max(pos2(rect.min.x + 14.0, rect.min.y + 18.0), pos2(rect.max.x - 14.0, rect.max.y - 2.0));
         ui.painter().rect_filled(area, 6.0, v.extreme_bg_color);
         let focus = match d.row {
-            CRow::Col(k) => Some(k),
+            CRow::Col(gi, k) if gi == i => Some(k),
             _ => None,
         };
-        match &d.preview {
+        match &t.preview {
             Ok(sheet) => {
                 let n = sheet.rows.iter().map(|r| r.len()).max().unwrap_or(0);
                 let shown = n.clamp(1, 6);
@@ -727,7 +943,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                     room -= gal.size().x + 12.0;
                     ui.painter().galley(pos2(caption.max.x - gal.size().x, caption.center().y - gal.size().y / 2.0), gal, v.weak_text_color());
                 }
-                if let Some(name) = d.csv_in().and_then(|p| p.file_name()) {
+                if let Some(name) = csv_of(&g.items).and_then(|p| p.file_name()) {
                     let gal = crate::view::elided(ui, &name.to_string_lossy(), FontId::proportional(11.0), v.weak_text_color(), room, 1);
                     ui.painter().galley(pos2(caption.min.x, caption.center().y - gal.size().y / 2.0), gal, v.weak_text_color());
                 }
@@ -743,7 +959,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                     for c in first..first + shown {
                         let cell = Rect::from_min_size(pos2(area.min.x + (c - first) as f32 * w, line.min.y), vec2(w, ROW_H));
                         let raw = row.get(c).cloned().unwrap_or(Cell::Empty);
-                        let t = d.table.cols.get(c).copied().unwrap_or(ColType::Auto);
+                        let t = t.opts.cols.get(c).copied().unwrap_or(ColType::Auto);
                         let (shown_cell, ok) = if r == 0 && header { (raw, true) } else { (t.shown(&raw), t.fits(&raw)) };
                         let color = if r == 0 && header {
                             v.strong_text_color()
@@ -763,7 +979,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                 }
                 // The columns' types: all at once, then each, with its first
                 // values as they'd become.
-                let cols = &d.table.cols;
+                let cols = &t.opts.cols;
                 if !cols.is_empty() {
                     let all = if cols.iter().all(|c| *c == cols[0]) { cols[0].label().to_string() } else { tr("Mixed").to_string() };
                     let names = sheet.header();
@@ -773,9 +989,9 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                     };
                     let label_w = crate::view::SETTINGS_W - 250.0;
                     // Folded: an arrow, and the columns set by hand under it.
-                    let rect = stepper(ui, CRow::ColsAll, "", all, ev);
+                    let rect = stepper(ui, CRow::ColsAll(i), "", all, ev);
                     let (cx, cy) = (rect.min.x + 20.0, rect.center().y - 7.0);
-                    let tri = if d.cols_open {
+                    let tri = if t.cols_open {
                         vec![pos2(cx - 5.0, cy - 3.0), pos2(cx + 5.0, cy - 3.0), pos2(cx, cy + 3.5)]
                     } else {
                         vec![pos2(cx - 3.0, cy - 5.0), pos2(cx + 3.5, cy), pos2(cx - 3.0, cy + 5.0)]
@@ -787,8 +1003,8 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                     let note = if set.is_empty() { trn("Columns: %n", cols.len()) } else { set.join(" · ") };
                     let gal = crate::view::elided(ui, &note, FontId::proportional(11.5), v.weak_text_color(), label_w - 18.0, 1);
                     ui.painter().galley(pos2(rect.min.x + 32.0, rect.center().y + 8.0 - gal.size().y / 2.0), gal, v.weak_text_color());
-                    for (k, t) in cols.iter().enumerate().filter(|_| d.cols_open) {
-                        let rect = stepper(ui, CRow::Col(k), "", t.label().to_string(), ev);
+                    for (k, t) in cols.iter().enumerate().filter(|_| t.cols_open) {
+                        let rect = stepper(ui, CRow::Col(i, k), "", t.label().to_string(), ev);
                         let name = if names.is_some() { format!("{} · {}", k + 1, name_of(k)) } else { name_of(k) };
                         // (Under "All columns": in line with its name.)
                         let gal = crate::view::elided(ui, &name, FontId::proportional(14.0), v.text_color(), label_w - 18.0, 1);
@@ -809,28 +1025,28 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
         }
     }
     if g.target() == Target::Table(crate::table::Format::Csv) {
-        stepper(ui, CRow::DelimOut, tr("Write CSV with"), d.table.delim_out.label().trim().to_string(), ev);
+        stepper(ui, CRow::DelimOut(i), tr("Write CSV with"), t.opts.delim_out.label().trim().to_string(), ev);
     }
-    let split = match d.table.split {
+    let split = match t.opts.split {
         None => tr("No").to_string(),
         Some(n) => trn("Every %n rows", n),
     };
-    stepper(ui, CRow::SplitRows, tr("Cut into parts"), split, ev);
-    if d.table.split.is_some() {
+    stepper(ui, CRow::SplitRows(i), tr("Cut into parts"), split, ev);
+    if t.opts.split.is_some() {
         // As the first table's parts would be named.
         let stem = g.items.first().and_then(|p| p.file_name()).map(|n| crate::ops::split_ext(&n.to_string_lossy()).0.to_string()).unwrap_or_default();
         let stem: String = if stem.chars().count() > 14 { stem.chars().take(13).chain(['…']).collect() } else { stem };
-        stepper(ui, CRow::Numbering, tr("Numbering"), format!("{stem}{}", d.table.numbering.tag(1, 3)), ev);
+        stepper(ui, CRow::Numbering(i), tr("Numbering"), format!("{stem}{}", t.opts.numbering.tag(1, 3)), ev);
     }
     if g.items.len() > 1 {
-        let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Merge, ("conv", "merge"));
+        let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Merge(i), ("conv-merge", i));
         if r.clicked() {
-            *ev = Some((CRow::Merge, 0));
+            *ev = Some((CRow::Merge(i), 0));
         }
-        let ok = d.mergeable.is_ok();
+        let ok = t.mergeable.is_ok();
         let c = if ok { v.text_color() } else { v.weak_text_color().gamma_multiply(0.6) };
         ui.painter().text(pos2(rect.min.x + 14.0, rect.min.y + 15.0), Align2::LEFT_CENTER, tr("Glue into one table"), FontId::proportional(14.0), c);
-        let note = match &d.mergeable {
+        let note = match &t.mergeable {
             Ok(()) => tr("same columns, case aside").to_string(),
             Err(e) => e.clone(),
         };
@@ -838,7 +1054,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
         ui.painter().galley(pos2(rect.min.x + 14.0, rect.min.y + 26.0), gal, v.weak_text_color());
         let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
         ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, c), StrokeKind::Inside);
-        if d.table.merge {
+        if t.opts.merge {
             ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
         }
     }
@@ -850,8 +1066,8 @@ pub fn clicked(app: &mut App, row: CRow, step: isize) {
     d.row = row;
     match step {
         0 => match row {
-            CRow::Trash | CRow::Names | CRow::Password | CRow::ColsAll => app.convert_activate(row),
-            CRow::Merge if d.mergeable.is_ok() => app.convert_activate(row),
+            CRow::Trash | CRow::Names | CRow::Password | CRow::ColsAll(_) => app.convert_activate(row),
+            CRow::Merge(i) if d.groups[i].table.as_ref().is_some_and(|t| t.mergeable.is_ok()) => app.convert_activate(row),
             _ => {}
         },
         -1 | 1 => d.step(row, step),

@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "パート %n"),
     ("%n of %t", "%n / %t"),
     ("Numbering", "番号の付け方"),
+    ("Looking at the files…", "ファイルを確認中…"),
+    ("Please wait…", "お待ちください…"),
     ("Columns: %n", "列: %n"),
     ("merged", "結合"),
     ("Whole lines", "行全体"),

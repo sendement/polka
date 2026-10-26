@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "파트 %n"),
     ("%n of %t", "%n / %t"),
     ("Numbering", "번호 매기기"),
+    ("Looking at the files…", "파일 확인 중…"),
+    ("Please wait…", "잠시 기다려 주세요…"),
     ("Columns: %n", "열: %n"),
     ("merged", "합침"),
     ("Whole lines", "전체 줄"),

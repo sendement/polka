@@ -253,7 +253,7 @@ pub enum Op {
     Move { sources: Vec<Location>, dest: Dest, policy: Conflict },
     Trash { paths: Vec<PathBuf> },
     /// Pictures, sound, video, archives into other formats.
-    Convert { items: Vec<crate::convert::Item>, trash: bool, archive: CompressOpts, table: crate::table::Opts },
+    Convert { items: Vec<crate::convert::Item>, trash: bool, archive: CompressOpts, tables: Vec<crate::table::Opts> },
     /// Out of the trash: (item in it, where it came from).
     Restore { items: Vec<(PathBuf, PathBuf)>, policy: Conflict },
     Delete { paths: Vec<PathBuf> },
@@ -376,7 +376,7 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             job.done.store(paths.len() as u64, Ordering::Relaxed);
             Ok(())
         }
-        Op::Convert { items, trash, archive, table } => crate::convert::run(&items, trash, &archive, &table, job),
+        Op::Convert { items, trash, archive, tables } => crate::convert::run(&items, trash, &archive, &tables, job),
         Op::Restore { items, policy } => {
             job.total.store(items.iter().map(|(from, _)| tree_size(from)).sum(), Ordering::Relaxed);
             for (from, to) in items {

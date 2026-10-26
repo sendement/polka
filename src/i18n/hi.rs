@@ -208,6 +208,8 @@ pub const T: &[(&str, &str)] = &[
     ("part %n", "भाग %n"),
     ("%n of %t", "%t में से %n"),
     ("Numbering", "क्रमांकन"),
+    ("Looking at the files…", "फ़ाइलें देखी जा रही हैं…"),
+    ("Please wait…", "कृपया प्रतीक्षा करें…"),
     ("Columns: %n", "कॉलम: %n"),
     ("merged", "जोड़ा गया"),
     ("Whole lines", "पूरी पंक्तियाँ"),

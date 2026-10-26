@@ -700,6 +700,12 @@ fn write_ods(path: &Path, sheets: &[Sheet]) -> Result<(), String> {
 
 // ---------------------------------------------------------------- the work
 
+/// Its first sheet's column names (none: no header row).
+pub fn header_of(path: &Path) -> Result<Option<Vec<String>>, String> {
+    let sheets = read_some(path, Delim::Auto, Some(2))?;
+    Ok(sheets.first().and_then(|s| s.header()))
+}
+
 /// Whether these tables can be glued: each a simple table, the same column
 /// names (case aside). Else why not.
 pub fn mergeable(paths: &[PathBuf], delim: Delim) -> Result<(), String> {
