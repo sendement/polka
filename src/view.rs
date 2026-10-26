@@ -1787,6 +1787,10 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 if in_set {
                     ui.painter().rect_filled(rect, 6.0, vol_c.gamma_multiply(0.22));
                 }
+                // The list's rows striped, for the eye.
+                if !grid && row % 2 == 1 {
+                    ui.painter().rect_filled(rect, 6.0, stripe(ui.visuals()));
+                }
                 paint_entry_bg(ui, rect, is_cursor, focused, sel, r.hovered() && !in_set);
                 if in_set {
                     if grid {
@@ -2239,6 +2243,11 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Option<String>, thumb: Option<(String, 
     } else if let Some(u) = icon {
         egui::Image::new(u).tint(tint).paint_at(ui, rect);
     }
+}
+
+/// Every other row's background, a shade off the window's.
+pub(crate) fn stripe(v: &egui::Visuals) -> Color32 {
+    v.text_color().gamma_multiply(if v.dark_mode { 0.035 } else { 0.05 })
 }
 
 fn paint_entry_bg(ui: &Ui, rect: Rect, cursor: bool, focused: bool, selected: bool, hovered: bool) {

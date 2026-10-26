@@ -13,15 +13,19 @@ pub enum Cell {
     Text(String),
     Num(f64),
     Bool(bool),
+    Date(chrono::NaiveDateTime),
+    /// Text that stays text (a column chosen as such: "007" isn't 7).
+    Plain(String),
 }
 
 impl Cell {
     pub fn text(&self) -> String {
         match self {
             Cell::Empty => String::new(),
-            Cell::Text(s) => s.clone(),
+            Cell::Text(s) | Cell::Plain(s) => s.clone(),
             Cell::Num(n) => num_text(*n),
             Cell::Bool(b) => if *b { "TRUE" } else { "FALSE" }.into(),
+            Cell::Date(t) => date_text(t),
         }
     }
 
@@ -50,7 +54,119 @@ fn num_text(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 { format!("{}", n as i64) } else { format!("{n}") }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// A date alone, or with its time.
+fn date_text(t: &chrono::NaiveDateTime) -> String {
+    if t.time() == chrono::NaiveTime::MIN { t.format("%Y-%m-%d").to_string() } else { t.format("%Y-%m-%d %H:%M:%S").to_string() }
+}
+
+/// A number as people write it: "1 234,5", "1.234.567", "1,234.5", "+3".
+fn parse_num(s: &str) -> Option<f64> {
+    let t: String = s.trim().chars().filter(|c| !matches!(c, ' ' | '\u{a0}' | '\u{202f}' | '\'' | '_')).collect();
+    let t = t.strip_prefix('+').unwrap_or(&t);
+    let (commas, dots) = (t.matches(',').count(), t.matches('.').count());
+    let t = match (commas, dots) {
+        (0, 0 | 1) => t.to_string(),
+        (0, _) => t.replace('.', ""),
+        (1, 0) => t.replace(',', "."),
+        (_, 0) => t.replace(',', ""),
+        // Both: the last one is the decimal point.
+        _ if t.rfind(',') > t.rfind('.') => t.replace('.', "").replace(',', "."),
+        _ => t.replace(',', ""),
+    };
+    if t.is_empty() || !t.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'e' | b'E')) {
+        return None;
+    }
+    t.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+/// A date (maybe with its time) in the usual ways: 2024-03-01, 01.03.2024,
+/// 01/03/2024 (day first, else month first), 01.03.24…
+fn parse_date(s: &str) -> Option<chrono::NaiveDateTime> {
+    use chrono::{NaiveDate, NaiveDateTime};
+    const DAYS: [&str; 9] = ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d-%m-%Y", "%Y.%m.%d", "%d.%m.%y", "%d/%m/%y"];
+    const TIMES: [&str; 6] = [" %H:%M:%S", " %H:%M", "T%H:%M:%S", "T%H:%M", " %H:%M:%S%.f", "T%H:%M:%S%.f"];
+    let t = s.trim();
+    // (%Y takes "24" as the year 24.)
+    let sane = |d: &NaiveDate, f: &str| f.contains("%y") || chrono::Datelike::year(d) >= 1000;
+    for f in DAYS {
+        if let Ok(d) = NaiveDate::parse_from_str(t, f) {
+            if sane(&d, f) {
+                return Some(d.and_time(chrono::NaiveTime::MIN));
+            }
+        }
+        for tm in TIMES {
+            let full = format!("{f}{tm}");
+            if let Ok(dt) = NaiveDateTime::parse_from_str(t.trim_end_matches('Z'), &full) {
+                if sane(&dt.date(), f) {
+                    return Some(dt);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// What a column's cells become.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColType {
+    /// Plain numbers become numbers, the rest stays text.
+    Auto,
+    Text,
+    Number,
+    Date,
+}
+
+pub const COL_TYPES: [ColType; 4] = [ColType::Auto, ColType::Text, ColType::Number, ColType::Date];
+
+impl ColType {
+    pub fn label(self) -> &'static str {
+        crate::i18n::tr(match self {
+            ColType::Auto => "Automatic",
+            ColType::Text => "Text",
+            ColType::Number => "Number",
+            ColType::Date => "Date",
+        })
+    }
+
+    /// The cell as this column has it (what doesn't read as one stays).
+    pub fn apply(self, c: &Cell) -> Cell {
+        match (self, c) {
+            (ColType::Text, Cell::Text(s)) => Cell::Plain(s.clone()),
+            (ColType::Number, Cell::Text(s)) => parse_num(s).map(Cell::Num).unwrap_or_else(|| c.clone()),
+            (ColType::Date, Cell::Text(s)) => parse_date(s).map(Cell::Date).unwrap_or_else(|| c.clone()),
+            _ => c.clone(),
+        }
+    }
+
+    /// The cell as it'll be written (Auto's numbers too: for a preview).
+    pub fn shown(self, c: &Cell) -> Cell {
+        if self == ColType::Auto { c.typed() } else { self.apply(c) }
+    }
+
+    /// Whether the cell reads as this column wants (empty ones do).
+    pub fn fits(self, c: &Cell) -> bool {
+        match self {
+            ColType::Number => matches!(self.apply(c), Cell::Num(_) | Cell::Empty),
+            ColType::Date => matches!(self.apply(c), Cell::Date(_) | Cell::Empty),
+            _ => true,
+        }
+    }
+}
+
+/// Give a table's columns their types (its header row aside).
+pub fn shape(s: &mut Sheet, cols: &[ColType]) {
+    if cols.iter().all(|c| *c == ColType::Auto) {
+        return;
+    }
+    let skip = usize::from(s.header().is_some());
+    for r in s.rows.iter_mut().skip(skip) {
+        for (c, t) in r.iter_mut().zip(cols) {
+            *c = t.apply(c);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sheet {
     pub name: String,
     pub rows: Vec<Vec<Cell>>,
@@ -227,11 +343,10 @@ pub fn read(path: &Path, delim: Delim) -> Result<Vec<Sheet>, String> {
     read_some(path, delim, None)
 }
 
-/// The first rows of its first sheet, as text (for a preview).
-pub fn preview(path: &Path, delim: Delim, rows: usize) -> Result<Vec<Vec<String>>, String> {
+/// The first rows of its first sheet (for a preview).
+pub fn preview(path: &Path, delim: Delim, rows: usize) -> Result<Sheet, String> {
     let sheets = read_some(path, delim, Some(rows))?;
-    let s = sheets.into_iter().next().ok_or("empty")?;
-    Ok(s.rows.iter().take(rows).map(|r| r.iter().map(Cell::text).collect()).collect())
+    sheets.into_iter().next().ok_or_else(|| "empty".into())
 }
 
 fn read_some(path: &Path, delim: Delim, limit: Option<usize>) -> Result<Vec<Sheet>, String> {
@@ -288,12 +403,12 @@ fn cell_of(d: &calamine::Data) -> Cell {
         Data::Float(f) => Cell::Num(*f),
         Data::Bool(b) => Cell::Bool(*b),
         Data::DateTime(dt) => match dt.as_datetime() {
-            // A date alone, or with its time.
-            Some(t) if t.time() == chrono::NaiveTime::MIN => Cell::Text(t.format("%Y-%m-%d").to_string()),
-            Some(t) => Cell::Text(t.format("%Y-%m-%d %H:%M:%S").to_string()),
-            None => Cell::Num(dt.as_f64()),
+            Some(t) if dt.is_datetime() => Cell::Date(t),
+            _ => Cell::Num(dt.as_f64()),
         },
-        Data::DateTimeIso(s) | Data::DurationIso(s) => Cell::Text(s.clone()),
+        // (ODS has its dates so.)
+        Data::DateTimeIso(s) => parse_date(s).map(Cell::Date).unwrap_or_else(|| Cell::Text(s.clone())),
+        Data::DurationIso(s) => Cell::Text(s.clone()),
     }
 }
 
@@ -354,11 +469,13 @@ pub struct Opts {
     pub split: Option<usize>,
     /// Glue them into one (same headers).
     pub merge: bool,
+    /// What CSV's columns become, by position (none: all Auto).
+    pub cols: Vec<ColType>,
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { delim_in: Delim::Auto, delim_out: Delim::Comma, split: None, merge: false }
+        Opts { delim_in: Delim::Auto, delim_out: Delim::Comma, split: None, merge: false, cols: Vec::new() }
     }
 }
 
@@ -382,6 +499,8 @@ fn write(path: &Path, sheets: &[Sheet], f: Format, delim: Delim) -> Result<(), S
                 let ws = wb.add_worksheet();
                 ws.set_name(sheet_name(&s.name, &mut used)).map_err(|e| e.to_string())?;
                 let bold = rust_xlsxwriter::Format::new().set_bold();
+                let day = rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd");
+                let moment = rust_xlsxwriter::Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
                 let header = s.header().is_some();
                 for (r, row) in s.rows.iter().enumerate() {
                     for (c, cell) in row.iter().enumerate() {
@@ -390,8 +509,17 @@ fn write(path: &Path, sheets: &[Sheet], f: Format, delim: Delim) -> Result<(), S
                             Cell::Empty => Ok(&mut *ws),
                             Cell::Num(n) => ws.write_number(r, c, n),
                             Cell::Bool(b) => ws.write_boolean(r, c, b),
-                            Cell::Text(t) if r == 0 && header => ws.write_string_with_format(r, c, t, &bold),
-                            Cell::Text(t) => ws.write_string(r, c, t),
+                            Cell::Text(t) | Cell::Plain(t) if r == 0 && header => ws.write_string_with_format(r, c, t, &bold),
+                            Cell::Text(t) | Cell::Plain(t) => ws.write_string(r, c, t),
+                            Cell::Date(t) => {
+                                use chrono::{Datelike, Timelike};
+                                let at = rust_xlsxwriter::ExcelDateTime::from_ymd(t.year().clamp(1900, 9999) as u16, t.month() as u8, t.day() as u8)
+                                    .and_then(|d| d.and_hms(t.hour() as u16, t.minute() as u8, t.second()));
+                                match at {
+                                    Ok(at) => ws.write_datetime_with_format(r, c, &at, if t.time() == chrono::NaiveTime::MIN { &day } else { &moment }),
+                                    Err(_) => ws.write_string(r, c, date_text(&t)),
+                                }
+                            }
                         };
                         res.map_err(|e| e.to_string())?;
                     }
@@ -463,7 +591,8 @@ fn json_of(c: &Cell) -> serde_json::Value {
         Cell::Num(n) if n.fract() == 0.0 && n.abs() < 9e15 => serde_json::Value::from(n as i64),
         Cell::Num(n) => serde_json::Value::from(n),
         Cell::Bool(b) => serde_json::Value::Bool(b),
-        Cell::Text(t) => serde_json::Value::String(t),
+        Cell::Text(t) | Cell::Plain(t) => serde_json::Value::String(t),
+        Cell::Date(t) => serde_json::Value::String(date_text(&t)),
     }
 }
 
@@ -488,7 +617,13 @@ fn xml_esc(s: &str) -> String {
 /// An OpenDocument spreadsheet: a zip of its content and manifest.
 fn write_ods(path: &Path, sheets: &[Sheet]) -> Result<(), String> {
     let mut content = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" office:version=\"1.2\"><office:body><office:spreadsheet>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<office:document-content xmlns:office=\"urn:oasis:names:tc:opendocument:xmlns:office:1.0\" xmlns:table=\"urn:oasis:names:tc:opendocument:xmlns:table:1.0\" xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\" xmlns:style=\"urn:oasis:names:tc:opendocument:xmlns:style:1.0\" xmlns:number=\"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0\" office:version=\"1.2\">",
+    );
+    // Dates shown as 2024-03-01 (and 13:05:00).
+    let ymd = "<number:year number:style=\"long\"/><number:text>-</number:text><number:month number:style=\"long\"/><number:text>-</number:text><number:day number:style=\"long\"/>";
+    let hms = "<number:text> </number:text><number:hours number:style=\"long\"/><number:text>:</number:text><number:minutes number:style=\"long\"/><number:text>:</number:text><number:seconds number:style=\"long\"/>";
+    content += &format!(
+        "<office:automatic-styles><number:date-style style:name=\"N1\">{ymd}</number:date-style><number:date-style style:name=\"N2\">{ymd}{hms}</number:date-style><style:style style:name=\"day\" style:family=\"table-cell\" style:data-style-name=\"N1\"/><style:style style:name=\"moment\" style:family=\"table-cell\" style:data-style-name=\"N2\"/></office:automatic-styles><office:body><office:spreadsheet>"
     );
     let mut used = Vec::new();
     for s in sheets {
@@ -500,7 +635,13 @@ fn write_ods(path: &Path, sheets: &[Sheet]) -> Result<(), String> {
                     Cell::Empty => "<table:table-cell/>".to_string(),
                     Cell::Num(n) => format!("<table:table-cell office:value-type=\"float\" office:value=\"{n}\"><text:p>{}</text:p></table:table-cell>", num_text(n)),
                     Cell::Bool(b) => format!("<table:table-cell office:value-type=\"boolean\" office:boolean-value=\"{b}\"><text:p>{}</text:p></table:table-cell>", if b { "TRUE" } else { "FALSE" }),
-                    Cell::Text(t) => format!("<table:table-cell office:value-type=\"string\"><text:p>{}</text:p></table:table-cell>", xml_esc(&t)),
+                    Cell::Text(t) | Cell::Plain(t) => format!("<table:table-cell office:value-type=\"string\"><text:p>{}</text:p></table:table-cell>", xml_esc(&t)),
+                    Cell::Date(t) => format!(
+                        "<table:table-cell table:style-name=\"{}\" office:value-type=\"date\" office:date-value=\"{}\"><text:p>{}</text:p></table:table-cell>",
+                        if t.time() == chrono::NaiveTime::MIN { "day" } else { "moment" },
+                        t.format("%Y-%m-%dT%H:%M:%S"),
+                        date_text(&t)
+                    ),
                 };
             }
             content += "</table:table-row>";
@@ -598,12 +739,20 @@ pub fn convert(paths: &[PathBuf], f: Format, o: &Opts, job: &crate::ops::Job) ->
             let sheets = read(p, o.delim_in)?;
             firsts.push(sheets.into_iter().next().ok_or("empty")?);
         }
-        let glued = glue(firsts)?;
+        let mut glued = glue(firsts)?;
+        // (Columns in the first table's order: as the preview had them.)
+        if paths.iter().any(|p| is_csv(&p.to_string_lossy())) {
+            shape(&mut glued, &o.cols);
+        }
         outputs.push((dir_of(&paths[0]), format!("{} ({})", stem_of(&paths[0]), crate::i18n::tr("merged")), vec![glued]));
     } else {
         for p in paths {
             job.now_on(p);
-            outputs.push((dir_of(p), stem_of(p), read(p, o.delim_in)?));
+            let mut sheets = read(p, o.delim_in)?;
+            if is_csv(&p.to_string_lossy()) {
+                sheets.iter_mut().for_each(|s| shape(s, &o.cols));
+            }
+            outputs.push((dir_of(p), stem_of(p), sheets));
         }
     }
     for (dir, stem, sheets) in outputs {
@@ -664,6 +813,30 @@ mod tests {
         assert_eq!(t("007").typed(), t("007"));
         assert_eq!(t("0.5").typed(), Cell::Num(0.5));
         assert_eq!(t("1e5").typed(), t("1e5"));
+    }
+
+    #[test]
+    fn column_types() {
+        assert_eq!(parse_num("1 234,5"), Some(1234.5));
+        assert_eq!(parse_num("1.234.567"), Some(1234567.0));
+        assert_eq!(parse_num("1,234.5"), Some(1234.5));
+        assert_eq!(parse_num("+3"), Some(3.0));
+        assert_eq!(parse_num("abc"), None);
+        assert_eq!(parse_num("nan"), None);
+        let day = |y, m, d| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap().and_time(chrono::NaiveTime::MIN);
+        assert_eq!(parse_date("2024-03-01"), Some(day(2024, 3, 1)));
+        assert_eq!(parse_date("01.03.2024"), Some(day(2024, 3, 1)));
+        assert_eq!(parse_date("01.03.24"), Some(day(2024, 3, 1)));
+        assert_eq!(parse_date("12/31/2024"), Some(day(2024, 12, 31)));
+        assert_eq!(parse_date("2024-03-01 13:05").map(|t| t.format("%H:%M").to_string()), Some("13:05".into()));
+        assert_eq!(parse_date("soon"), None);
+        // The header stays; "007" kept as text, numbers and dates read.
+        let mut s = Sheet { name: "s".into(), rows: vec![vec![t("Id"), t("Sum"), t("When")], vec![t("007"), t("1 000,5"), t("01.03.2024")], vec![t("8"), t("x"), t("")]] };
+        shape(&mut s, &[ColType::Text, ColType::Number, ColType::Date]);
+        assert_eq!(s.rows[0][0], t("Id"));
+        assert_eq!(s.rows[1], vec![Cell::Plain("007".into()), Cell::Num(1000.5), Cell::Date(day(2024, 3, 1))]);
+        assert_eq!(s.rows[2][1], t("x"));
+        assert!(!ColType::Number.fits(&t("x")) && ColType::Number.fits(&Cell::Empty));
     }
 
     #[test]

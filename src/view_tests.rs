@@ -5805,6 +5805,7 @@ fn tables_screens() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.csv"), "Name;Age;City\nАнна;30;Москва\nBob;41;\"Paris; France\"\nCid;007;Oslo\n").unwrap();
     std::fs::write(dir.join("b.csv"), "city,NAME,age\nRome,Dan,25\nKyiv,Eve,33\n").unwrap();
+    std::fs::write(dir.join("d.csv"), "Id;Sum;When;Note\n007;1 000,5;01.03.2024;ok\n012;12,25;15.04.2024 10:30;x\n3;oops;never;\n").unwrap();
     {
         let mut wb = rust_xlsxwriter::Workbook::new();
         let ws = wb.add_worksheet();
@@ -5827,7 +5828,7 @@ fn tables_screens() {
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!("no dialog") };
         assert_eq!(d.found, Some(Delim::Semicolon));
-        assert_eq!(d.preview.as_ref().unwrap()[2], vec!["Bob", "41", "Paris; France"]);
+        assert_eq!(d.preview.as_ref().unwrap().rows[2].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Bob", "41", "Paris; France"]);
         assert!(d.mergeable.is_ok(), "{:?}", d.mergeable);
         assert_eq!(d.groups[0].target(), Target::Table(Format::Xlsx));
     }
@@ -5840,7 +5841,7 @@ fn tables_screens() {
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
         assert_eq!(d.table.delim_in, Delim::Comma);
-        assert_eq!(d.preview.as_ref().unwrap()[0], vec!["Name;Age;City"]);
+        assert_eq!(d.preview.as_ref().unwrap().rows[0].iter().map(|c| c.text()).collect::<Vec<_>>(), vec!["Name;Age;City"]);
     }
     shot(&mut h, "tb1-comma");
     // Back to automatic; glued, cut every 2 rows, as CSV with semicolons.
@@ -5877,4 +5878,48 @@ fn tables_screens() {
     use crate::table::Cell;
     assert_eq!(back[0].rows[1], vec![Cell::Text("Анна".into()), Cell::Num(30.0), Cell::Text("Москва".into())]);
     assert_eq!(back[0].rows[3][1], Cell::Text("007".into()));
+    // Columns given types by hand: ids kept as text, sums written the
+    // Russian way as numbers, dates as dates.
+    h.state_mut().pane_mut().selected.clear();
+    settle(&mut h);
+    h.state_mut().pane_mut().selected.insert("d.csv".to_string());
+    h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
+    use crate::convert_ui::CRow;
+    use crate::table::ColType;
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        assert_eq!(d.table.cols, vec![ColType::Auto; 4]);
+        d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Xlsx)).unwrap();
+        d.row = CRow::Col(0);
+    }
+    // Id → Text; ↓ Sum → Number; ↓ When → Date.
+    press(&mut h, &[Action::Right, Action::Down, Action::Right, Action::Right, Action::Down, Action::Right, Action::Right, Action::Right]);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert_eq!(d.table.cols, vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto]);
+        assert_eq!(d.row, CRow::Col(2));
+    }
+    shot(&mut h, "tb3-columns");
+    h.state_mut().convert_start();
+    wait_jobs(&mut h);
+    let back = crate::table::read(&dir.join("d.xlsx"), Delim::Auto).unwrap();
+    let day = |y, m, dd, hh, mm| chrono::NaiveDate::from_ymd_opt(y, m, dd).unwrap().and_hms_opt(hh, mm, 0).unwrap();
+    assert_eq!(back[0].rows[1], vec![Cell::Text("007".into()), Cell::Num(1000.5), Cell::Date(day(2024, 3, 1, 0, 0)), Cell::Text("ok".into())]);
+    assert_eq!(back[0].rows[2][2], Cell::Date(day(2024, 4, 15, 10, 30)));
+    // What didn't read stays as it was.
+    assert_eq!(back[0].rows[3][1], Cell::Text("oops".into()));
+    // And into ODS the same.
+    h.state_mut().pane_mut().selected.insert("d.csv".to_string());
+    h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Ods)).unwrap();
+        d.table.cols = vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto];
+    }
+    h.state_mut().convert_start();
+    wait_jobs(&mut h);
+    let back = crate::table::read(&dir.join("d.ods"), Delim::Auto).unwrap();
+    assert_eq!(back[0].rows[1][1], Cell::Num(1000.5));
+    assert!(matches!(back[0].rows[1][2], Cell::Date(_)), "{:?}", back[0].rows[1][2]);
+    assert_eq!(back[0].rows[1][0], Cell::Text("007".into()));
 }

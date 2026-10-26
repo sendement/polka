@@ -52,6 +52,9 @@ pub enum CRow {
     /// Tables: the separator CSV is read with (a preview under it), the one
     /// it's written with, rows to cut at, gluing them into one.
     DelimIn,
+    /// What CSV's columns become: all at once, then each (by index).
+    ColsAll,
+    Col(usize),
     DelimOut,
     SplitRows,
     Merge,
@@ -75,7 +78,7 @@ pub struct ConvertDlg {
     pub table: crate::table::Opts,
     /// The first CSV's first rows as read now (or why not), and the
     /// separator found for it.
-    pub preview: Result<Vec<Vec<String>>, String>,
+    pub preview: Result<crate::table::Sheet, String>,
     pub found: Option<crate::table::Delim>,
     /// Whether the tables can be glued (else why not).
     pub mergeable: Result<(), String>,
@@ -106,6 +109,10 @@ impl ConvertDlg {
                 v.push(CRow::Target(i));
                 if self.csv_in().is_some() {
                     v.push(CRow::DelimIn);
+                    if !self.table.cols.is_empty() {
+                        v.push(CRow::ColsAll);
+                        v.extend((0..self.table.cols.len()).map(CRow::Col));
+                    }
                 }
                 if g.target() == Target::Table(crate::table::Format::Csv) {
                     v.push(CRow::DelimOut);
@@ -140,6 +147,11 @@ impl ConvertDlg {
         if let Some(p) = self.csv_in().map(|p| p.to_path_buf()) {
             self.preview = crate::table::preview(&p, delim, 6);
             self.found = crate::table::delim_for(&p, delim).ok().map(crate::table::Delim::of);
+            // A column each (kept while their number stays).
+            let n = self.preview.as_ref().map(|s| s.rows.iter().map(|r| r.len()).max().unwrap_or(0)).unwrap_or(0);
+            if self.table.cols.len() != n {
+                self.table.cols = vec![crate::table::ColType::Auto; n];
+            }
         }
         self.mergeable = if items.len() > 1 { crate::table::mergeable(&items, delim) } else { Err(String::new()) };
         if self.mergeable.is_err() {
@@ -203,6 +215,17 @@ impl ConvertDlg {
             CRow::DelimIn => {
                 self.table.delim_in = cycle(&crate::table::DELIMS, self.table.delim_in, d);
                 self.refresh_tables();
+            }
+            CRow::ColsAll => {
+                let cols = &mut self.table.cols;
+                let now = if cols.iter().all(|c| *c == cols[0]) { cols[0] } else { crate::table::ColType::Auto };
+                let t = cycle(&crate::table::COL_TYPES, now, d);
+                cols.iter_mut().for_each(|c| *c = t);
+            }
+            CRow::Col(k) => {
+                if let Some(c) = self.table.cols.get_mut(k) {
+                    *c = cycle(&crate::table::COL_TYPES, *c, d);
+                }
             }
             CRow::DelimOut => self.table.delim_out = cycle(&crate::table::DELIMS[1..], self.table.delim_out, d),
             CRow::SplitRows => {
@@ -307,7 +330,7 @@ impl App {
             row: CRow::Buttons,
             button: 0,
             table: Default::default(),
-            preview: Ok(Vec::new()),
+            preview: Ok(Default::default()),
             found: None,
             mergeable: Err(String::new()),
         };
@@ -502,7 +525,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
         }
     };
     // A setting with ‹ value ›.
-    let stepper = |ui: &mut Ui, row: CRow, label: &str, value: String, ev: &mut Option<(CRow, isize)>| {
+    let stepper = |ui: &mut Ui, row: CRow, label: &str, value: String, ev: &mut Option<(CRow, isize)>| -> Rect {
         let (rect, r) = crate::view::settings_row(ui, 40.0, d.row == row, ("conv", format!("{row:?}")));
         if r.clicked() {
             *ev = Some((row, 0));
@@ -519,6 +542,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
             }
         }
         ui.painter().text(pos2((left.max.x + right.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, value, FontId::proportional(14.0), v.strong_text_color());
+        rect
     };
     let max_h = (ui.ctx().content_rect().height() - 200.0).max(240.0);
     egui::ScrollArea::vertical().id_salt("convert").max_height(max_h).show(ui, |ui| {
@@ -649,10 +673,11 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
     ev
 }
 
-/// Tables' settings: CSV's separator in (with what it reads as) and out,
-/// rows to cut at, gluing.
-fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut Ui, CRow, &str, String, &mut Option<(CRow, isize)>), ev: &mut Option<(CRow, isize)>) {
-    use crate::table::Delim;
+/// Tables' settings: CSV's separator in (with what it reads as, and a
+/// preview) and its columns' types, the separator out, rows to cut at,
+/// gluing.
+fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut Ui, CRow, &str, String, &mut Option<(CRow, isize)>) -> Rect, ev: &mut Option<(CRow, isize)>) {
+    use crate::table::{Cell, ColType, Delim};
     let v = ui.visuals().clone();
     if d.csv_in().is_some() {
         let value = match (d.table.delim_in, d.found) {
@@ -660,34 +685,91 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
             (x, _) => x.label().trim().to_string(),
         };
         stepper(ui, CRow::DelimIn, tr("CSV separator"), value, ev);
-        // How the first CSV reads with it: a few rows, a few columns.
-        let (rect, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 4.0 + 6.0 * 20.0), Sense::hover());
-        let area = rect.shrink2(vec2(14.0, 2.0));
+        // How the first CSV reads with it: a few rows, a few columns (the
+        // column being set among them), as their types make them.
+        const ROW_H: f32 = 20.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 18.0 + 6.0 * ROW_H + 4.0), Sense::hover());
+        let caption = Rect::from_min_max(pos2(rect.min.x + 18.0, rect.min.y), pos2(rect.max.x - 18.0, rect.min.y + 16.0));
+        let area = Rect::from_min_max(pos2(rect.min.x + 14.0, rect.min.y + 18.0), pos2(rect.max.x - 14.0, rect.max.y - 2.0));
         ui.painter().rect_filled(area, 6.0, v.extreme_bg_color);
-        // (Which file it is.)
-        if let Some(n) = d.csv_in().and_then(|p| p.file_name()) {
-            ui.painter().text(pos2(area.max.x - 6.0, area.min.y + 2.0), Align2::RIGHT_TOP, n.to_string_lossy(), FontId::proportional(11.0), v.weak_text_color());
-        }
+        let focus = match d.row {
+            CRow::Col(k) => Some(k),
+            _ => None,
+        };
         match &d.preview {
-            Ok(rows) => {
-                let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0).clamp(1, 6);
-                let w = area.width() / cols as f32;
+            Ok(sheet) => {
+                let n = sheet.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+                let shown = n.clamp(1, 6);
+                let first = focus.map_or(0, |k| k.saturating_sub(shown - 1)).min(n.saturating_sub(shown));
+                let header = sheet.header().is_some();
+                let w = area.width() / shown as f32;
                 let font = FontId::monospace(12.0);
-                for (r, row) in rows.iter().take(6).enumerate() {
-                    for c in 0..cols {
-                        let cell = Rect::from_min_size(pos2(area.min.x + c as f32 * w, area.min.y + 2.0 + r as f32 * 20.0), vec2(w, 20.0));
-                        let text = row.get(c).cloned().unwrap_or_default();
-                        let color = if r == 0 { v.strong_text_color() } else { v.text_color() };
-                        let gal = crate::view::elided(ui, &text, font.clone(), color, w - 10.0, 1);
-                        ui.painter().galley(pos2(cell.min.x + 5.0, cell.center().y - gal.size().y / 2.0), gal, color);
-                        if c > 0 {
+                // Which file it is, and which columns show.
+                let mut room = caption.width();
+                if n > shown {
+                    let span = format!("{}–{} / {}", first + 1, first + shown, n);
+                    let gal = ui.painter().layout_no_wrap(span, FontId::proportional(11.0), v.weak_text_color());
+                    room -= gal.size().x + 12.0;
+                    ui.painter().galley(pos2(caption.max.x - gal.size().x, caption.center().y - gal.size().y / 2.0), gal, v.weak_text_color());
+                }
+                if let Some(name) = d.csv_in().and_then(|p| p.file_name()) {
+                    let gal = crate::view::elided(ui, &name.to_string_lossy(), FontId::proportional(11.0), v.weak_text_color(), room, 1);
+                    ui.painter().galley(pos2(caption.min.x, caption.center().y - gal.size().y / 2.0), gal, v.weak_text_color());
+                }
+                if let Some(k) = focus.filter(|k| (first..first + shown).contains(k)) {
+                    let col = Rect::from_min_size(pos2(area.min.x + (k - first) as f32 * w, area.min.y), vec2(w, area.height()));
+                    ui.painter().rect_filled(col.shrink(1.0), 4.0, v.selection.bg_fill.gamma_multiply(0.3));
+                }
+                for (r, row) in sheet.rows.iter().take(6).enumerate() {
+                    let line = Rect::from_min_size(pos2(area.min.x, area.min.y + 2.0 + r as f32 * ROW_H), vec2(area.width(), ROW_H));
+                    if r % 2 == 1 {
+                        ui.painter().rect_filled(line.shrink2(vec2(2.0, 0.0)), 3.0, crate::view::stripe(&v));
+                    }
+                    for c in first..first + shown {
+                        let cell = Rect::from_min_size(pos2(area.min.x + (c - first) as f32 * w, line.min.y), vec2(w, ROW_H));
+                        let raw = row.get(c).cloned().unwrap_or(Cell::Empty);
+                        let t = d.table.cols.get(c).copied().unwrap_or(ColType::Auto);
+                        let (shown_cell, ok) = if r == 0 && header { (raw, true) } else { (t.shown(&raw), t.fits(&raw)) };
+                        let color = if r == 0 && header {
+                            v.strong_text_color()
+                        } else if !ok {
+                            v.warn_fg_color
+                        } else {
+                            v.text_color()
+                        };
+                        let gal = crate::view::elided(ui, &shown_cell.text(), font.clone(), color, w - 10.0, 1);
+                        // Numbers to the right, as spreadsheets have them.
+                        let x = if matches!(shown_cell, Cell::Num(_)) { cell.max.x - 5.0 - gal.size().x } else { cell.min.x + 5.0 };
+                        ui.painter().galley(pos2(x, cell.center().y - gal.size().y / 2.0), gal, color);
+                        if c > first {
                             ui.painter().line_segment([cell.left_top(), cell.left_bottom()], Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color));
                         }
                     }
                 }
-                let more = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-                if more > cols {
-                    ui.painter().text(pos2(area.max.x - 6.0, area.max.y - 4.0), Align2::RIGHT_BOTTOM, format!("+{}", more - cols), FontId::proportional(11.0), v.weak_text_color());
+                // The columns' types: all at once, then each, with its first
+                // values as they'd become.
+                let cols = &d.table.cols;
+                if !cols.is_empty() {
+                    let all = if cols.iter().all(|c| *c == cols[0]) { cols[0].label().to_string() } else { tr("Mixed").to_string() };
+                    stepper(ui, CRow::ColsAll, tr("All columns"), all, ev);
+                    let names = sheet.header();
+                    let label_w = crate::view::SETTINGS_W - 250.0;
+                    for (k, t) in cols.iter().enumerate() {
+                        let rect = stepper(ui, CRow::Col(k), "", t.label().to_string(), ev);
+                        let name = match names.as_ref().and_then(|h| h.get(k)) {
+                            Some(h) => format!("{} · {h}", k + 1),
+                            None => trn("Column %n", k + 1),
+                        };
+                        let gal = crate::view::elided(ui, &name, FontId::proportional(14.0), v.text_color(), label_w, 1);
+                        ui.painter().galley(pos2(rect.min.x + 14.0, rect.center().y - 7.0 - gal.size().y / 2.0), gal, v.text_color());
+                        let data = sheet.rows.iter().skip(usize::from(names.is_some()));
+                        let cells: Vec<Cell> = data.filter_map(|r| r.get(k)).filter(|c| **c != Cell::Empty).take(4).cloned().collect();
+                        let bad = cells.iter().any(|c| !t.fits(c));
+                        let sample = cells.iter().map(|c| t.shown(c).text()).collect::<Vec<_>>().join(", ");
+                        let color = if bad { v.warn_fg_color } else { v.weak_text_color() };
+                        let gal = crate::view::elided(ui, &sample, FontId::proportional(11.5), color, label_w, 1);
+                        ui.painter().galley(pos2(rect.min.x + 14.0, rect.center().y + 8.0 - gal.size().y / 2.0), gal, color);
+                    }
                 }
             }
             Err(e) => {
