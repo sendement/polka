@@ -1394,6 +1394,8 @@ pub struct App {
     pub phones: Vec<crate::phones::Phone>,
     /// The format last chosen for each kind of file, in "Convert…".
     pub convert_last: Vec<(crate::convert::Group, crate::convert::Target)>,
+    /// How cut tables' parts were numbered last.
+    pub convert_numbering: crate::table::Numbering,
     /// The system clipboard, read straight from the display connection
     /// (gamepad paste has no Ctrl+V event to carry it). None in tests.
     pub sys_clip: Option<egui_winit::clipboard::Clipboard>,
@@ -1506,6 +1508,7 @@ impl App {
             net_pw: HashMap::new(),
             net_busy: HashSet::new(),
             convert_last: Vec::new(),
+            convert_numbering: Default::default(),
             phones: Vec::new(),
             closed_tabs: Vec::new(),
             help_scroll: None,

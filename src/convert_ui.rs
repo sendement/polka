@@ -57,6 +57,8 @@ pub enum CRow {
     Col(usize),
     DelimOut,
     SplitRows,
+    /// How the parts are numbered (when cut).
+    Numbering,
     Merge,
     Trash,
     Buttons,
@@ -82,6 +84,8 @@ pub struct ConvertDlg {
     pub found: Option<crate::table::Delim>,
     /// Whether the tables can be glued (else why not).
     pub mergeable: Result<(), String>,
+    /// The columns' own rows shown (folded under "All columns").
+    pub cols_open: bool,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -111,14 +115,20 @@ impl ConvertDlg {
                     v.push(CRow::DelimIn);
                     if !self.table.cols.is_empty() {
                         v.push(CRow::ColsAll);
-                        v.extend((0..self.table.cols.len()).map(CRow::Col));
+                        if self.cols_open {
+                            v.extend((0..self.table.cols.len()).map(CRow::Col));
+                        }
                     }
                 }
                 if g.target() == Target::Table(crate::table::Format::Csv) {
                     v.push(CRow::DelimOut);
                 }
                 v.push(CRow::SplitRows);
-                if g.items.len() > 1 {
+                if self.table.split.is_some() {
+                    v.push(CRow::Numbering);
+                }
+                // (Tables that don't glue: shown, not reachable.)
+                if g.items.len() > 1 && self.mergeable.is_ok() {
                     v.push(CRow::Merge);
                 }
             } else {
@@ -233,6 +243,7 @@ impl ConvertDlg {
                 all.extend(crate::table::SPLITS.iter().map(|n| Some(*n)));
                 self.table.split = cycle(&all, self.table.split, d);
             }
+            CRow::Numbering => self.table.numbering = cycle(&crate::table::NUMBERINGS, self.table.numbering, d),
             CRow::Merge => self.table.merge = !self.table.merge && self.mergeable.is_ok(),
             CRow::Trash => self.trash = !self.trash,
             CRow::Buttons => self.button = (self.button as isize + d).clamp(0, 1) as usize,
@@ -333,7 +344,9 @@ impl App {
             preview: Ok(Default::default()),
             found: None,
             mergeable: Err(String::new()),
+            cols_open: false,
         };
+        d.table.numbering = self.convert_numbering;
         d.row = d.rows()[0];
         d.sync_archive();
         d.refresh_tables();
@@ -385,6 +398,7 @@ impl App {
                 k.secret = true;
                 self.overlay = Some(Overlay::Osk(k));
             }
+            CRow::ColsAll => d.cols_open = !d.cols_open,
             _ => d.step(row, 1),
         }
     }
@@ -413,6 +427,7 @@ impl App {
         if items.is_empty() {
             return self.toast(tr("Already in that format"), false);
         }
+        self.convert_numbering = d.table.numbering;
         self.pane_mut().selected.clear();
         self.start(Op::Convert { items, trash: d.trash, archive: d.arch.clone(), table: d.table.clone() });
     }
@@ -751,24 +766,40 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
                 let cols = &d.table.cols;
                 if !cols.is_empty() {
                     let all = if cols.iter().all(|c| *c == cols[0]) { cols[0].label().to_string() } else { tr("Mixed").to_string() };
-                    stepper(ui, CRow::ColsAll, tr("All columns"), all, ev);
                     let names = sheet.header();
+                    let name_of = |k: usize| match names.as_ref().and_then(|h| h.get(k)) {
+                        Some(h) => h.clone(),
+                        None => trn("Column %n", k + 1),
+                    };
                     let label_w = crate::view::SETTINGS_W - 250.0;
-                    for (k, t) in cols.iter().enumerate() {
+                    // Folded: an arrow, and the columns set by hand under it.
+                    let rect = stepper(ui, CRow::ColsAll, "", all, ev);
+                    let (cx, cy) = (rect.min.x + 20.0, rect.center().y - 7.0);
+                    let tri = if d.cols_open {
+                        vec![pos2(cx - 5.0, cy - 3.0), pos2(cx + 5.0, cy - 3.0), pos2(cx, cy + 3.5)]
+                    } else {
+                        vec![pos2(cx - 3.0, cy - 5.0), pos2(cx + 3.5, cy), pos2(cx - 3.0, cy + 5.0)]
+                    };
+                    ui.painter().add(egui::Shape::convex_polygon(tri, v.text_color(), Stroke::NONE));
+                    let gal = crate::view::elided(ui, tr("All columns"), FontId::proportional(14.0), v.text_color(), label_w - 18.0, 1);
+                    ui.painter().galley(pos2(rect.min.x + 32.0, cy - gal.size().y / 2.0), gal, v.text_color());
+                    let set: Vec<String> = cols.iter().enumerate().filter(|(_, t)| **t != ColType::Auto).map(|(k, t)| format!("{}: {}", name_of(k), t.label())).collect();
+                    let note = if set.is_empty() { trn("Columns: %n", cols.len()) } else { set.join(" · ") };
+                    let gal = crate::view::elided(ui, &note, FontId::proportional(11.5), v.weak_text_color(), label_w - 18.0, 1);
+                    ui.painter().galley(pos2(rect.min.x + 32.0, rect.center().y + 8.0 - gal.size().y / 2.0), gal, v.weak_text_color());
+                    for (k, t) in cols.iter().enumerate().filter(|_| d.cols_open) {
                         let rect = stepper(ui, CRow::Col(k), "", t.label().to_string(), ev);
-                        let name = match names.as_ref().and_then(|h| h.get(k)) {
-                            Some(h) => format!("{} · {h}", k + 1),
-                            None => trn("Column %n", k + 1),
-                        };
-                        let gal = crate::view::elided(ui, &name, FontId::proportional(14.0), v.text_color(), label_w, 1);
-                        ui.painter().galley(pos2(rect.min.x + 14.0, rect.center().y - 7.0 - gal.size().y / 2.0), gal, v.text_color());
+                        let name = if names.is_some() { format!("{} · {}", k + 1, name_of(k)) } else { name_of(k) };
+                        // (Under "All columns": in line with its name.)
+                        let gal = crate::view::elided(ui, &name, FontId::proportional(14.0), v.text_color(), label_w - 18.0, 1);
+                        ui.painter().galley(pos2(rect.min.x + 32.0, rect.center().y - 7.0 - gal.size().y / 2.0), gal, v.text_color());
                         let data = sheet.rows.iter().skip(usize::from(names.is_some()));
                         let cells: Vec<Cell> = data.filter_map(|r| r.get(k)).filter(|c| **c != Cell::Empty).take(4).cloned().collect();
                         let bad = cells.iter().any(|c| !t.fits(c));
                         let sample = cells.iter().map(|c| t.shown(c).text()).collect::<Vec<_>>().join(", ");
                         let color = if bad { v.warn_fg_color } else { v.weak_text_color() };
-                        let gal = crate::view::elided(ui, &sample, FontId::proportional(11.5), color, label_w, 1);
-                        ui.painter().galley(pos2(rect.min.x + 14.0, rect.center().y + 8.0 - gal.size().y / 2.0), gal, color);
+                        let gal = crate::view::elided(ui, &sample, FontId::proportional(11.5), color, label_w - 18.0, 1);
+                        ui.painter().galley(pos2(rect.min.x + 32.0, rect.center().y + 8.0 - gal.size().y / 2.0), gal, color);
                     }
                 }
             }
@@ -785,13 +816,19 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, g: &GroupRow, stepper: &dyn Fn(&mut U
         Some(n) => trn("Every %n rows", n),
     };
     stepper(ui, CRow::SplitRows, tr("Cut into parts"), split, ev);
+    if d.table.split.is_some() {
+        // As the first table's parts would be named.
+        let stem = g.items.first().and_then(|p| p.file_name()).map(|n| crate::ops::split_ext(&n.to_string_lossy()).0.to_string()).unwrap_or_default();
+        let stem: String = if stem.chars().count() > 14 { stem.chars().take(13).chain(['…']).collect() } else { stem };
+        stepper(ui, CRow::Numbering, tr("Numbering"), format!("{stem}{}", d.table.numbering.tag(1, 3)), ev);
+    }
     if g.items.len() > 1 {
         let (rect, r) = crate::view::settings_row(ui, 44.0, d.row == CRow::Merge, ("conv", "merge"));
         if r.clicked() {
             *ev = Some((CRow::Merge, 0));
         }
         let ok = d.mergeable.is_ok();
-        let c = if ok { v.text_color() } else { v.weak_text_color() };
+        let c = if ok { v.text_color() } else { v.weak_text_color().gamma_multiply(0.6) };
         ui.painter().text(pos2(rect.min.x + 14.0, rect.min.y + 15.0), Align2::LEFT_CENTER, tr("Glue into one table"), FontId::proportional(14.0), c);
         let note = match &d.mergeable {
             Ok(()) => tr("same columns, case aside").to_string(),
@@ -813,7 +850,8 @@ pub fn clicked(app: &mut App, row: CRow, step: isize) {
     d.row = row;
     match step {
         0 => match row {
-            CRow::Trash | CRow::Names | CRow::Password | CRow::Merge => app.convert_activate(row),
+            CRow::Trash | CRow::Names | CRow::Password | CRow::ColsAll => app.convert_activate(row),
+            CRow::Merge if d.mergeable.is_ok() => app.convert_activate(row),
             _ => {}
         },
         -1 | 1 => d.step(row, step),

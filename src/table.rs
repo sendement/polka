@@ -471,11 +471,43 @@ pub struct Opts {
     pub merge: bool,
     /// What CSV's columns become, by position (none: all Auto).
     pub cols: Vec<ColType>,
+    /// How the parts are numbered.
+    pub numbering: Numbering,
+}
+
+/// How cut parts are named after the table: "a 1", "a (1)", "a_01"…
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Numbering {
+    #[default]
+    Space,
+    Paren,
+    Underscore,
+    Dash,
+    Part,
+    OfTotal,
+}
+
+pub const NUMBERINGS: [Numbering; 6] = [Numbering::Space, Numbering::Paren, Numbering::Underscore, Numbering::Dash, Numbering::Part, Numbering::OfTotal];
+
+impl Numbering {
+    /// What follows the name for part `k` (from 1) of `total`; the bare
+    /// numbers padded to sort right.
+    pub fn tag(self, k: usize, total: usize) -> String {
+        let w = total.to_string().len();
+        match self {
+            Numbering::Space => format!(" {k:0w$}"),
+            Numbering::Paren => format!(" ({k:0w$})"),
+            Numbering::Underscore => format!("_{k:0w$}"),
+            Numbering::Dash => format!("-{k:0w$}"),
+            Numbering::Part => format!(" - {}", crate::i18n::trn("part %n", k)),
+            Numbering::OfTotal => format!(" ({})", crate::i18n::trn("%n of %t", k).replace("%t", &total.to_string())),
+        }
+    }
 }
 
 impl Default for Opts {
     fn default() -> Self {
-        Opts { delim_in: Delim::Auto, delim_out: Delim::Comma, split: None, merge: false, cols: Vec::new() }
+        Opts { delim_in: Delim::Auto, delim_out: Delim::Comma, split: None, merge: false, cols: Vec::new(), numbering: Numbering::Space }
     }
 }
 
@@ -707,17 +739,17 @@ fn glue(tables: Vec<Sheet>) -> Result<Sheet, String> {
     Ok(out)
 }
 
-/// Cut into parts of `n` data rows, the header on each (a table without a
-/// header stays whole).
+/// Cut into parts of `n` data rows, the header on each (if it has one).
 fn cut(s: Sheet, n: usize) -> Vec<Sheet> {
-    if s.header().is_none() || s.rows.len() <= n + 1 {
+    let head = s.header().map(|_| s.rows[0].clone());
+    let skip = usize::from(head.is_some());
+    if s.rows.len() <= n + skip {
         return vec![s];
     }
-    let head = s.rows[0].clone();
-    s.rows[1..]
+    s.rows[skip..]
         .chunks(n)
         .map(|c| {
-            let mut rows = vec![head.clone()];
+            let mut rows: Vec<Vec<Cell>> = head.iter().cloned().collect();
             rows.extend(c.iter().cloned());
             Sheet { name: s.name.clone(), rows }
         })
@@ -772,9 +804,9 @@ pub fn convert(paths: &[PathBuf], f: Format, o: &Opts, job: &crate::ops::Job) ->
                     None => vec![s],
                 };
                 let many = parts.len() > 1;
-                let width = parts.len().to_string().len();
+                let total = parts.len();
                 for (k, part) in parts.into_iter().enumerate() {
-                    let tag = if many { format!(" {:0width$}", k + 1) } else { String::new() };
+                    let tag = if many { o.numbering.tag(k + 1, total) } else { String::new() };
                     files.push((format!("{stem}{sheet_tag}{tag}"), vec![part]));
                 }
             }
@@ -848,8 +880,11 @@ mod tests {
         let parts = cut(g, 2);
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1].rows, vec![vec![t("Name"), t("Age")], vec![t("Cid"), t("50")]]);
-        // No header (a number on top): not cut.
+        // No header (a number on top): cut all the same.
         let raw = Sheet { name: "r".into(), rows: vec![vec![t("1")], vec![t("2")], vec![t("3")]] };
-        assert_eq!(cut(raw, 1).len(), 1);
+        let parts = cut(raw, 2);
+        assert_eq!(parts.iter().map(|p| p.rows.len()).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(Numbering::Underscore.tag(3, 12), "_03");
+        assert_eq!(Numbering::Paren.tag(1, 3), " (1)");
     }
 }

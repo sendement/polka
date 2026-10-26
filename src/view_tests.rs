@@ -5851,13 +5851,14 @@ fn tables_screens() {
         d.table.merge = true;
         d.table.split = Some(2);
         d.table.delim_out = Delim::Semicolon;
+        d.table.numbering = crate::table::Numbering::Underscore;
     }
     settle(&mut h);
     shot(&mut h, "tb2-glue");
     h.state_mut().convert_start();
     wait_jobs(&mut h);
     let merged = crate::i18n::tr("merged");
-    let parts: Vec<String> = (1..=3).map(|k| std::fs::read_to_string(dir.join(format!("a ({merged}) {k}.csv"))).unwrap_or_else(|e| panic!("part {k}: {e}"))).collect();
+    let parts: Vec<String> = (1..=3).map(|k| std::fs::read_to_string(dir.join(format!("a ({merged})_{k}.csv"))).unwrap_or_else(|e| panic!("part {k}: {e}"))).collect();
     assert_eq!(parts[0], "Name;Age;City\nАнна;30;Москва\nBob;41;\"Paris; France\"\n");
     assert_eq!(parts[1], "Name;Age;City\nCid;007;Oslo\nDan;25;Rome\n");
     assert_eq!(parts[2], "Name;Age;City\nEve;33;Kyiv\nFay;52;Riga\n");
@@ -5889,17 +5890,22 @@ fn tables_screens() {
     use crate::table::ColType;
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         assert_eq!(d.table.cols, vec![ColType::Auto; 4]);
+        // (The numbering kept from last time.)
+        assert_eq!(d.table.numbering, crate::table::Numbering::Underscore);
         d.groups[0].pick = d.groups[0].targets.iter().position(|t| *t == Target::Table(Format::Xlsx)).unwrap();
-        d.row = CRow::Col(0);
+        // The columns folded at first.
+        assert!(!d.rows().contains(&CRow::Col(0)));
+        d.row = CRow::ColsAll;
     }
-    // Id → Text; ↓ Sum → Number; ↓ When → Date.
-    press(&mut h, &[Action::Right, Action::Down, Action::Right, Action::Right, Action::Down, Action::Right, Action::Right, Action::Right]);
+    shot(&mut h, "tb3-folded");
+    // Unfolded; Id → Text; ↓ Sum → Number; ↓ When → Date.
+    press(&mut h, &[Action::Accept, Action::Down, Action::Right, Action::Down, Action::Right, Action::Right, Action::Down, Action::Right, Action::Right, Action::Right]);
     {
         let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
         assert_eq!(d.table.cols, vec![ColType::Text, ColType::Number, ColType::Date, ColType::Auto]);
         assert_eq!(d.row, CRow::Col(2));
     }
-    shot(&mut h, "tb3-columns");
+    shot(&mut h, "tb4-columns");
     h.state_mut().convert_start();
     wait_jobs(&mut h);
     let back = crate::table::read(&dir.join("d.xlsx"), Delim::Auto).unwrap();
@@ -5922,4 +5928,26 @@ fn tables_screens() {
     assert_eq!(back[0].rows[1][1], Cell::Num(1000.5));
     assert!(matches!(back[0].rows[1][2], Cell::Date(_)), "{:?}", back[0].rows[1][2]);
     assert_eq!(back[0].rows[1][0], Cell::Text("007".into()));
+    // Tables with other columns: gluing out of reach, cutting still there,
+    // folded columns telling what was set.
+    for n in ["a.csv", "d.csv"] {
+        h.state_mut().pane_mut().selected.insert(n.to_string());
+    }
+    h.state_mut().run(Cmd::ConvertAsk);
+    settle(&mut h);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert!(d.mergeable.is_err());
+        let rows = d.rows();
+        assert!(!rows.contains(&CRow::Merge) && rows.contains(&CRow::SplitRows));
+    }
+    crate::convert_ui::clicked(h.state_mut(), CRow::Merge, 0);
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        assert!(!d.table.merge);
+        d.table.split = Some(100);
+        d.table.cols = vec![ColType::Text, ColType::Auto, ColType::Number];
+        d.row = CRow::Numbering;
+    }
+    press(&mut h, &[Action::Right]);
+    shot(&mut h, "tb5-no-glue");
 }
