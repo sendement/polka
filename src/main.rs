@@ -39,6 +39,7 @@ mod thumbs;
 mod titlebar;
 mod touch;
 mod trashbin;
+mod updates;
 mod usage;
 mod vfs;
 mod volumes;

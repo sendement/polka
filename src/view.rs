@@ -938,6 +938,7 @@ impl App {
                 (Action::Back, tr("Cancel")),
             ],
             Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
+            Some(Overlay::Versions(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Install")), (Action::Back, tr("Close"))],
             Some(Overlay::OpenWith(_)) => vec![
                 (Action::Up, tr("Move")),
                 (Action::Accept, tr("Open")),
@@ -1474,6 +1475,7 @@ impl App {
         let mut net_ev = None;
         let mut conv_ev = None;
         let mut ow_ev = None;
+        let mut ver_ev = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1510,6 +1512,7 @@ impl App {
                     Some(Overlay::Net(d)) => net_ev = crate::net_ui::draw(ui, d),
                     Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d, icons),
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
+                    Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
@@ -1551,6 +1554,9 @@ impl App {
         }
         if let Some(ev) = ow_ev {
             crate::openwith::event(self, ev);
+        }
+        if let Some(ev) = ver_ev {
+            crate::updates::event(self, ev);
         }
         if let Some((row, d)) = viewer_ev {
             self.viewer_step(row, d);

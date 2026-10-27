@@ -5811,7 +5811,9 @@ fn status_screens() {
     let menu = crate::i18n::tr("Menu");
     assert!(h.query_by_label(menu).is_some(), "the hints gave way");
     assert!(h.query_by_label("2").is_some(), "the folders went first");
-    assert!(h.query_by_label("3").is_none(), "nothing gave way");
+    // (How many fit depends on the disk's figures too; the last ones, the
+    // video and the archive, give way first.)
+    assert!(h.query_by_label("1").is_none(), "nothing gave way");
 }
 
 /// Tables: two CSVs (a semicolon one, a comma one, its columns in another
@@ -6053,4 +6055,151 @@ fn tables_screens() {
     wait_jobs(&mut h);
     assert_eq!(std::fs::read_to_string(dir.join("e (1).csv")).unwrap(), "1,2\n3,4\n");
     assert_eq!(std::fs::read_to_string(dir.join("e (2).csv")).unwrap(), "5,6\n");
+}
+
+/// Polka's versions: a stand-in list of releases (a newer one, this one,
+/// one from before the section, a draft left out) and a stand-in Flatpak
+/// repository keeping the two newest; the old one asked about twice, then
+/// downloaded and installed from its file, the newest by `flatpak update`
+/// (a stand-in flatpak answering and noting what it was told).
+#[test]
+#[ignore]
+fn versions_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::updates::{Load, current, shown};
+    use std::os::unix::fs::PermissionsExt;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let base = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("versions");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("bin")).unwrap();
+    let _ = std::fs::remove_dir_all(crate::vfs::temp_root().join("updates"));
+    let now = current();
+    let newer = (now.0, now.1 + 1, 0);
+    let mut releases = Vec::new();
+    for (v, date, notes, draft) in [
+        (newer, "2026-11-02T10:00:00Z", "- Something new\n- And a fix", false),
+        ((now.0, now.1 + 2, 0), "2026-11-09T10:00:00Z", "- Not out yet", true),
+        (now, "2026-10-27T10:00:00Z", "- Versions and updates", false),
+        ((0, 40, 0), "2026-10-25T10:00:00Z", "- Steam screenshots\n- Recordings", false),
+    ] {
+        let name = format!("polka-{}-x86_64.flatpak", shown(v));
+        let body = format!("bundle {}", shown(v));
+        std::fs::write(base.join(&name), &body).unwrap();
+        releases.push(serde_json::json!({
+            "tag_name": format!("v{}", shown(v)),
+            "draft": draft,
+            "prerelease": false,
+            "published_at": date,
+            "body": notes,
+            "html_url": format!("https://github.com/sendement/polka/releases/tag/v{}", shown(v)),
+            "assets": [
+                {"name": format!("polka-{}-1-x86_64.pkg.tar.zst", shown(v)), "browser_download_url": "file:///nonexistent", "size": 1},
+                {"name": name, "browser_download_url": format!("file://{}", base.join(&name).display()), "size": body.len()},
+            ],
+        }));
+    }
+    std::fs::write(base.join("releases.json"), serde_json::to_string(&releases).unwrap()).unwrap();
+    // The repository: the newest two kept.
+    std::fs::create_dir_all(base.join("site")).unwrap();
+    std::fs::write(base.join("site/versions.json"), format!(r#"[{{"version": "{}", "commit": "c0ffee"}}, {{"version": "{}", "commit": "abc"}}]"#, shown(now), shown(newer))).unwrap();
+    // A stand-in flatpak: installed from the repository; it notes the rest.
+    let said = base.join("flatpak-said");
+    std::fs::write(
+        base.join("bin/flatpak"),
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\ninfo) echo polka ;;\nremotes) printf 'flathub https://dl.flathub.org/repo/\\npolka file://{}/\\n' ;;\n*) echo \"$@\" >> '{}' ;;\nesac\n",
+            base.join("site").display(),
+            said.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(base.join("bin/flatpak"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    unsafe {
+        std::env::set_var("PATH", format!("{}:{path}", base.join("bin").display()));
+        std::env::set_var("POLKA_RELEASES_URL", format!("file://{}", base.join("releases.json").display()));
+        std::env::set_var("POLKA_INSTALL_WAY", "flatpak");
+        std::env::set_var("POLKA_FLATPAK_SITE", format!("file://{}", base.join("site").display()));
+    }
+    let mut h = harness(base.clone());
+    settle(&mut h);
+    h.state_mut().run(Cmd::Versions);
+    let listed = |h: &Harness<'static, App>| matches!(&h.state().overlay, Some(Overlay::Versions(d)) if !matches!(d.load, Load::Loading));
+    for _ in 0..100 {
+        if listed(&h) {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    settle(&mut h);
+    {
+        let Some(Overlay::Versions(d)) = &h.state().overlay else { panic!("no dialog") };
+        let Load::Ready(list) = &d.load else { panic!("not listed") };
+        assert_eq!(list.iter().map(|r| r.version).collect::<Vec<_>>(), vec![newer, now, (0, 40, 0)], "the draft is left out, newest first");
+        assert_eq!(d.cursor, 1, "on the installed one");
+        assert_eq!(d.flat.as_ref().map(|f| (f.from_repo, f.remote.clone())), Some((true, Some("polka".to_string()))));
+        assert_eq!(list[0].commit.as_deref(), Some("abc"));
+        assert!(list[2].commit.is_none());
+    }
+    shot(&mut h, "vr0-list");
+    // The one from before the section: said so, and asked again.
+    press(&mut h, &[Action::Down, Action::Accept]);
+    {
+        let Some(Overlay::Versions(d)) = &h.state().overlay else { panic!() };
+        assert_eq!(d.armed, Some((0, 40, 0)));
+        assert!(d.fetching.is_none(), "it went on without asking");
+    }
+    shot(&mut h, "vr1-old");
+    // Asked again: downloaded, then installed from its file in a window.
+    press(&mut h, &[Action::Accept]);
+    for _ in 0..200 {
+        if h.state().term_window.is_some() {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(h.state().term_window.is_some(), "no install window");
+    assert!(h.state().term_window_title.contains("0.40.0"), "{}", h.state().term_window_title);
+    let file = crate::vfs::temp_root().join("updates/polka-0.40.0-x86_64.flatpak");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "bundle 0.40.0");
+    for _ in 0..200 {
+        if said.exists() {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let args = std::fs::read_to_string(&said).unwrap_or_default();
+    assert!(args.starts_with("install --") && args.contains("--reinstall") && args.contains(&file.display().to_string()), "{args}");
+    // The newest: through Flatpak and the repository, nothing downloaded.
+    let _ = std::fs::remove_file(&said);
+    h.state_mut().term_window = None;
+    h.state_mut().run(Cmd::Versions);
+    for _ in 0..100 {
+        if listed(&h) {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    press(&mut h, &[Action::Up, Action::Accept]);
+    assert!(h.state().term_window.is_some(), "no window for the update");
+    for _ in 0..200 {
+        if said.exists() {
+            break;
+        }
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let args = std::fs::read_to_string(&said).unwrap_or_default();
+    assert!(args.starts_with("update --") && args.trim_end().ends_with("io.github.sendement.Polka") && !args.contains("--commit"), "{args}");
+    assert!(!crate::vfs::temp_root().join(format!("updates/polka-{}-x86_64.flatpak", shown(newer))).exists(), "downloaded anyway");
+    unsafe {
+        std::env::set_var("PATH", path);
+        std::env::remove_var("POLKA_RELEASES_URL");
+        std::env::remove_var("POLKA_INSTALL_WAY");
+        std::env::remove_var("POLKA_FLATPAK_SITE");
+    }
 }

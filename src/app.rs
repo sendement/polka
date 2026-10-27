@@ -646,6 +646,8 @@ pub enum Cmd {
     GoTo,
     SelectAll,
     Help,
+    /// Polka's versions on GitHub: updating, going back.
+    Versions,
     Quit,
     Nothing,
     /// New file from a template (None = empty).
@@ -943,6 +945,7 @@ pub enum Overlay {
     Net(Box<crate::net_ui::NetDlg>),
     Convert(Box<crate::convert_ui::ConvertDlg>),
     OpenWith(Box<crate::openwith::OpenWithDlg>),
+    Versions(Box<crate::updates::VersionsDlg>),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1813,6 +1816,7 @@ impl App {
         self.tick_terminal();
         self.dnd_tick();
         self.convert_poll();
+        self.versions_poll();
         let cfg = self.cfg.clone();
         for t in &mut self.tabs {
             {
@@ -2536,6 +2540,7 @@ impl App {
             Overlay::Net(_) => self.net_input(a),
             Overlay::Convert(_) => self.convert_input(a),
             Overlay::OpenWith(_) => self.open_with_input(a),
+            Overlay::Versions(_) => self.versions_input(a),
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::TermKeys(_) => self.term_keys_input(a),
             Overlay::TermSettings(_) => self.term_settings_input(a),
@@ -3362,6 +3367,7 @@ impl App {
             item(tr("View"), Cmd::Submenu(SubMenu::View)),
             item(tr("Sorting"), Cmd::Submenu(SubMenu::Sort)),
             item(tr("Settings…"), Cmd::Settings),
+            item(tr("Versions and updates…"), Cmd::Versions),
             item(tr("Controls"), Cmd::Help),
             item(tr("Quit"), Cmd::Quit),
         ]);
@@ -4408,6 +4414,7 @@ impl App {
                 p.selected = p.entries.iter().map(|e| e.name.clone()).collect();
             }
             Cmd::Help => self.overlay = Some(Overlay::Help),
+            Cmd::Versions => self.versions_open(),
             Cmd::Quit => {
                 let dirty = (0..self.tabs.len()).find(|&i| self.confirm_unsaved(i, crate::viewer::glue::Then::Quit));
                 if dirty.is_none() {
