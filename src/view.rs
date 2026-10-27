@@ -77,9 +77,15 @@ impl eframe::App for App {
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
         for i in inputs {
             if focused || matches!(i, Input::Pad(_) | Input::Release(_)) {
+                // A button pressed, or a pad plugged in: it's in use.
+                if matches!(i, Input::Press(_) | Input::Pad(_)) {
+                    self.pad_active = true;
+                    self.pointer_moved = 0.0;
+                }
                 self.handle(i);
             }
         }
+        self.notice_other_input(&ctx);
         self.keyboard(&ctx);
         self.tick();
         self.icons.trim(&ctx);
@@ -125,6 +131,37 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// The gamepad's hints shown: as set, or while it's the one in use.
+    pub fn show_pad(&self) -> bool {
+        match self.cfg.pad_hints {
+            crate::config::PadHints::Always => true,
+            crate::config::PadHints::Never => false,
+            crate::config::PadHints::Auto => self.pad_active,
+        }
+    }
+
+    /// A key, a click, a scroll, a finger or the mouse moved a fair way:
+    /// the gamepad isn't the one in use any more.
+    fn notice_other_input(&mut self, ctx: &egui::Context) {
+        if !self.pad_active {
+            return;
+        }
+        let (other, moved) = ctx.input(|i| {
+            let other = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key { pressed: true, .. } | egui::Event::Text(_) | egui::Event::PointerButton { pressed: true, .. } | egui::Event::MouseWheel { .. } | egui::Event::Touch { .. }
+                )
+            });
+            (other, i.pointer.delta().length())
+        });
+        // (A mouse nudged by the desk isn't one.)
+        self.pointer_moved += moved;
+        if other || self.pointer_moved > 40.0 {
+            self.pad_active = false;
+        }
+    }
+
     // ------------------------------------------------------------ keyboard
 
     fn keyboard(&mut self, ctx: &egui::Context) {
@@ -581,7 +618,9 @@ impl App {
         let v = ui.visuals().clone();
         let many = self.tabs.len() > 1;
         let gap = 6.0;
-        let shoulder_w = TAB_H * 1.4;
+        // (LB / RB beside them while the gamepad's hints show.)
+        let pad = self.show_pad();
+        let shoulder_w = if pad { TAB_H * 1.4 } else { 0.0 };
 
         let titles: Vec<_> = self
             .tabs
@@ -602,7 +641,7 @@ impl App {
         let side_of = |i: usize| if !dual { None } else if i == self.tab_of(0) { Some(0) } else if i == self.tab_of(1) { Some(1) } else { None };
         const BADGE: f32 = 18.0;
         let widths: Vec<f32> = titles.iter().enumerate().map(|(i, g)| (g.size().x + 28.0 + close_w + if side_of(i).is_some() { BADGE + 6.0 } else { 0.0 }).max(96.0)).collect();
-        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + 2) as f32;
+        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
         let mut x = (row.center().x - total / 2.0).max(row.min.x);
@@ -613,8 +652,10 @@ impl App {
         let mut resting = None;
         let mut rects = Vec::new();
 
-        shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
-        x += shoulder_w + gap;
+        if pad {
+            shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
+            x += shoulder_w + gap;
+        }
         for (i, (title, w)) in titles.into_iter().zip(widths).enumerate() {
             let rect = at(x, w);
             x += w + gap;
@@ -685,7 +726,9 @@ impl App {
         if r.on_hover_text(tr("New tab")).clicked() {
             new_tab = true;
         }
-        shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
+        if pad {
+            shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
+        }
         ui.add_space(6.0);
         self.tab_rects = rects;
         if let Some(i) = resting {
@@ -743,7 +786,8 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let from = ui.cursor().max.x;
-                    for (a, label) in self.hints().into_iter().rev() {
+                    let hints = if self.show_pad() { self.hints() } else { Vec::new() };
+                    for (a, label) in hints.into_iter().rev() {
                         ui.label(label);
                         glyph(ui, a, self.pad);
                         ui.add_space(6.0);
@@ -3466,6 +3510,14 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
     }
     if r.clicked() {
         ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
+    }
+
+    // The gamepad's hints: while it's in use, always or never.
+    let (rect, r) = settings_row(ui, 44.0, st.row == row::PAD_HINTS, "pad-hints");
+    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Gamepad hints"), label_font.clone(), v.text_color());
+    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {} ▶", cfg.pad_hints.label()), FontId::proportional(15.0), v.strong_text_color());
+    if r.clicked() {
+        ev = Some(SettingsEvent::Toggle(row::PAD_HINTS));
     }
 
     // A finger opens on one tap or two.

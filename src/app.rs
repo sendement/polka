@@ -1103,6 +1103,10 @@ impl IconPicker {
 }
 
 pub const SETTINGS_ROWS: usize = row::CLOSE + 1;
+
+/// The gamepad channel's sender when there's no gamepad thread (tests),
+/// the latest window's.
+pub static PAD_TX: std::sync::Mutex<Option<crossbeam_channel::Sender<Input>>> = std::sync::Mutex::new(None);
 pub mod row {
     pub const ACCENT: usize = 0;
     pub const APPEARANCE: usize = 1;
@@ -1121,12 +1125,13 @@ pub mod row {
     pub const INSTALL: usize = 13;
     pub const PASSWORDS: usize = 14;
     pub const REMEMBER_RIGHT: usize = 15;
-    pub const TOUCH_OPEN: usize = 16;
-    pub const TITLEBAR: usize = 17;
-    pub const WIN_STYLE: usize = 18;
-    pub const WIN_SIDE: usize = 19;
-    pub const WIN_ORDER: usize = 20;
-    pub const CLOSE: usize = 21;
+    pub const PAD_HINTS: usize = 16;
+    pub const TOUCH_OPEN: usize = 17;
+    pub const TITLEBAR: usize = 18;
+    pub const WIN_STYLE: usize = 19;
+    pub const WIN_SIDE: usize = 20;
+    pub const WIN_ORDER: usize = 21;
+    pub const CLOSE: usize = 22;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1328,6 +1333,11 @@ pub struct App {
     pub pad_rx: Receiver<Input>,
     pub pad: PadKind,
     pub pad_seen: bool,
+    /// The gamepad was used last (not the keyboard, the mouse or a finger):
+    /// its hints show (as set).
+    pub pad_active: bool,
+    /// The mouse moved this far since the gamepad was last used.
+    pub pointer_moved: f32,
     /// Range selection while Select (or Shift on the keyboard) is held.
     pub range: Option<RangeSel>,
     pub icon_pick: Option<IconPick>,
@@ -1444,8 +1454,9 @@ impl App {
             // Dropping the last sender would close the channel.
             std::mem::forget(pad_tx);
         } else {
-            // Keep the sender alive so the channel never reports disconnection.
-            std::mem::forget(pad_tx);
+            // Kept, so the channel never reports disconnection (tests press
+            // the "gamepad" through it).
+            *PAD_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(pad_tx);
         }
         let icon_ctx = ctx.clone();
         let mut icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
@@ -1491,6 +1502,8 @@ impl App {
             pad_rx,
             pad: PadKind::default(),
             pad_seen: false,
+            pad_active: false,
+            pointer_moved: 0.0,
             range: None,
             icon_pick: None,
             clip: None,
@@ -3488,7 +3501,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER => self.settings_step(row, 0.0),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -3676,6 +3689,13 @@ impl App {
             }
             row::REMEMBER_RIGHT => {
                 self.cfg.remember_right = !self.cfg.remember_right;
+                self.cfg.save();
+            }
+            row::PAD_HINTS => {
+                use crate::config::PadHints;
+                let all = PadHints::ALL;
+                let at = all.iter().position(|h| *h == self.cfg.pad_hints).unwrap_or(0) as isize;
+                self.cfg.pad_hints = all[(at + if d == 0.0 { 1 } else { d as isize }).rem_euclid(all.len() as isize) as usize];
                 self.cfg.save();
             }
             row::TOUCH_OPEN => {

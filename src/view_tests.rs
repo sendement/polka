@@ -37,14 +37,18 @@ fn harness_with(dir: PathBuf, size: [f32; 2], tag: &str) -> Harness<'static, App
     if tag.is_empty() {
         let _ = std::fs::remove_file(cfg.join("polka/config.toml"));
     }
-    Harness::builder()
+    let mut h = Harness::builder()
         .with_size(size)
         .wgpu()
         .build_eframe(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             crate::fonts::install(&cc.egui_ctx);
             App::new(cc.egui_ctx.clone(), Some(dir))
-        })
+        });
+    // The gamepad's hints always (tests press it through handle(), and
+    // click with the mouse); pad_hints_screens sees to "while in use".
+    h.state_mut().cfg.pad_hints = crate::config::PadHints::Always;
+    h
 }
 
 fn settle(h: &mut Harness<'static, App>) {
@@ -6202,4 +6206,57 @@ fn versions_screens() {
         std::env::remove_var("POLKA_INSTALL_WAY");
         std::env::remove_var("POLKA_FLATPAK_SITE");
     }
+}
+
+/// The gamepad's hints while it's in use: hidden at first, shown (and LB /
+/// RB by the tabs) once a button is pressed, gone again on a key, on a
+/// click, on the mouse moved a fair way (not on a nudge); "always" and
+/// "never" as they say.
+#[test]
+#[ignore]
+fn pad_hints_screens() {
+    use crate::config::PadHints;
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir);
+    h.state_mut().cfg.pad_hints = PadHints::Auto;
+    settle(&mut h);
+    let menu = crate::i18n::tr("Menu");
+    let shown = |h: &Harness<'static, App>| h.query_by_label(menu).is_some();
+    assert!(!shown(&h), "hints before the gamepad was touched");
+    shot(&mut h, "ph0-hidden");
+    // A button on the "gamepad" (through its channel, as the real one).
+    let press = |h: &mut Harness<'static, App>, a: Action| {
+        let tx = crate::app::PAD_TX.lock().unwrap().clone().expect("pad channel");
+        tx.send(Input::Press(a)).unwrap();
+        tx.send(Input::Release(a)).unwrap();
+        settle(h);
+    };
+    press(&mut h, Action::Down);
+    assert!(h.state().pad_active && shown(&h), "no hints after a button");
+    shot(&mut h, "ph1-shown");
+    // A nudge of the mouse: still there; a real move: gone.
+    h.event(egui::Event::PointerMoved(egui::pos2(500.0, 300.0)));
+    settle(&mut h);
+    h.event(egui::Event::PointerMoved(egui::pos2(505.0, 302.0)));
+    settle(&mut h);
+    assert!(h.state().pad_active, "a nudge of the mouse hid them");
+    h.event(egui::Event::PointerMoved(egui::pos2(700.0, 420.0)));
+    settle(&mut h);
+    assert!(!h.state().pad_active && !shown(&h), "hints stayed with the mouse moving");
+    // Back with a button; a key takes them away.
+    press(&mut h, Action::Up);
+    assert!(shown(&h));
+    h.key_press(egui::Key::ArrowDown);
+    settle(&mut h);
+    assert!(!shown(&h), "hints stayed after a key");
+    // Always and never.
+    h.state_mut().cfg.pad_hints = PadHints::Always;
+    settle(&mut h);
+    assert!(shown(&h));
+    press(&mut h, Action::Down);
+    h.state_mut().cfg.pad_hints = PadHints::Never;
+    settle(&mut h);
+    assert!(!shown(&h));
 }

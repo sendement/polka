@@ -100,6 +100,29 @@ pub struct Config {
     pub win_left: bool,
     /// The status bar's figures.
     pub status: crate::status::Shown,
+    /// The gamepad's button hints: shown while it's in use, always, never.
+    pub pad_hints: PadHints,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PadHints {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+impl PadHints {
+    pub const ALL: [PadHints; 3] = [PadHints::Auto, PadHints::Always, PadHints::Never];
+
+    pub fn label(self) -> &'static str {
+        crate::i18n::tr(match self {
+            PadHints::Auto => "While in use",
+            PadHints::Always => "Always",
+            PadHints::Never => "Never",
+        })
+    }
 }
 
 /// The terminal page.
@@ -242,6 +265,7 @@ impl Default for Config {
             win_style: crate::titlebar::Style::Auto,
             win_order: 0,
             win_left: false,
+            pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),
         }
     }
