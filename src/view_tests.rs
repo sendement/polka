@@ -6013,6 +6013,38 @@ fn tables_screens() {
     }
     press(&mut h, &[Action::Right]);
     shot(&mut h, "tb6-no-header");
+    // A size of one's own: ← from "No" comes round to it, typed on the
+    // keyboard; too small is taken as the least.
+    if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
+        tbm(d).opts.split = None;
+        d.row = CRow::SplitRows(0);
+    }
+    press(&mut h, &[Action::Left]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))), "no keyboard for the size");
+    osk_type(&mut h, "50");
+    h.state_mut().osk_submit();
+    settle(&mut h);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!("the dialog didn't come back") };
+        assert!(tb(d).own_on);
+        assert_eq!(tb(d).opts.split, Some(100));
+    }
+    // A again: typed anew.
+    press(&mut h, &[Action::Accept]);
+    osk_type(&mut h, "2 500");
+    h.state_mut().osk_submit();
+    settle(&mut h);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert_eq!((tb(d).own, tb(d).opts.split), (Some(2500), Some(2500)));
+    }
+    shot(&mut h, "tb7-own-size");
+    // → leaves it for "No" and ← finds it again as it was.
+    press(&mut h, &[Action::Right, Action::Left]);
+    {
+        let Some(Overlay::Convert(d)) = &h.state().overlay else { panic!() };
+        assert_eq!(tb(d).opts.split, Some(2500));
+    }
     if let Some(Overlay::Convert(d)) = h.state_mut().overlay.as_mut() {
         tbm(d).opts.split = Some(2);
         tbm(d).opts.numbering = crate::table::Numbering::Paren;

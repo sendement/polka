@@ -39,6 +39,9 @@ pub struct TableSide {
     pub mergeable: Result<(), String>,
     /// The columns' own rows shown (folded under "All columns").
     pub cols_open: bool,
+    /// Cutting at a size of one's own (typed), and that size.
+    pub own_on: bool,
+    pub own: Option<usize>,
     /// Being read again (with another separator), as reading number `turn`.
     pub reading: bool,
     pub turn: u64,
@@ -149,9 +152,16 @@ pub struct ConvertDlg {
     rx: std::sync::mpsc::Receiver<Ready>,
     /// Which opening it is (each scrolls from the top).
     serial: u64,
+    /// A group whose own size of parts is to be typed now.
+    ask_rows: Option<usize>,
 }
 
 const MIB: u64 = 1024 * 1024;
+
+/// The bounds of a size of parts of one's own.
+pub const ROWS_MIN: usize = 100;
+pub const ROWS_MAX: usize = 1_000_000;
+const ROWS_SPAN: &str = "100 – 1 000 000";
 
 impl ConvertDlg {
     /// The rows there are, in order.
@@ -335,9 +345,25 @@ impl ConvertDlg {
             }
             CRow::SplitRows(i) => {
                 if let Some(t) = self.groups[i].table.as_mut() {
-                    let mut all: Vec<Option<usize>> = vec![None];
-                    all.extend(crate::table::SPLITS.iter().map(|n| Some(*n)));
-                    t.opts.split = cycle(&all, t.opts.split, d);
+                    // No, the usual sizes, then one's own (None at the end).
+                    let mut all: Vec<Option<Option<usize>>> = vec![Some(None)];
+                    all.extend(crate::table::SPLITS.iter().map(|n| Some(Some(*n))));
+                    all.push(None);
+                    let now = if t.own_on { None } else { Some(t.opts.split) };
+                    match cycle(&all, now, d) {
+                        Some(split) => {
+                            t.own_on = false;
+                            t.opts.split = split;
+                        }
+                        // Its own: as typed before, else typed now.
+                        None => {
+                            t.own_on = true;
+                            match t.own {
+                                Some(n) => t.opts.split = Some(n),
+                                None => self.ask_rows = Some(i),
+                            }
+                        }
+                    }
                 }
             }
             CRow::Numbering(i) => {
@@ -399,12 +425,59 @@ impl App {
                 static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             },
+            ask_rows: None,
         };
         let (last, numbering) = (self.convert_last.clone(), self.convert_numbering);
         std::thread::spawn(move || {
             let _ = tx.send(Ready::Opened(prepare(paths, &last, numbering)));
         });
         self.overlay = Some(Overlay::Convert(Box::new(d)));
+    }
+
+    /// The size of parts typed, when one's own was asked for.
+    pub fn convert_ask_rows(&mut self) {
+        let Some(Overlay::Convert(d)) = self.overlay.as_mut() else { return };
+        let Some(group) = d.ask_rows.take() else { return };
+        let Some(Overlay::Convert(d)) = self.overlay.take() else { return };
+        let now = d.groups[group].table.as_ref().and_then(|t| t.own).map(|n| n.to_string()).unwrap_or_default();
+        let title = format!("{} ({ROWS_SPAN})", tr("Rows in a part"));
+        self.overlay = Some(Overlay::Osk(Osk::new(&title, &now, OskPurpose::ConvertRows { dlg: d, group })));
+    }
+
+    /// Typed: kept within bounds (and said so), else left as it was.
+    pub fn convert_rows(&mut self, mut d: Box<ConvertDlg>, group: usize, raw: String) {
+        let digits: String = raw.chars().filter(|c| !c.is_whitespace() && *c != '\'' && *c != '_').collect();
+        if let Some(t) = d.groups[group].table.as_mut() {
+            match digits.parse::<u64>() {
+                Ok(n) => {
+                    let k = n.clamp(ROWS_MIN as u64, ROWS_MAX as u64) as usize;
+                    if k as u64 != n {
+                        self.toast(format!("{}: {ROWS_SPAN}", tr("Rows in a part")), false);
+                    }
+                    t.own = Some(k);
+                    t.own_on = true;
+                    t.opts.split = Some(k);
+                }
+                _ => {
+                    if !digits.is_empty() {
+                        self.toast(format!("{}: {raw}", tr("Failed")), true);
+                    }
+                    // (Nothing of its own yet: back to what it was.)
+                    if t.own.is_none() {
+                        t.own_on = false;
+                    }
+                }
+            }
+        }
+        self.overlay = Some(Overlay::Convert(d));
+    }
+
+    /// The keyboard closed without a size: as it was.
+    pub fn convert_rows_cancelled(&mut self, mut d: Box<ConvertDlg>, group: usize) {
+        if let Some(t) = d.groups[group].table.as_mut().filter(|t| t.own.is_none()) {
+            t.own_on = false;
+        }
+        self.overlay = Some(Overlay::Convert(d));
     }
 
     /// What came from the other thread (each frame).
@@ -441,6 +514,7 @@ impl App {
             Action::Left | Action::Right => {
                 let row = d.row;
                 d.step(row, if a == Action::Left { -1 } else { 1 });
+                self.convert_ask_rows();
             }
             Action::Accept => {
                 let row = d.row;
@@ -476,7 +550,15 @@ impl App {
                     t.cols_open = !t.cols_open;
                 }
             }
-            _ => d.step(row, 1),
+            // One's own size: typed again.
+            CRow::SplitRows(i) if d.groups[i].table.as_ref().is_some_and(|t| t.own_on) => {
+                d.ask_rows = Some(i);
+                self.convert_ask_rows();
+            }
+            _ => {
+                d.step(row, 1);
+                self.convert_ask_rows();
+            }
         }
     }
 
@@ -615,6 +697,8 @@ fn prepare(paths: Vec<PathBuf>, last: &[(Group, Target)], numbering: crate::tabl
             found: None,
             mergeable: Err(String::new()),
             cols_open: false,
+            own_on: false,
+            own: None,
             reading: false,
             turn: 0,
         };
@@ -1027,9 +1111,11 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, i: usize, g: &GroupRow, t: &TableSide
     if g.target() == Target::Table(crate::table::Format::Csv) {
         stepper(ui, CRow::DelimOut(i), tr("Write CSV with"), t.opts.delim_out.label().trim().to_string(), ev);
     }
-    let split = match t.opts.split {
-        None => tr("No").to_string(),
-        Some(n) => trn("Every %n rows", n),
+    let split = match (t.own_on, t.opts.split) {
+        (true, Some(n)) if t.own.is_some() => format!("{} · {}", trn("Every %n rows", n), tr("own")),
+        (true, _) => tr("Own size…").to_string(),
+        (_, None) => tr("No").to_string(),
+        (_, Some(n)) => trn("Every %n rows", n),
     };
     stepper(ui, CRow::SplitRows(i), tr("Cut into parts"), split, ev);
     if t.opts.split.is_some() {
@@ -1068,9 +1154,13 @@ pub fn clicked(app: &mut App, row: CRow, step: isize) {
         0 => match row {
             CRow::Trash | CRow::Names | CRow::Password | CRow::ColsAll(_) => app.convert_activate(row),
             CRow::Merge(i) if d.groups[i].table.as_ref().is_some_and(|t| t.mergeable.is_ok()) => app.convert_activate(row),
+            CRow::SplitRows(i) if d.groups[i].table.as_ref().is_some_and(|t| t.own_on) => app.convert_activate(row),
             _ => {}
         },
-        -1 | 1 => d.step(row, step),
+        -1 | 1 => {
+            d.step(row, step);
+            app.convert_ask_rows();
+        }
         10 => app.convert_start(),
         11 => app.overlay = None,
         _ => {

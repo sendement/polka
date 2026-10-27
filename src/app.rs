@@ -796,6 +796,8 @@ pub enum OskPurpose {
     NetPassword { id: String, open: bool },
     /// The password of the archives "Convert…" packs (the dialog comes back).
     ConvertPassword { dlg: Box<crate::convert_ui::ConvertDlg> },
+    /// A size of table parts of one's own, for that group.
+    ConvertRows { dlg: Box<crate::convert_ui::ConvertDlg>, group: usize },
 }
 
 /// What to do again once an archive password is entered.
@@ -2731,6 +2733,7 @@ impl App {
                 OskPurpose::NewTag { ed } => self.overlay = Some(Overlay::Tags(*ed)),
                 OskPurpose::NetField { dlg, .. } => self.overlay = Some(Overlay::Net(dlg)),
                 OskPurpose::ConvertPassword { dlg } => self.overlay = Some(Overlay::Convert(dlg)),
+                OskPurpose::ConvertRows { dlg, group } => self.convert_rows_cancelled(dlg, group),
                 _ => {}
             }
         }
@@ -2759,6 +2762,9 @@ impl App {
         }
         if let OskPurpose::ConvertPassword { dlg } = k.purpose {
             return self.convert_password(dlg, raw);
+        }
+        if let OskPurpose::ConvertRows { dlg, group } = k.purpose {
+            return self.convert_rows(dlg, group, raw);
         }
         if let OskPurpose::Sudo { op } = k.purpose {
             return self.sudo_typed(*op, raw);
@@ -2932,7 +2938,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } | OskPurpose::ConvertRows { .. } => unreachable!(),
         }
     }
 
