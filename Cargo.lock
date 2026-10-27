@@ -3556,7 +3556,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.45.1"
+version = "0.46.0"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -3590,6 +3590,7 @@ dependencies = [
  "regex",
  "resvg",
  "rodio",
+ "roxmltree",
  "rust_xlsxwriter",
  "serde",
  "serde_json",

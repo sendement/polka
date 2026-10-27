@@ -1223,7 +1223,7 @@ pub mod row {
 }
 
 /// "Open in Polka" kinds, in the settings' order.
-pub const OPEN_KINDS: usize = 4;
+pub const OPEN_KINDS: usize = 5;
 
 impl Config {
     pub fn open_flag(&mut self, i: usize) -> &mut bool {
@@ -1231,7 +1231,8 @@ impl Config {
             0 => &mut self.open_text,
             1 => &mut self.open_images,
             2 => &mut self.open_music,
-            _ => &mut self.open_videos,
+            3 => &mut self.open_videos,
+            _ => &mut self.open_docs,
         }
     }
 }

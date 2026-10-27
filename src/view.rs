@@ -208,8 +208,11 @@ impl App {
                 self.esc_down = false;
             }
         }
+        // A document shown: Ctrl+C copies its selected text, not files.
+        let doc = self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_doc());
         for ev in events {
             match ev {
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if doc => {}
                 egui::Event::Text(t) if osk => {
                     if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
                         k.insert(&t);
@@ -1066,6 +1069,22 @@ impl App {
                 (Action::Left, tr("Seek")),
                 (Action::LeftTrigger, tr("Track")),
                 (Action::Select, tr("Repeat; hold: volume")),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Close")),
+            ],
+            // A document: ↑ ↓ scroll, ← → pages (a spreadsheet's columns,
+            // its sheets on the triggers).
+            None if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_sheets()) && self.focus == Focus::Panes => vec![
+                (Action::Up, tr("Scroll")),
+                (Action::LeftTrigger, tr("Sheet")),
+                (Action::Actions, tr("Actions")),
+                (Action::Back, tr("Close")),
+            ],
+            None if self.cur_tab().viewer.as_ref().is_some_and(|v| v.is_doc()) && self.focus == Focus::Panes => vec![
+                (Action::Up, tr("Scroll")),
+                (Action::Left, tr("Page")),
+                (Action::LeftTrigger, tr("Zoom")),
+                (Action::Accept, tr("Fit width")),
                 (Action::Actions, tr("Actions")),
                 (Action::Back, tr("Close")),
             ],
@@ -3533,9 +3552,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                         ev = Some(SettingsEvent::Row(row::OPEN_IN));
                                     }
                                     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
-                                    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
-                                    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos];
-                                    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
+                                    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video"), tr("Documents")];
+                                    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos, cfg.open_docs];
+                                    let chip_w = (SETTINGS_W - 28.0 - 4.0 * 8.0) / 5.0;
                                     for (i, label) in kinds.iter().enumerate() {
                                         let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
                                         let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());

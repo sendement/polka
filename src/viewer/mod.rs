@@ -1,7 +1,8 @@
-//! Built-in viewer: text (with syntax highlighting) and pictures, shown in
-//! place of a tab's panes.
+//! Built-in viewer: text (with syntax highlighting), pictures, sound,
+//! video and documents, shown in place of a tab's panes.
 
 pub mod audio;
+pub mod docs;
 pub mod draw;
 pub mod edit;
 pub mod glue;
@@ -26,6 +27,8 @@ pub enum Kind {
     Image,
     Audio,
     Video,
+    /// PDF, word processing, presentations, spreadsheets.
+    Doc,
 }
 
 /// What the viewer can show for this file, if anything. Launchers and
@@ -39,6 +42,9 @@ pub fn kind(path: &Path, name: &str) -> Option<Kind> {
     }
     if video::is_video(name) || crate::steam::is_recording(path) {
         return Some(Kind::Video);
+    }
+    if docs::doc_kind(name).is_some() && std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return Some(Kind::Doc);
     }
     if crate::launch::runs(path) || crate::vfs::is_archive_name(name) {
         return None;
@@ -61,11 +67,12 @@ pub struct OpenIn {
     pub images: bool,
     pub audio: bool,
     pub video: bool,
+    pub docs: bool,
 }
 
 impl OpenIn {
     pub fn from(cfg: &crate::config::Config) -> Self {
-        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music, video: cfg.open_videos }
+        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music, video: cfg.open_videos, docs: cfg.open_docs }
     }
 }
 
@@ -76,6 +83,7 @@ pub fn kind_in(path: &Path, name: &str, open: OpenIn) -> Option<Kind> {
         Kind::Image if open.images => Some(Kind::Image),
         Kind::Audio if open.audio => Some(Kind::Audio),
         Kind::Video if open.video => Some(Kind::Video),
+        Kind::Doc if open.docs => Some(Kind::Doc),
         _ => None,
     }
 }
@@ -122,6 +130,7 @@ pub enum Content {
     Image(Box<ImageState>),
     Audio(Box<audio::AudioState>),
     Video(Box<video::VideoState>),
+    Doc(Box<docs::DocState>),
     Error(String),
 }
 
@@ -152,6 +161,7 @@ impl Viewer {
         let content = match kind(&path, &name) {
             Some(Kind::Audio) => Content::Audio(Box::new(audio::AudioState::open(path.clone(), siblings, volume, ctx))),
             Some(Kind::Video) => Content::Video(Box::new(video::VideoState::open(path.clone(), siblings, volume, ctx))),
+            Some(Kind::Doc) => Content::Doc(Box::new(docs::DocState::open(&path, &name, ctx))),
             Some(Kind::Image) => {
                 let index = siblings.iter().position(|p| *p == path).unwrap_or(0);
                 let siblings = if siblings.is_empty() { vec![path.clone()] } else { siblings };
@@ -194,6 +204,14 @@ impl Viewer {
 
     pub fn is_text(&self) -> bool {
         matches!(self.content, Content::Text(_))
+    }
+
+    pub fn is_doc(&self) -> bool {
+        matches!(self.content, Content::Doc(_))
+    }
+
+    pub fn is_sheets(&self) -> bool {
+        matches!(&self.content, Content::Doc(d) if matches!(d.body, docs::Body::Sheets(_)))
     }
 
     pub fn input(&mut self, a: Action, ctx: &egui::Context) -> Out {
@@ -254,6 +272,10 @@ impl Viewer {
                     }
                     _ => {}
                 }
+                Out::Nothing
+            }
+            Content::Doc(d) => {
+                d.input(a);
                 Out::Nothing
             }
             Content::Audio(_) | Content::Video(_) | Content::Error(_) => Out::Nothing,

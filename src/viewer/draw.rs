@@ -112,6 +112,7 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
             }
         }
         Content::Image(im) => draw_image(ui, im),
+        Content::Doc(d) => crate::viewer::docs::draw(ui, d),
         Content::Audio(a) => {
             if let Some(x) = draw_audio(ui, a, prefs) {
                 act = Some(x);
@@ -366,6 +367,14 @@ fn details(v: &Viewer) -> String {
             if let Ok(md) = std::fs::metadata(m.path()) {
                 parts.push(crate::app::human_size(md.len()));
             }
+            parts.join(" · ")
+        }
+        Content::Doc(d) => {
+            let mut parts = vec![d.info()];
+            if let Ok(md) = std::fs::metadata(&v.path) {
+                parts.push(crate::app::human_size(md.len()));
+            }
+            parts.retain(|p| !p.is_empty());
             parts.join(" · ")
         }
         Content::Error(_) => String::new(),

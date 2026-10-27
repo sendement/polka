@@ -6364,3 +6364,112 @@ fn settings_cats_screens() {
     assert!(matches!(h.state().overlay, Some(Overlay::Versions(_))), "no versions");
     h.state_mut().overlay = None;
 }
+
+/// Documents in the viewer: a PDF (two pages, its text laid over them),
+/// Word and Writer files, PowerPoint and Impress slides, a workbook with
+/// two sheets. The pad scrolls, pages, zooms and changes sheets; the mouse
+/// selects a PDF line and copies it.
+#[test]
+#[ignore]
+fn docs_screens() {
+    use crate::viewer::Content;
+    use crate::viewer::docs::{Body, fixtures};
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("docs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    fixtures::pdf(&dir.join("a-report.pdf"));
+    fixtures::docx(&dir.join("b-quarter.docx"));
+    fixtures::odt(&dir.join("c-notes.odt"));
+    fixtures::pptx(&dir.join("d-roadmap.pptx"));
+    fixtures::odp(&dir.join("e-impress.odp"));
+    fixtures::xlsx(&dir.join("f-sales.xlsx"));
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    settle(&mut h);
+    fn doc<'a>(h: &'a Harness<'static, App>) -> &'a crate::viewer::docs::DocState {
+        match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+            Some(Content::Doc(d)) => d,
+            _ => panic!("not a document"),
+        }
+    }
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        h.state_mut().close_viewer();
+        settle(h);
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Accept]);
+        for _ in 0..100 {
+            settle(h);
+            if !matches!(doc(h).body, Body::Loading(_)) {
+                break;
+            }
+        }
+        // (Pages drawn on another thread.)
+        for _ in 0..20 {
+            settle(h);
+        }
+    };
+    // The PDF: two pages; ← → page, the triggers zoom.
+    open(&mut h, "a-report.pdf");
+    assert!(matches!(doc(&h).body, Body::Pdf(_)), "{}", match &doc(&h).body {
+        Body::Failed(e) => e.clone(),
+        _ => String::new(),
+    });
+    assert_eq!(doc(&h).pages(), 2);
+    shot(&mut h, "dc0-pdf");
+    // Selected with the mouse, copied.
+    let line = h.get_by_label("Hello PDF world").rect();
+    h.event(egui::Event::PointerMoved(line.left_center() + egui::vec2(1.0, 0.0)));
+    h.event(egui::Event::PointerButton { pos: line.left_center() + egui::vec2(1.0, 0.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(egui::Event::PointerMoved(line.right_center() - egui::vec2(1.0, 0.0)));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: line.right_center() - egui::vec2(1.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.step();
+    shot(&mut h, "dc1-pdf-selected");
+    h.event(egui::Event::Copy);
+    h.step();
+    let copied: Vec<String> = h.output().platform_output.commands.iter().filter_map(|c| if let egui::OutputCommand::CopyText(t) = c { Some(t.clone()) } else { None }).collect();
+    assert_eq!(copied, vec!["Hello PDF world".to_string()], "not copied");
+    press(&mut h, &[Action::Right]);
+    settle(&mut h);
+    assert_eq!(doc(&h).page, 1, "→ didn't turn the page");
+    press(&mut h, &[Action::RightTrigger, Action::RightTrigger]);
+    settle(&mut h);
+    assert!(doc(&h).zoom > 1.5);
+    shot(&mut h, "dc2-pdf-zoomed");
+    // Word and Writer.
+    open(&mut h, "b-quarter.docx");
+    assert!(matches!(doc(&h).body, Body::Flow(_)));
+    assert!(h.query_by_label_contains("twelve percent").is_some());
+    shot(&mut h, "dc3-docx");
+    press(&mut h, &[Action::Down, Action::Down, Action::Down]);
+    assert!(doc(&h).offset.y > 0.0, "↓ didn't scroll");
+    open(&mut h, "c-notes.odt");
+    assert!(h.query_by_label_contains("Meeting notes").is_some());
+    shot(&mut h, "dc4-odt");
+    // Slides.
+    open(&mut h, "d-roadmap.pptx");
+    assert_eq!(doc(&h).pages(), 2);
+    assert!(h.query_by_label_contains("Polka roadmap").is_some());
+    shot(&mut h, "dc5-pptx");
+    press(&mut h, &[Action::Right]);
+    settle(&mut h);
+    assert_eq!(doc(&h).page, 1);
+    shot(&mut h, "dc6-pptx-second");
+    open(&mut h, "e-impress.odp");
+    assert!(h.query_by_label_contains("Made in Impress").is_some());
+    shot(&mut h, "dc7-odp");
+    // A workbook: its sheets on the triggers.
+    open(&mut h, "f-sales.xlsx");
+    assert_eq!(doc(&h).pages(), 2);
+    assert!(h.query_by_label("Region 3").is_some());
+    shot(&mut h, "dc8-xlsx");
+    press(&mut h, &[Action::RightTrigger]);
+    assert_eq!(doc(&h).sheet, 1);
+    assert!(h.query_by_label("Second sheet").is_some());
+    shot(&mut h, "dc9-xlsx-second");
+    h.state_mut().close_viewer();
+}
