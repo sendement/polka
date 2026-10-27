@@ -1148,7 +1148,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
 
 impl Settings {
     pub fn new(swatch: usize) -> Self {
-        Settings { cat: 0, item: 0, row: row::ACCENT, chip: 0, layout_chip: 0, swatch, editor: None }
+        Settings { cat: 0, item: 0, side: true, row: NO_ROW, chip: 0, layout_chip: 0, swatch, editor: None }
     }
 
     pub fn current(&self) -> SItem {
@@ -1156,18 +1156,26 @@ impl Settings {
         items[self.item.min(items.len() - 1)]
     }
 
-    /// On this item (its row kept in step).
+    /// On this item (its row kept in step; none while on the categories).
     pub fn go(&mut self, cat: usize, item: usize) {
         self.cat = cat;
         self.item = item;
         self.row = match self.current() {
-            SItem::Row(r) => r,
+            SItem::Row(r) if !self.side => r,
             _ => NO_ROW,
         };
     }
 
+    /// Into the category's items, or back out to the categories.
+    pub fn enter(&mut self, inside: bool) {
+        self.side = !inside;
+        let (c, i) = (self.cat, self.item);
+        self.go(c, i);
+    }
+
     /// Onto one of Polka's own rows, in whichever category has it.
     pub fn go_to_row(&mut self, r: usize) {
+        self.side = false;
         for c in 0..SETTINGS_CATS {
             if let Some(i) = settings_items(c).iter().position(|x| *x == SItem::Row(r)) {
                 return self.go(c, i);
@@ -1177,6 +1185,7 @@ impl Settings {
 
     /// Onto an item by what it is (a click).
     pub fn go_to(&mut self, it: SItem) {
+        self.side = false;
         if let Some(i) = settings_items(self.cat).iter().position(|x| *x == it) {
             self.go(self.cat, i);
         }
@@ -1233,6 +1242,9 @@ pub struct Settings {
     /// cursor is on.
     pub cat: usize,
     pub item: usize,
+    /// The cursor on the categories (where it starts; ✕ goes into one,
+    /// ○ back out).
+    pub side: bool,
     /// The item's row, when it's one of Polka's own (row::*; else NO_ROW).
     pub row: usize,
     /// Cursor among the "open in Polka" kinds.
@@ -3563,6 +3575,20 @@ impl App {
             _ => 0.0,
         };
         let it = st.current();
+        // On the categories: ↑ ↓ through them, ✕ (or →) into one, ○ closes.
+        if st.side {
+            match a {
+                Action::Up | Action::Down | Action::PrevTab | Action::NextTab => {
+                    let d = if matches!(a, Action::Up | Action::PrevTab) { -1 } else { 1 };
+                    let cat = (st.cat as isize + d).rem_euclid(SETTINGS_CATS as isize) as usize;
+                    st.go(cat, 0);
+                }
+                Action::Accept | Action::Right => st.enter(true),
+                Action::Back | Action::Menu => self.overlay = None,
+                _ => {}
+            }
+            return;
+        }
         match a {
             // LB / RB: the categories.
             Action::PrevTab | Action::NextTab => {
@@ -3577,7 +3603,9 @@ impl App {
                 // Long settings scroll to the row.
                 self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
             }
-            Action::Back | Action::Menu => self.overlay = None,
+            // ○ back to the categories (another ○ closes).
+            Action::Back => st.enter(false),
+            Action::Menu => self.overlay = None,
             Action::Left | Action::Right | Action::Accept if !matches!(it, SItem::Row(_)) => self.settings_item(it, d as isize),
             Action::Left | Action::Right => {
                 let row = st.row;

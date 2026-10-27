@@ -786,7 +786,8 @@ impl App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let from = ui.cursor().max.x;
-                    let hints = if self.show_pad() { self.hints() } else { Vec::new() };
+                    // (An open window shows its own at its foot.)
+                    let hints = if self.show_pad() && self.overlay.is_none() { self.hints() } else { Vec::new() };
                     for (a, label) in hints.into_iter().rev() {
                         ui.label(label);
                         glyph(ui, a, self.pad);
@@ -964,13 +965,19 @@ impl App {
             Some(Overlay::Settings(st)) if st.editor.is_some() => {
                 vec![(Action::Left, tr("Adjust")), (Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]
             }
-            Some(Overlay::Settings(st)) => vec![
-                (Action::PrevTab, tr("Section")),
-                (Action::Left, tr("Adjust")),
-                (Action::Accept, tr("OK")),
-                (Action::Actions, if st.row == crate::app::row::SCHEME { tr("Your own schemes (JSON)") } else { tr("Delete color") }),
-                (Action::Back, tr("Close")),
-            ],
+            Some(Overlay::Settings(st)) if st.side => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Open")), (Action::Back, tr("Close"))],
+            Some(Overlay::Settings(st)) => {
+                use crate::app::row;
+                let mut v = vec![(Action::PrevTab, tr("Section")), (Action::Left, tr("Adjust")), (Action::Accept, tr("OK"))];
+                // (△ means something on the colours and the schemes only.)
+                match st.row {
+                    row::SCHEME => v.push((Action::Actions, tr("Your own schemes (JSON)"))),
+                    row::ACCENT => v.push((Action::Actions, tr("Delete color"))),
+                    _ => {}
+                }
+                v.push((Action::Back, tr("Back")));
+                v
+            }
             Some(Overlay::ViewerSettings(_)) => vec![
                 (Action::Left, tr("Adjust")),
                 (Action::Accept, tr("OK")),
@@ -1526,6 +1533,8 @@ impl App {
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
         let dark = ctx.global_style().visuals.dark_mode;
+        // The window's own buttons, at its foot (not in the status bar).
+        let hints = if show_pad { self.hints() } else { Vec::new() };
         let (overlay, icons, cfg, schemes) = (&mut self.overlay, &mut self.icons, &self.cfg, &self.schemes);
         let (anchor, offset) = if bottom {
             // Just above the hints bar.
@@ -1548,7 +1557,8 @@ impl App {
             .order(Order::Foreground)
             .anchor(anchor, offset)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| match overlay.as_mut() {
+                egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| {
+                    match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live())),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
@@ -1561,7 +1571,7 @@ impl App {
                     Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
-                        let max_h = (screen.height() - 120.0).max(240.0);
+                        let max_h = (screen.height() - 120.0 - if hints.is_empty() { 0.0 } else { 44.0 }).max(240.0);
                         settings_ev = draw_settings(ui, st, cfg, icons, schemes, max_h, dark, show_pad.then_some(pad));
                     }
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
@@ -1570,6 +1580,8 @@ impl App {
                     Some(Overlay::TermKeys(q)) => qkey_ev = crate::terminal::draw::draw_keys(ui, q, pad),
                     Some(Overlay::TermSettings(st)) => term_set_ev = crate::terminal::draw::draw_settings(ui, st.row, &cfg.terminal, vprefs.font.as_deref(), dark, 400.0, true),
                     None => {}
+                    }
+                    hint_strip(ui, &hints, pad);
                 });
             });
         self.osk_top = live.then_some(shown.response.rect.min.y);
@@ -2853,6 +2865,28 @@ fn shoulder_glyph(painter: &egui::Painter, rect: Rect, a: Action, pad: PadKind) 
     painter.text(rect.center(), Align2::CENTER_CENTER, l, FontId::proportional(rect.height() * 0.6), Color32::from_gray(230));
 }
 
+/// A window's gamepad buttons under it, as wide as the window is.
+fn hint_strip(ui: &mut Ui, hints: &[(Action, &str)], pad: PadKind) {
+    if hints.is_empty() {
+        return;
+    }
+    let w = ui.min_rect().width();
+    ui.add_space(6.0);
+    let (line, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
+    ui.painter().hline(line.x_range(), line.center().y, Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color));
+    ui.add_space(4.0);
+    ui.allocate_ui(vec2(w, 0.0), |ui| {
+        ui.set_max_width(w);
+        ui.horizontal_wrapped(|ui| {
+            for (a, label) in hints {
+                glyph(ui, *a, pad);
+                ui.label(egui::RichText::new(*label).size(13.0).color(ui.visuals().weak_text_color()));
+                ui.add_space(8.0);
+            }
+        });
+    });
+}
+
 pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
     let ps = pad == PadKind::PlayStation;
     if shoulder_label(a, pad).is_some() {
@@ -3151,14 +3185,17 @@ impl App {
         use crate::app::row;
         let Some(Overlay::Settings(st)) = self.overlay.as_mut() else { return };
         match ev {
-            SettingsEvent::Row(r) => st.row = r,
+            SettingsEvent::Row(r) => st.go_to_row(r),
             SettingsEvent::Step(r, d) => {
-                st.row = r;
+                st.go_to_row(r);
                 self.settings_step(r, d);
             }
-            SettingsEvent::Pick(i) => self.settings_pick(i),
+            SettingsEvent::Pick(i) => {
+                st.go_to_row(row::ACCENT);
+                self.settings_pick(i);
+            }
             SettingsEvent::Theme => {
-                st.row = row::THEME;
+                st.go_to_row(row::THEME);
                 self.run(Cmd::IconThemes);
             }
             SettingsEvent::Close => self.overlay = None,
@@ -3168,20 +3205,26 @@ impl App {
                 self.settings_item(it, d);
             }
             SettingsEvent::SchemesFolder => self.run(Cmd::SchemesFolder),
-            SettingsEvent::Chip(i) => self.settings_toggle_open(i),
-            SettingsEvent::LayoutChip(i) => self.settings_toggle_layout(i),
+            SettingsEvent::Chip(i) => {
+                st.go_to_row(row::OPEN_IN);
+                self.settings_toggle_open(i);
+            }
+            SettingsEvent::LayoutChip(i) => {
+                st.go_to_row(row::LAYOUTS);
+                self.settings_toggle_layout(i);
+            }
             SettingsEvent::Appearance(i) => {
-                st.row = row::APPEARANCE;
+                st.go_to_row(row::APPEARANCE);
                 self.cfg.appearance = i;
                 self.cfg.save();
                 self.apply_appearance();
             }
             SettingsEvent::Toggle(r) => {
-                st.row = r;
+                st.go_to_row(r);
                 self.settings_step(r, 0.0);
             }
             SettingsEvent::WinStyle(i) => {
-                st.row = row::WIN_STYLE;
+                st.go_to_row(row::WIN_STYLE);
                 self.cfg.win_style = crate::titlebar::STYLES[i];
                 self.cfg.save();
             }
@@ -3244,8 +3287,11 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
             for c in 0..SETTINGS_CATS {
                 let (rect, r) = ui.allocate_exact_size(vec2(CATS_W, 36.0), Sense::click());
                 let on = c == st.cat;
-                if on {
-                    ui.painter().rect_filled(rect, 8.0, tint(&v, 0.45));
+                if on && st.side {
+                    // The cursor's here: as a focused row.
+                    ui.painter().rect(rect, 8.0, tint(&v, 0.45), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+                } else if on {
+                    ui.painter().rect_filled(rect, 8.0, tint(&v, 0.3));
                 } else if r.hovered() {
                     ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
                 }
@@ -3279,18 +3325,19 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let label_font = FontId::proportional(15.0);
                     let items = settings_items(st.cat);
-                    let cur = st.current();
+                    // (Nothing here under the cursor while it's on the categories.)
+                    let cur = (!st.side).then(|| st.current());
                     // The viewer's and the terminal's: as beside a file or
                     // over the terminal, without their own title.
                     if items.iter().any(|i| matches!(i, SItem::Viewer(_))) {
-                        let r = if let SItem::Viewer(r) = cur { r } else { NO_ROW };
+                        let r = if let Some(SItem::Viewer(r)) = cur { r } else { NO_ROW };
                         if let Some((r, d)) = crate::viewer::draw::draw_settings(ui, r, &cfg.viewer, SETTINGS_W, false) {
                             ev = Some(SettingsEvent::Item(SItem::Viewer(r), d));
                         }
                         ui.add_space(4.0);
                     }
                     if items.iter().any(|i| matches!(i, SItem::Term(_))) {
-                        let r = if let SItem::Term(r) = cur { r } else { NO_ROW };
+                        let r = if let Some(SItem::Term(r)) = cur { r } else { NO_ROW };
                         if let Some((r, d)) = crate::terminal::draw::draw_settings(ui, r, &cfg.terminal, cfg.viewer.font.as_deref(), dark, SETTINGS_W, false) {
                             ev = Some(SettingsEvent::Item(SItem::Term(r), d));
                         }
@@ -3684,7 +3731,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                             SItem::Row(_) | SItem::Viewer(_) | SItem::Term(_) => {}
                             // A status bar figure: shown or not.
                             SItem::Status(f) => {
-                                let (rect, r) = settings_row(ui, 44.0, cur == it, ("status-fig", f.label()));
+                                let (rect, r) = settings_row(ui, 44.0, cur == Some(it), ("status-fig", f.label()));
                                 ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, f.label(), label_font.clone(), v.text_color());
                                 let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                 ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
@@ -3700,14 +3747,14 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 ui.label(egui::RichText::new(format!("Polka {}", env!("CARGO_PKG_VERSION"))).strong().size(16.0));
                                 ui.label(egui::RichText::new(tr("Gamepad-first file manager")).color(v.weak_text_color()));
                                 ui.add_space(6.0);
-                                let (rect, r) = settings_row(ui, 44.0, cur == it, "versions");
+                                let (rect, r) = settings_row(ui, 44.0, cur == Some(it), "versions");
                                 ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Versions and updates…"), label_font.clone(), v.text_color());
                                 if r.clicked() {
                                     ev = Some(SettingsEvent::Item(it, 0));
                                 }
                             }
                             SItem::Page => {
-                                let (rect, r) = settings_row(ui, 44.0, cur == it, "page");
+                                let (rect, r) = settings_row(ui, 44.0, cur == Some(it), "page");
                                 ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Project page"), label_font.clone(), v.text_color());
                                 ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "github.com/sendement/polka", FontId::proportional(13.0), v.weak_text_color());
                                 if r.clicked() {
@@ -3719,9 +3766,11 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                 });
         });
     });
-    // For the mouse: B closes on the pad.
+    // For the mouse: B closes on the pad. (One line high: a layout from
+    // the right would take the screen's height.)
     ui.add_space(6.0);
-    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+    let w = ui.min_rect().width();
+    ui.allocate_ui_with_layout(vec2(w, 28.0), egui::Layout::right_to_left(Align::Center), |ui| {
         if ui.button(tr("Close")).clicked() {
             ev = Some(SettingsEvent::Close);
         }

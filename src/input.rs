@@ -158,19 +158,17 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
                         }
                     }
                 }
+                // Plugged in (or there at the start): its hints show at once.
+                if let Some(e) = ev.as_ref().filter(|e| e.event == EventType::Connected) {
+                    t.send(Input::Pad(pad_kind(&gilrs.gamepad(e.id))));
+                }
                 if let Some(ev) = ev {
                     let before = t.owner.map(|(o, _)| o);
                     t.handle(ev.id, ev.event);
                     let after = t.owner.map(|(o, _)| o);
                     if after != before {
                         if let Some(id) = after {
-                            let pad = gilrs.gamepad(id);
-                            let name = pad.name().to_lowercase();
-                            let sony = pad.vendor_id() == Some(0x054c)
-                                || ["dualsense", "dualshock", "wireless controller", "playstation", "ps5", "ps4"]
-                                    .iter()
-                                    .any(|k| name.contains(k));
-                            t.send(Input::Pad(if sony { PadKind::PlayStation } else { PadKind::Xbox }));
+                            t.send(Input::Pad(pad_kind(&gilrs.gamepad(id))));
                         }
                     }
                 }
@@ -178,6 +176,13 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
             }
         })
         .expect("spawn gamepad thread");
+}
+
+/// Its buttons' glyphs: PlayStation's shapes, else Xbox's letters.
+fn pad_kind(pad: &gilrs::Gamepad) -> PadKind {
+    let name = pad.name().to_lowercase();
+    let sony = pad.vendor_id() == Some(0x054c) || ["dualsense", "dualshock", "wireless controller", "playstation", "ps5", "ps4"].iter().any(|k| name.contains(k));
+    if sony { PadKind::PlayStation } else { PadKind::Xbox }
 }
 
 /// Devices gilrs takes for gamepads that aren't: a touch screen (the Steam

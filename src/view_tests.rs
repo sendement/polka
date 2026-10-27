@@ -79,6 +79,16 @@ fn tbm(d: &mut crate::convert_ui::ConvertDlg) -> &mut crate::convert_ui::TableSi
     d.groups.iter_mut().find_map(|g| g.table.as_mut()).expect("tables")
 }
 
+/// ○ until the settings close (from a category's items: out to the
+/// categories, then shut).
+fn close_settings(h: &mut Harness<'static, App>) {
+    for _ in 0..2 {
+        if matches!(h.state().overlay, Some(crate::app::Overlay::Settings(_))) {
+            press(h, &[Action::Back]);
+        }
+    }
+}
+
 fn press(h: &mut Harness<'static, App>, actions: &[Action]) {
     for a in actions {
         h.state_mut().handle(Input::Press(*a));
@@ -328,8 +338,8 @@ fn settings(h: &mut Harness<'static, App>) {
     use crate::app::{Cmd, Overlay, row};
     h.state_mut().run(Cmd::Settings);
     settle(h);
-    // → over the swatches previews colours immediately.
-    press(h, &[Action::Right, Action::Right]);
+    // ✕ into Look; → over the swatches previews colours immediately.
+    press(h, &[Action::Accept, Action::Right, Action::Right]);
     assert_eq!(h.state().cfg.accent, crate::config::ACCENT_PRESETS[2]);
     shot(h, "17-settings");
     // Mix and save a colour from the "+" tile.
@@ -354,7 +364,7 @@ fn settings(h: &mut Harness<'static, App>) {
     }
     press(h, &[Action::Right, Action::Right, Action::Right, Action::Right]);
     assert_eq!(h.state().cfg.list_icon, before + 8.0);
-    press(h, &[Action::Back]);
+    close_settings(h);
     assert!(h.state().overlay.is_none());
     shot(h, "19-big-list-icons");
 
@@ -1088,7 +1098,7 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     h.state_mut().run(Cmd::Settings);
     // (Files: "open in Polka" first, the volumes under it.)
     if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
-        st.go(3, 0);
+        st.go_to_row(row::OPEN_IN);
     }
     settle(h);
     press(h, &[Action::Right, Action::Accept]); // pictures: off
@@ -1119,7 +1129,7 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     press(h, &[Action::Accept]);
     assert!(h.state().cfg.viewer.web_images);
     shot(h, "50-settings-open-in");
-    press(h, &[Action::Back]);
+    close_settings(h);
     // Pictures off: they go to the desktop app, and the menu offers Polka.
     h.state_mut().cfg.open_images = false;
     let png = dir.join("view/a-red.png");
@@ -1871,7 +1881,7 @@ fn light_look(h: &mut Harness<'static, App>) {
     settle(h);
     assert!(!(h.state().ctx.theme() == egui::Theme::Dark), "still dark");
     shot(h, "a0-light-settings");
-    press(h, &[Action::Back]);
+    close_settings(h);
     shot(h, "a1-light-list");
     h.state_mut().pane_mut().selected.insert("note.txt".into());
     press(h, &[Action::Actions]);
@@ -2359,7 +2369,7 @@ fn sidebar_more(h: &mut Harness<'static, App>) {
     assert_eq!(crate::i18n::current(), "es");
     settle(h);
     shot(h, "c3-settings-spanish");
-    press(h, &[Action::Back]);
+    close_settings(h);
     h.state_mut().run(Cmd::Settings);
     settle(h);
     shot(h, "c3b-settings-spanish-again");
@@ -3353,7 +3363,7 @@ fn layouts(h: &mut Harness<'static, App>) {
     h.state_mut().ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
     settle(h);
     shot(h, "k0-settings-layouts");
-    press(h, &[Action::Back]);
+    close_settings(h);
     h.state_mut().run(Cmd::NewFolder);
     let to = |h: &mut Harness<'static, App>, name: &str| {
         for _ in 0..10 {
@@ -3860,7 +3870,7 @@ fn demo(h: &mut Harness<'static, App>, home: &std::path::Path, base: &std::path:
     }
     press(h, &[Action::Right, Action::Right]);
     assert_eq!(h.state().cfg.appearance, crate::appearance::LIGHT);
-    press(h, &[Action::Back]);
+    close_settings(h);
     go(h, &home.join("Pictures"));
     let i = at(h, "dunes.png");
     h.state_mut().pane_mut().set_cursor(i);
@@ -4248,7 +4258,8 @@ fn game_scale_screens() {
     assert!(h.state().cfg.zoom_game > 1.0 && h.state().cfg.zoom == 1.0);
     settle(&mut h);
     assert!(h.state().ctx.pixels_per_point() > 1.55);
-    press(&mut h, &[Action::Left, Action::Back]);
+    press(&mut h, &[Action::Left]);
+    close_settings(&mut h);
     // Not in the game mode: the desktop's scale as it is.
     h.state_mut().game_mode = false;
     settle(&mut h);
@@ -4768,7 +4779,7 @@ fn scheme_screens() {
     let panel = |h: &Harness<'static, App>| h.state().ctx.global_style().visuals.panel_fill;
     assert_eq!(panel(&h), egui::Color32::from_rgb(0x2e, 0x34, 0x40));
     shot(&mut h, "sc0-settings-nord");
-    press(&mut h, &[Action::Back]);
+    close_settings(&mut h);
     for id in ["gruvbox-light", "new-year", "halloween", "easter", "file:mine"] {
         h.state_mut().cfg.scheme = Some(id.into());
         h.state_mut().apply_appearance();
@@ -5052,7 +5063,7 @@ fn language_screens() {
         if code == "pl" {
             // Language and input, down to the keyboard layouts (two lines
             // of them now).
-            press(&mut h, &[Action::NextTab, Action::NextTab, Action::Down]);
+            press(&mut h, &[Action::NextTab, Action::NextTab, Action::Accept, Action::Down]);
             assert!(matches!(&h.state().overlay, Some(Overlay::Settings(st)) if st.row == crate::app::row::LAYOUTS));
             settle(&mut h);
             shot(&mut h, "lang-pl-1b-layouts");
@@ -5733,8 +5744,9 @@ fn touch_screens() {
     // Their looks in the settings, previewed; ↓ to the order, → steps it.
     h.state_mut().run(crate::app::Cmd::Settings);
     settle(&mut h);
-    // (RB to Window: the title bar, then the buttons' look.)
+    // (RB to Window, ✕ into it: the title bar, then the buttons' look.)
     h.state_mut().handle(crate::input::Input::Press(crate::input::Action::NextTab));
+    h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Accept));
     h.state_mut().handle(crate::input::Input::Press(crate::input::Action::Down));
     settle(&mut h);
     assert!(matches!(&h.state().overlay, Some(Overlay::Settings(st)) if st.row == crate::app::row::WIN_STYLE));
@@ -6264,6 +6276,23 @@ fn pad_hints_screens() {
     h.state_mut().cfg.pad_hints = PadHints::Never;
     settle(&mut h);
     assert!(!shown(&h));
+    // A gamepad plugged in: its hints at once, before any button.
+    h.state_mut().cfg.pad_hints = PadHints::Auto;
+    h.key_press(egui::Key::ArrowDown);
+    settle(&mut h);
+    assert!(!shown(&h));
+    crate::app::PAD_TX.lock().unwrap().clone().unwrap().send(Input::Pad(crate::input::PadKind::PlayStation)).unwrap();
+    settle(&mut h);
+    assert!(shown(&h), "no hints on plugging a gamepad in");
+    // A window open: its own buttons at its foot, none in the status bar.
+    h.state_mut().run(crate::app::Cmd::Settings);
+    settle(&mut h);
+    assert!(h.query_by_label(crate::i18n::tr("Open")).is_some(), "the settings' buttons aren't shown");
+    assert!(!shown(&h), "the status bar's buttons behind a window");
+    shot(&mut h, "ph2-settings");
+    h.state_mut().overlay = None;
+    press(&mut h, Action::Actions);
+    shot(&mut h, "ph3-menu");
 }
 
 /// The settings in categories: RB through them all (a shot each), the
@@ -6283,6 +6312,24 @@ fn settings_cats_screens() {
         Some(Overlay::Settings(st)) => (st.cat, st.current()),
         _ => panic!("no settings"),
     };
+    let side = |h: &Harness<'static, App>| matches!(&h.state().overlay, Some(Overlay::Settings(st)) if st.side);
+    // On the categories first: ↓ the next one, ✕ into it, ○ back out, ○
+    // again closes.
+    assert!(side(&h), "not on the categories at first");
+    press(&mut h, &[Action::Down]);
+    assert_eq!(at(&h).0, 1);
+    press(&mut h, &[Action::Accept]);
+    assert!(!side(&h));
+    assert_eq!(at(&h).1, SItem::Row(crate::app::row::TITLEBAR));
+    shot(&mut h, "sc-inside");
+    press(&mut h, &[Action::Back]);
+    assert!(side(&h) && matches!(h.state().overlay, Some(Overlay::Settings(_))), "○ closed it at once");
+    press(&mut h, &[Action::Up]);
+    shot(&mut h, "sc-side");
+    press(&mut h, &[Action::Back]);
+    assert!(h.state().overlay.is_none(), "○ on the categories didn't close");
+    h.state_mut().run(Cmd::Settings);
+    settle(&mut h);
     for c in 0..SETTINGS_CATS {
         assert_eq!(at(&h).0, c);
         shot(&mut h, &format!("sc{c}-{}", crate::app::settings_cat_name(c).replace(' ', "-")));
@@ -6293,7 +6340,7 @@ fn settings_cats_screens() {
     press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
     assert_eq!(at(&h), (4, SItem::Viewer(crate::app::vrow::THEME)));
     let size = h.state().cfg.viewer.font_size;
-    press(&mut h, &[Action::Down, Action::Down, Action::Right]);
+    press(&mut h, &[Action::Accept, Action::Down, Action::Down, Action::Right]);
     assert_eq!(at(&h).1, SItem::Viewer(crate::app::vrow::SIZE));
     assert!(h.state().cfg.viewer.font_size > size, "the viewer's size didn't change");
     // The terminal: "start in the panel's folder" flipped.
