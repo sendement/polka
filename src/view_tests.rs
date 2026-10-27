@@ -5797,7 +5797,7 @@ fn status_screens() {
         std::thread::sleep(std::time::Duration::from_millis(50));
         h.step();
     }
-    assert_eq!(h.state().status_counts.as_ref().map(|c| c.2), Some(crate::status::Counts { folders: 2, pictures: 3, videos: 1, archives: 1 }));
+    assert_eq!(h.state().status_counts.as_ref().map(|c| c.2), Some(crate::status::Counts { folders: 2, pictures: 3, videos: 1, archives: 1, ..Default::default() }));
     let tip = format!("{}: 3", crate::i18n::tr("Pictures"));
     let hovered = {
         let n = h.get_by_label("3");
@@ -6445,6 +6445,22 @@ fn docs_screens() {
     assert!(matches!(doc(&h).body, Body::Flow(_)));
     assert!(h.query_by_label_contains("twelve percent").is_some());
     shot(&mut h, "dc3-docx");
+    // The mouse: zoom buttons at the bottom right (none for the pad).
+    fn zoom_in(h: &mut Harness<'static, App>) {
+        h.state_mut().pad_active = false;
+        settle(h);
+        h.get_all_by_label("+").max_by(|a, b| a.rect().bottom().total_cmp(&b.rect().bottom())).unwrap().click();
+        settle(h);
+    }
+    zoom_in(&mut h);
+    assert!((doc(&h).zoom - 1.25).abs() < 1e-3, "{}", doc(&h).zoom);
+    shot(&mut h, "dc3b-docx-zoomed");
+    h.get_by_label("125%").click();
+    settle(&mut h);
+    assert_eq!(doc(&h).zoom, 1.0);
+    h.state_mut().pad_active = true;
+    settle(&mut h);
+    assert!(h.query_by_label("100%").is_none(), "zoom buttons with the pad");
     press(&mut h, &[Action::Down, Action::Down, Action::Down]);
     assert!(doc(&h).offset.y > 0.0, "↓ didn't scroll");
     open(&mut h, "c-notes.odt");
@@ -6471,5 +6487,8 @@ fn docs_screens() {
     assert_eq!(doc(&h).sheet, 1);
     assert!(h.query_by_label("Second sheet").is_some());
     shot(&mut h, "dc9-xlsx-second");
+    zoom_in(&mut h);
+    assert!((doc(&h).zoom - 1.25).abs() < 1e-3);
+    shot(&mut h, "dc10-xlsx-zoomed");
     h.state_mut().close_viewer();
 }

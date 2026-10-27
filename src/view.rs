@@ -86,6 +86,9 @@ impl eframe::App for App {
             }
         }
         self.notice_other_input(&ctx);
+        // (The documents' zoom buttons step aside for the pad.)
+        let pad = self.pad_active;
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("pad-active"), pad));
         self.keyboard(&ctx);
         self.tick();
         self.icons.trim(&ctx);

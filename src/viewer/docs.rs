@@ -66,7 +66,12 @@ pub struct DocState {
     pub page_tops: Vec<f32>,
     /// The sheet shown.
     pub sheet: usize,
+    /// Its scroll's own (not the document's before it).
+    salt: egui::Id,
 }
+
+/// Documents opened so far: each one's scroll starts at its top.
+static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl DocState {
     pub fn open(path: &Path, name: &str, ctx: &egui::Context) -> DocState {
@@ -84,7 +89,7 @@ impl DocState {
             let _ = tx.send(r);
             c.request_repaint();
         });
-        DocState { body: Body::Loading(rx), zoom: 1.0, scroll_to: None, offset: Vec2::ZERO, view: Vec2::ZERO, content: Vec2::ZERO, page: 0, page_tops: Vec::new(), sheet: 0 }
+        DocState { body: Body::Loading(rx), zoom: 1.0, scroll_to: None, offset: Vec2::ZERO, view: Vec2::ZERO, content: Vec2::ZERO, page: 0, page_tops: Vec::new(), sheet: 0, salt: egui::Id::new(("doc-scroll", OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) }
     }
 
     fn poll(&mut self) {
@@ -128,24 +133,26 @@ impl DocState {
                 self.sheet = if a == Action::LeftTrigger { (self.sheet + n - 1) % n } else { (self.sheet + 1) % n };
                 s = Vec2::ZERO;
             }
-            Action::LeftTrigger | Action::RightTrigger if matches!(self.body, Body::Flow(_)) => s.y += if a == Action::LeftTrigger { -page } else { page },
-            Action::LeftTrigger | Action::RightTrigger => {
-                let k = if a == Action::RightTrigger { 1.25 } else { 0.8 };
-                let old = self.zoom;
-                self.zoom = (self.zoom * k).clamp(0.3, 6.0);
-                s = (s + self.view / 2.0) * (self.zoom / old) - self.view / 2.0;
-            }
-            Action::Accept => {
-                let old = self.zoom;
-                self.zoom = 1.0;
-                s = (s + self.view / 2.0) * (self.zoom / old) - self.view / 2.0;
-            }
+            Action::LeftTrigger | Action::RightTrigger => return self.zoom_by(if a == Action::RightTrigger { 1.25 } else { 0.8 }),
+            Action::Accept => return self.zoom_to(1.0),
             Action::Home => s = Vec2::ZERO,
             Action::End => s.y = self.content.y,
             _ => return,
         }
         let max = (self.content - self.view).max(Vec2::ZERO);
         self.scroll_to = Some(s.clamp(Vec2::ZERO, max));
+    }
+
+    /// Closer (`k` > 1) or farther, about the view's middle.
+    pub fn zoom_by(&mut self, k: f32) {
+        self.zoom_to(self.zoom * k);
+    }
+
+    pub fn zoom_to(&mut self, z: f32) {
+        let old = self.zoom;
+        self.zoom = z.clamp(0.3, 6.0);
+        let s = (self.offset + self.view / 2.0) * (self.zoom / old) - self.view / 2.0;
+        self.scroll_to = Some(s.max(Vec2::ZERO));
     }
 
     /// For the status line: page 3/12 · 120%.
@@ -161,7 +168,7 @@ impl DocState {
             }
             _ => {}
         }
-        if !matches!(self.body, Body::Sheets(_) | Body::Flow(_)) && (self.zoom - 1.0).abs() > 1e-3 {
+        if (self.zoom - 1.0).abs() > 1e-3 {
             parts.push(format!("{:.0}%", self.zoom * 100.0));
         }
         parts.join(" · ")
@@ -195,12 +202,18 @@ pub fn draw(ui: &mut Ui, d: &mut DocState) {
         }
         return;
     }
+    // Ctrl + the wheel (a pinch): zoom.
+    let pinch = ui.input(|i| i.zoom_delta());
+    if (pinch - 1.0).abs() > 1e-3 && ui.rect_contains_pointer(ui.max_rect()) {
+        d.zoom_by(pinch);
+    }
     if let Body::Sheets(_) = &d.body {
-        return draw_sheets(ui, d);
+        let view = draw_sheets(ui, d);
+        return zoom_buttons(ui, d, view);
     }
     // (Under the pages: the text on them takes the drags.)
     copy_menu(ui, ui.available_rect_before_wrap());
-    let mut area = egui::ScrollArea::both().id_salt("doc-scroll").auto_shrink([false, false]);
+    let mut area = egui::ScrollArea::both().id_salt(d.salt).auto_shrink([false, false]);
     if let Some(s) = d.scroll_to.take() {
         area = area.scroll_offset(s);
     }
@@ -212,7 +225,7 @@ pub fn draw(ui: &mut Ui, d: &mut DocState) {
         match &mut d.body {
             Body::Pdf(p) => p.draw(ui, width, avail, &mut tops),
             Body::Slides(s) => s.draw(ui, width, avail, &mut tops),
-            Body::Flow(f) => f.draw(ui, (avail - 2.0 * GAP).min(860.0), avail),
+            Body::Flow(f) => f.draw(ui, ((avail - 2.0 * GAP).min(860.0) * zoom).round(), avail, zoom),
             _ => {}
         }
     });
@@ -222,6 +235,31 @@ pub fn draw(ui: &mut Ui, d: &mut DocState) {
     // The page in view: the last one starting above its middle.
     d.page = tops.iter().rposition(|t| *t <= d.offset.y + d.view.y * 0.4).unwrap_or(0);
     d.page_tops = tops;
+    zoom_buttons(ui, d, out.inner_rect);
+}
+
+/// The mouse's zoom at the view's bottom right: − the percentage (back to
+/// the width) +. Not while the gamepad's in use: its triggers do it.
+fn zoom_buttons(ui: &mut Ui, d: &mut DocState, view: Rect) {
+    if ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::new("pad-active"))).unwrap_or(false) || view.width() < 200.0 {
+        return;
+    }
+    let vis = ui.visuals().clone();
+    let (bw, pw, h) = (30.0, 58.0, 28.0);
+    let size = vec2(2.0 * bw + pw + 8.0, h + 8.0);
+    let r = Rect::from_min_size(view.max - size - vec2(16.0, 12.0), size);
+    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(r));
+    bar.painter().rect(r, 8.0, vis.window_fill, vis.window_stroke, egui::StrokeKind::Inside);
+    let pct = format!("{:.0}%", d.zoom * 100.0);
+    let mut x = r.min.x + 4.0;
+    for (w, label, tip, z) in [(bw, "−", tr("Zoom out"), d.zoom * 0.8), (pw, pct.as_str(), tr("Fit width"), 1.0), (bw, "+", tr("Zoom in"), d.zoom * 1.25)] {
+        let b = Rect::from_min_size(pos2(x, r.min.y + 4.0), vec2(w, h));
+        x += w;
+        let text = egui::RichText::new(label).size(if w == bw { 18.0 } else { 13.0 });
+        if bar.put(b, egui::Button::new(text).frame(false)).on_hover_text(tip).clicked() {
+            d.zoom_to(z);
+        }
+    }
 }
 
 /// A right click: copy what's selected (the labels' selection hears it).
@@ -613,35 +651,51 @@ pub enum Block {
         align: Align,
         runs: Vec<Run>,
     },
-    Table(Vec<Vec<Vec<Block>>>),
+    /// Its columns' widths as the document gives them (none: even), and
+    /// its rows of cells.
+    Table { widths: Vec<f32>, rows: Vec<Vec<Cell>> },
     /// A picture (by index), its size in points.
     Image(usize, Vec2),
     Break,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cell {
+    /// How many columns it spans.
+    pub span: usize,
+    /// The cell above goes on into it (merged down): no line between.
+    pub merged: bool,
+    pub fill: Option<Color32>,
+    pub blocks: Vec<Block>,
 }
 
 pub struct Flow {
     pub blocks: Vec<Block>,
     pub images: Vec<Vec<u8>>,
     textures: HashMap<usize, Option<egui::TextureHandle>>,
+    /// The zoom it's drawn at.
+    scale: f32,
 }
 
 impl Flow {
     pub fn open(path: &Path) -> Result<Flow, String> {
         let mut z = Zip::open(path)?;
         let (blocks, images) = if z.0.by_name("content.xml").is_ok() { odt(&mut z)? } else { docx(&mut z)? };
-        Ok(Flow { blocks, images, textures: HashMap::new() })
+        Ok(Flow { blocks, images, textures: HashMap::new(), scale: 1.0 })
     }
 
-    fn draw(&mut self, ui: &mut Ui, width: f32, avail: f32) {
+    fn draw(&mut self, ui: &mut Ui, width: f32, avail: f32, zoom: f32) {
+        self.scale = zoom;
+        let (mx, my) = ((44.0 * zoom).min(127.0), (40.0 * zoom).min(127.0));
         ui.add_space(GAP);
         ui.horizontal(|ui| {
             ui.add_space(((avail - width) / 2.0).max(GAP));
-            egui::Frame::new().fill(PAPER).corner_radius(2.0).inner_margin(egui::Margin::symmetric(44, 40)).show(ui, |ui| {
+            egui::Frame::new().fill(PAPER).corner_radius(2.0).inner_margin(egui::Margin::symmetric(mx as i8, my as i8)).show(ui, |ui| {
                 // (Top down inside, though the row it's centred in isn't.)
                 ui.vertical(|ui| {
-                    let inner = width - 88.0;
+                    let inner = width - 2.0 * mx.round();
                     ui.set_width(inner);
-                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.spacing_mut().item_spacing.y = 6.0 * zoom;
                     let blocks = std::mem::take(&mut self.blocks);
                     for b in &blocks {
                         self.block(ui, b, inner);
@@ -656,21 +710,22 @@ impl Flow {
     fn block(&mut self, ui: &mut Ui, b: &Block, width: f32) {
         match b {
             Block::Para { level, list, align, runs } => {
-                let base = match level {
+                let z = self.scale;
+                let base = z * match level {
                     0 => 15.0,
                     1 => 26.0,
                     2 => 21.0,
                     3 => 18.0,
                     _ => 16.0,
                 };
-                let indent = list.map_or(0.0, |(d, _)| 22.0 * (d as f32 + 1.0));
+                let indent = list.map_or(0.0, |(d, _)| 22.0 * z * (d as f32 + 1.0));
                 let mut job = LayoutJob::default();
                 if let Some((_, n)) = list {
                     let mark = n.map_or("•  ".to_string(), |n| format!("{n}.  "));
                     job.append(&mark, 0.0, TextFormat { font_id: FontId::proportional(base), color: INK, ..Default::default() });
                 }
                 for r in runs {
-                    job.append(&r.text, 0.0, run_format(r, base, *level > 0, 1.0));
+                    job.append(&r.text, 0.0, run_format(r, base, *level > 0, z));
                 }
                 if job.text.is_empty() {
                     ui.add_space(base * 0.6);
@@ -699,43 +754,92 @@ impl Flow {
                     });
                 });
             }
-            Block::Table(rows) => {
-                let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
-                let cw = ((width - 4.0) / cols as f32).max(40.0);
-                let grid = egui::Grid::new(ui.next_auto_id()).min_col_width(cw).max_col_width(cw).spacing(vec2(0.0, 0.0));
-                let frame = egui::Frame::new().stroke(Stroke::new(1.0, Color32::from_gray(170)));
-                frame.show(ui, |ui| {
-                    grid.show(ui, |ui| {
-                        for row in rows {
-                            for c in 0..cols {
-                                egui::Frame::new().stroke(Stroke::new(0.5, Color32::from_gray(200))).inner_margin(5).show(ui, |ui| {
-                                    ui.set_width(cw - 10.0);
-                                    if let Some(cell) = row.get(c) {
-                                        for b in cell {
-                                            self.block(ui, b, cw - 10.0);
-                                        }
-                                    }
-                                });
-                            }
-                            ui.end_row();
-                        }
-                    });
-                });
-            }
+            Block::Table { widths, rows } => self.table(ui, widths, rows, width),
             Block::Image(i, size) => {
                 let tex = self.textures.entry(*i).or_insert_with(|| decode(ui.ctx(), &format!("doc-img-{i}"), &self.images[*i])).clone();
                 let Some(t) = tex else { return };
-                let s = if size.x > 0.0 { *size * (4.0 / 3.0) } else { t.size_vec2() };
+                let s = self.scale * if size.x > 0.0 { *size * (4.0 / 3.0) } else { t.size_vec2() };
                 let s = if s.x > width { s * (width / s.x) } else { s };
                 ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id(), s)));
             }
             Block::Break => {
-                ui.add_space(8.0);
+                ui.add_space(8.0 * self.scale);
                 let (r, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
                 ui.painter().hline(r.x_range(), r.center().y, Stroke::new(1.0, Color32::from_gray(210)));
-                ui.add_space(8.0);
+                ui.add_space(8.0 * self.scale);
             }
         }
+    }
+}
+
+impl Flow {
+    /// A table laid out by hand: each row as tall as its tallest cell,
+    /// its lines drawn whole over the cells.
+    fn table(&mut self, ui: &mut Ui, widths: &[f32], rows: &[Vec<Cell>], width: f32) {
+        let z = self.scale;
+        let pad = 6.0 * z;
+        let cols = rows.iter().map(|r| r.iter().map(|c| c.span.max(1)).sum::<usize>()).max().unwrap_or(1).max(1);
+        let given: f32 = widths.iter().sum();
+        let left = ui.cursor().left().round();
+        let mut xs = vec![left];
+        for i in 0..cols {
+            let w = if widths.len() == cols && given > 0.0 { widths[i] / given * width } else { width / cols as f32 };
+            xs.push(xs[i] + w);
+        }
+        for x in &mut xs {
+            *x = x.round();
+        }
+        let stroke = Stroke::new(1.0, Color32::from_gray(150));
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let top0 = ui.cursor().top();
+            for row in rows {
+                let top = ui.cursor().top();
+                let mut cells = Vec::new();
+                let mut h: f32 = 14.0 * z;
+                let mut col = 0;
+                for cell in row {
+                    if col >= cols {
+                        break;
+                    }
+                    let end = (col + cell.span.max(1)).min(cols);
+                    let (x0, x1) = (xs[col], xs[end]);
+                    col = end;
+                    // (The fill goes under the text, once the height is known.)
+                    let under = ui.painter().add(egui::Shape::Noop);
+                    let inner = Rect::from_min_size(pos2(x0 + pad, top + pad), vec2((x1 - x0 - 2.0 * pad).max(1.0), f32::INFINITY));
+                    let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::LEFT)));
+                    cu.spacing_mut().item_spacing.y = 4.0 * z;
+                    // (A line's no taller than its text.)
+                    cu.spacing_mut().interact_size.y = 0.0;
+                    cu.set_width(inner.width());
+                    for b in &cell.blocks {
+                        self.block(&mut cu, b, inner.width());
+                    }
+                    if !cell.blocks.is_empty() {
+                        h = h.max(cu.min_rect().height());
+                    }
+                    cells.push((x0, x1, under, cell));
+                }
+                let bottom = top + h + 2.0 * pad;
+                ui.allocate_exact_size(vec2(xs[cols] - left, bottom - top), Sense::hover());
+                let p = ui.painter();
+                for (x0, x1, under, cell) in cells {
+                    if let Some(f) = cell.fill.filter(|f| *f != PAPER) {
+                        p.set(under, egui::Shape::rect_filled(Rect::from_min_max(pos2(x0, top), pos2(x1, bottom)), 0.0, f));
+                    }
+                    if !cell.merged {
+                        p.hline(x0..=x1, top, stroke);
+                    }
+                    p.vline(x0, top..=bottom, stroke);
+                }
+                p.vline(xs[cols], top..=bottom, stroke);
+            }
+            let end = ui.cursor().top();
+            if end > top0 {
+                ui.painter().hline(xs[0]..=xs[cols], end, stroke);
+            }
+        });
     }
 }
 
@@ -826,18 +930,25 @@ fn docx_blocks(z: &mut Zip, n: &roxmltree::Node, c: &mut DocxCtx, out: &mut Vec<
         match k.tag_name().name() {
             "p" => docx_para(z, &k, c, out),
             "tbl" => {
+                let widths = child(&k, "tblGrid").map(|g| kids(&g, "gridCol").filter_map(|c| attr(&c, "w")?.parse::<f32>().ok()).collect()).unwrap_or_default();
                 let rows = kids(&k, "tr")
                     .map(|tr| {
                         kids(&tr, "tc")
                             .map(|tc| {
-                                let mut cell = Vec::new();
-                                docx_blocks(z, &tc, c, &mut cell);
-                                cell
+                                let pr = child(&tc, "tcPr");
+                                let span = pr.and_then(|p| child(&p, "gridSpan")).and_then(|g| attr(&g, "val")?.parse().ok()).unwrap_or(1);
+                                let merged = pr.and_then(|p| child(&p, "vMerge")).is_some_and(|m| attr(&m, "val") != Some("restart"));
+                                let fill = pr.and_then(|p| child(&p, "shd")).and_then(|d| hex(attr(&d, "fill")?));
+                                let mut blocks = Vec::new();
+                                if !merged {
+                                    docx_blocks(z, &tc, c, &mut blocks);
+                                }
+                                Cell { span, merged, fill, blocks }
                             })
                             .collect()
                     })
                     .collect();
-                out.push(Block::Table(rows));
+                out.push(Block::Table { widths, rows });
             }
             "sdt" | "sdtContent" | "customXml" | "smartTag" => docx_blocks(z, &k, c, out),
             _ => {}
@@ -1081,22 +1192,42 @@ fn od_blocks(c: &mut OdCtx, n: &roxmltree::Node, out: &mut Vec<Block>, list: Opt
                 }
             }
             "table" => {
-                let rows = k
-                    .descendants()
-                    .filter(|r| is(r, "table-row"))
-                    .map(|r| {
-                        kids(&r, "table-cell")
-                            .map(|cell| {
-                                let mut b = Vec::new();
-                                od_blocks(c, &cell, &mut b, None, &mut Vec::new());
-                                b
-                            })
-                            .collect()
-                    })
-                    .collect();
-                out.push(Block::Table(rows));
+                let mut rows = Vec::new();
+                od_rows(c, &k, &mut rows);
+                out.push(Block::Table { widths: Vec::new(), rows });
             }
             "section" | "index-body" | "table-of-content" | "alphabetical-index" | "illustration-index" => od_blocks(c, &k, out, list, counters),
+            _ => {}
+        }
+    }
+}
+
+/// A table's rows, the header's and grouped ones too, not a table's inside.
+fn od_rows(c: &mut OdCtx, n: &roxmltree::Node, rows: &mut Vec<Vec<Cell>>) {
+    for k in n.children().filter(|k| k.is_element()) {
+        match k.tag_name().name() {
+            "table-row" => {
+                let mut row = Vec::new();
+                let mut skip = 0;
+                for cell in k.children().filter(|x| is(x, "table-cell") || is(x, "covered-table-cell")) {
+                    // (Under one spanning across.)
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    if is(&cell, "covered-table-cell") {
+                        row.push(Cell { span: 1, merged: true, ..Default::default() });
+                        continue;
+                    }
+                    let span = attr(&cell, "number-columns-spanned").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1);
+                    skip = span - 1;
+                    let mut blocks = Vec::new();
+                    od_blocks(c, &cell, &mut blocks, None, &mut Vec::new());
+                    row.push(Cell { span, merged: false, fill: None, blocks });
+                }
+                rows.push(row);
+            }
+            "table-header-rows" | "table-rows" | "table-row-group" => od_rows(c, &k, rows),
             _ => {}
         }
     }
@@ -1604,9 +1735,12 @@ pub fn col_name(mut c: usize) -> String {
 const ROW_H: f32 = 24.0;
 const HEAD_W: f32 = 52.0;
 
-fn draw_sheets(ui: &mut Ui, d: &mut DocState) {
+/// The grid, zoomed; the view it's in.
+fn draw_sheets(ui: &mut Ui, d: &mut DocState) -> Rect {
     let vis = ui.visuals().clone();
-    let Body::Sheets(s) = &mut d.body else { return };
+    let k = d.zoom;
+    let (row_h, head_w, font, small) = ((ROW_H * k).round(), (HEAD_W * k).round(), FontId::proportional(14.0 * k), FontId::proportional(12.0 * k));
+    let Body::Sheets(s) = &mut d.body else { return Rect::NOTHING };
     let n = s.sheets.len();
     d.sheet = d.sheet.min(n.saturating_sub(1));
     // The sheets, as tabs (the triggers on the pad).
@@ -1621,26 +1755,24 @@ fn draw_sheets(ui: &mut Ui, d: &mut DocState) {
         });
         ui.add_space(4.0);
     }
-    let Some(sheet) = s.sheets.get(d.sheet) else { return };
+    let Some(sheet) = s.sheets.get(d.sheet) else { return Rect::NOTHING };
     let rows = sheet.rows.len();
     let cols = sheet.rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let widths = s.widths.entry(d.sheet).or_insert_with(|| {
-        let font = FontId::proportional(14.0);
         (0..cols)
             .map(|c| {
                 let longest = sheet.rows.iter().take(300).filter_map(|r| r.get(c)).map(|cell| cell.text().chars().count()).max().unwrap_or(0);
-                let _ = &font;
                 (longest as f32 * 7.6 + 16.0).clamp(56.0, 340.0)
             })
             .collect()
     });
-    let xs: Vec<f32> = std::iter::once(HEAD_W).chain(widths.iter().scan(HEAD_W, |x, w| {
-        *x += w;
+    let xs: Vec<f32> = std::iter::once(head_w).chain(widths.iter().scan(head_w, |x, w| {
+        *x += (w * k).round();
         Some(*x)
     })).collect();
-    let total = vec2(*xs.last().unwrap_or(&HEAD_W), (rows + 1) as f32 * ROW_H);
+    let total = vec2(*xs.last().unwrap_or(&head_w), (rows + 1) as f32 * row_h);
     copy_menu(ui, ui.available_rect_before_wrap());
-    let mut area = egui::ScrollArea::both().id_salt(("sheet-scroll", d.sheet)).auto_shrink([false, false]);
+    let mut area = egui::ScrollArea::both().id_salt((d.salt, d.sheet)).auto_shrink([false, false]);
     if let Some(sc) = d.scroll_to.take() {
         area = area.scroll_offset(sc);
     }
@@ -1649,20 +1781,20 @@ fn draw_sheets(ui: &mut Ui, d: &mut DocState) {
         let (whole, _) = ui.allocate_exact_size(total, Sense::hover());
         let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(whole));
         let o = whole.min;
-        let r0 = ((view.min.y / ROW_H).floor() as usize).saturating_sub(1);
-        let r1 = ((view.max.y / ROW_H).ceil() as usize + 1).min(rows + 1);
+        let r0 = ((view.min.y / row_h).floor() as usize).saturating_sub(1);
+        let r1 = ((view.max.y / row_h).ceil() as usize + 1).min(rows + 1);
         let c0 = xs.partition_point(|x| *x <= view.min.x).saturating_sub(1);
         let c1 = (xs.partition_point(|x| *x < view.max.x) + 1).min(cols);
         let p = ui.painter().clone();
         let head = vis.faint_bg_color;
         for r in r0..r1 {
-            let y = o.y + r as f32 * ROW_H;
+            let y = o.y + r as f32 * row_h;
             for c in c0..c1 {
-                let cell = Rect::from_min_max(pos2(o.x + xs[c], y), pos2(o.x + xs[c + 1], y + ROW_H));
+                let cell = Rect::from_min_max(pos2(o.x + xs[c], y), pos2(o.x + xs[c + 1], y + row_h));
                 p.rect_stroke(cell, 0.0, Stroke::new(0.5, line), egui::StrokeKind::Inside);
                 if r == 0 {
                     p.rect_filled(cell, 0.0, head);
-                    p.text(cell.center(), Align2::CENTER_CENTER, col_name(c), FontId::proportional(12.0), vis.weak_text_color());
+                    p.text(cell.center(), Align2::CENTER_CENTER, col_name(c), small.clone(), vis.weak_text_color());
                     continue;
                 }
                 let Some(v) = sheet.rows[r - 1].get(c) else { continue };
@@ -1671,24 +1803,25 @@ fn draw_sheets(ui: &mut Ui, d: &mut DocState) {
                     continue;
                 }
                 let num = matches!(v, crate::table::Cell::Num(_));
-                let g = ui.painter().layout_no_wrap(text.clone(), FontId::proportional(14.0), vis.text_color());
-                let w = g.size().x.min(cell.width() - 8.0);
-                let at = if num { pos2(cell.max.x - 4.0 - w, cell.min.y) } else { pos2(cell.min.x + 4.0, cell.min.y) };
-                let job = LayoutJob::single_section(text, TextFormat { font_id: FontId::proportional(14.0), color: vis.text_color(), ..Default::default() });
-                ui.put(Rect::from_min_size(at, vec2(w.max(1.0), ROW_H)), egui::Label::new(job).truncate());
+                let g = ui.painter().layout_no_wrap(text.clone(), font.clone(), vis.text_color());
+                let w = g.size().x.min(cell.width() - 8.0 * k);
+                let at = if num { pos2(cell.max.x - 4.0 * k - w, cell.min.y) } else { pos2(cell.min.x + 4.0 * k, cell.min.y) };
+                let job = LayoutJob::single_section(text, TextFormat { font_id: font.clone(), color: vis.text_color(), ..Default::default() });
+                ui.put(Rect::from_min_size(at, vec2(w.max(1.0), row_h)), egui::Label::new(job).truncate());
             }
             // The row's number at its left.
-            let hr = Rect::from_min_size(pos2(o.x, y), vec2(HEAD_W, ROW_H));
+            let hr = Rect::from_min_size(pos2(o.x, y), vec2(head_w, row_h));
             p.rect_filled(hr, 0.0, head);
             p.rect_stroke(hr, 0.0, Stroke::new(0.5, line), egui::StrokeKind::Inside);
             if r > 0 {
-                p.text(hr.center(), Align2::CENTER_CENTER, r.to_string(), FontId::proportional(12.0), vis.weak_text_color());
+                p.text(hr.center(), Align2::CENTER_CENTER, r.to_string(), small.clone(), vis.weak_text_color());
             }
         }
     });
     d.offset = out.state.offset;
     d.view = out.inner_rect.size();
     d.content = out.content_size;
+    out.inner_rect
 }
 
 #[cfg(test)]
@@ -1781,7 +1914,7 @@ pub mod fixtures {
 <w:p><w:r><w:t xml:space="preserve">Sales grew </w:t></w:r><w:r><w:rPr><w:b/><w:color w:val="C00000"/></w:rPr><w:t>twelve percent</w:t></w:r><w:r><w:t xml:space="preserve"> this year.</w:t></w:r></w:p>
 <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>First point</w:t></w:r></w:p>
 <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Second point</w:t></w:r></w:p>
-<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Region</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Total</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>North</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>1200</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:tbl><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Region</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Total</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>North</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>1200</w:t></w:r></w:p><w:p><w:r><w:t>(two lines)</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>800</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>All regions: 2000</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
 <w:p><w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="952500"/><a:graphic><a:graphicData><a:blip r:embed="rId9"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
 <w:p><w:r><w:br w:type="page"/></w:r></w:p>
 <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>The end</w:t></w:r></w:p>
@@ -1801,7 +1934,7 @@ pub mod fixtures {
 <text:h text:outline-level="1">Meeting notes</text:h>
 <text:p>We agreed on <text:span text:style-name="T1">three things</text:span>:</text:p>
 <text:list text:style-name="L1"><text:list-item><text:p>Budget</text:p></text:list-item><text:list-item><text:p>Dates</text:p></text:list-item></text:list>
-<table:table><table:table-row><table:table-cell><text:p>Who</text:p></table:table-cell><table:table-cell><text:p>What</text:p></table:table-cell></table:table-row></table:table>
+<table:table><table:table-header-rows><table:table-row><table:table-cell><text:p>Who</text:p></table:table-cell><table:table-cell><text:p>What</text:p></table:table-cell></table:table-row></table:table-header-rows><table:table-row><table:table-cell table:number-columns-spanned="2"><text:p>Everyone</text:p></table:table-cell><table:covered-table-cell/></table:table-row></table:table>
 <text:p><draw:frame svg:width="2cm" svg:height="1.5cm"><draw:image xlink:href="Pictures/a.png"/></draw:frame></text:p>
 <text:p text:style-name="P1">Signed</text:p>
 </office:text></office:body></office:document-content>"#
@@ -1872,7 +2005,7 @@ mod parse_tests {
             .iter()
             .map(|b| match b {
                 Block::Para { runs, .. } => runs.iter().map(|r| r.text.as_str()).collect(),
-                Block::Table(_) => "<table>".into(),
+                Block::Table { .. } => "<table>".into(),
                 Block::Image(..) => "<image>".into(),
                 Block::Break => "<break>".into(),
             })
@@ -1889,6 +2022,11 @@ mod parse_tests {
         let Block::Para { runs, .. } = &f.blocks[1] else { panic!() };
         assert!(runs[1].bold && runs[1].color == Some(Color32::from_rgb(0xC0, 0, 0)));
         assert!(matches!(&f.blocks[3], Block::Para { list: Some((0, Some(2))), .. }), "{:?}", f.blocks[3]);
+        let Block::Table { widths, rows } = &f.blocks[4] else { panic!() };
+        assert_eq!(widths, &vec![3000.0, 1500.0]);
+        assert_eq!(rows[0][0].fill, Some(Color32::from_rgb(0xD9, 0xE2, 0xF3)));
+        assert!(!rows[1][0].merged && rows[2][0].merged && rows[2][0].blocks.is_empty());
+        assert_eq!((rows[3].len(), rows[3][0].span), (1, 2));
         assert!(matches!(&f.blocks[5], Block::Image(0, s) if (s.x - 100.0).abs() < 0.1));
         assert!(matches!(&f.blocks[7], Block::Para { align: Align::Center, .. }));
         assert_eq!(f.images.len(), 1);
@@ -1900,6 +2038,8 @@ mod parse_tests {
         assert!(runs.iter().any(|r| r.bold && r.text == "three things"));
         assert!(matches!(&f.blocks[3], Block::Para { list: Some((0, Some(2))), .. }), "{:?}", f.blocks[3]);
         assert!(matches!(&f.blocks[6], Block::Para { align: Align::Center, .. }));
+        let Block::Table { rows, .. } = &f.blocks[4] else { panic!() };
+        assert_eq!((rows.len(), rows[1].len(), rows[1][0].span), (2, 1, 2));
     }
 
     #[test]

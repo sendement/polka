@@ -1,6 +1,6 @@
 //! The status bar's figures past the item count: the disk's space used and
-//! free, and how many folders, pictures, videos and archives the folder
-//! holds (each as set in View → Status bar).
+//! free, and how many folders, pictures, videos, archives and documents
+//! the folder holds (each as set in View → Status bar).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,11 +19,15 @@ pub struct Shown {
     pub pictures: bool,
     pub videos: bool,
     pub archives: bool,
+    pub pdfs: bool,
+    pub documents: bool,
+    pub sheets: bool,
+    pub slides: bool,
 }
 
 impl Default for Shown {
     fn default() -> Self {
-        Shown { space: true, folders: true, pictures: true, videos: true, archives: true }
+        Shown { space: true, folders: true, pictures: true, videos: true, archives: true, pdfs: true, documents: true, sheets: true, slides: true }
     }
 }
 
@@ -35,9 +39,13 @@ pub enum Figure {
     Pictures,
     Videos,
     Archives,
+    Pdfs,
+    Documents,
+    Sheets,
+    Slides,
 }
 
-pub const FIGURES: [Figure; 5] = [Figure::Space, Figure::Folders, Figure::Pictures, Figure::Videos, Figure::Archives];
+pub const FIGURES: [Figure; 9] = [Figure::Space, Figure::Folders, Figure::Pictures, Figure::Videos, Figure::Archives, Figure::Pdfs, Figure::Documents, Figure::Sheets, Figure::Slides];
 
 impl Shown {
     pub fn get(&self, f: Figure) -> bool {
@@ -47,6 +55,10 @@ impl Shown {
             Figure::Pictures => self.pictures,
             Figure::Videos => self.videos,
             Figure::Archives => self.archives,
+            Figure::Pdfs => self.pdfs,
+            Figure::Documents => self.documents,
+            Figure::Sheets => self.sheets,
+            Figure::Slides => self.slides,
         }
     }
 
@@ -57,6 +69,10 @@ impl Shown {
             Figure::Pictures => &mut self.pictures,
             Figure::Videos => &mut self.videos,
             Figure::Archives => &mut self.archives,
+            Figure::Pdfs => &mut self.pdfs,
+            Figure::Documents => &mut self.documents,
+            Figure::Sheets => &mut self.sheets,
+            Figure::Slides => &mut self.slides,
         };
         *v = !*v;
     }
@@ -72,6 +88,10 @@ impl Figure {
             Figure::Pictures => tr("Pictures"),
             Figure::Videos => tr("Video"),
             Figure::Archives => tr("Archives"),
+            Figure::Pdfs => "PDF",
+            Figure::Documents => tr("Documents"),
+            Figure::Sheets => tr("Spreadsheets"),
+            Figure::Slides => tr("Presentations"),
         }
     }
 
@@ -84,6 +104,10 @@ impl Figure {
             Figure::Pictures => &["image-x-generic", "folder-pictures"],
             Figure::Videos => &["video-x-generic", "folder-videos"],
             Figure::Archives => &["package-x-generic", "application-x-archive", "application-zip"],
+            Figure::Pdfs => &["application-pdf", "x-office-document"],
+            Figure::Documents => &["x-office-document", "application-vnd.oasis.opendocument.text", "text-x-generic"],
+            Figure::Sheets => &["x-office-spreadsheet", "application-vnd.oasis.opendocument.spreadsheet"],
+            Figure::Slides => &["x-office-presentation", "application-vnd.oasis.opendocument.presentation"],
         }
     }
 }
@@ -94,6 +118,10 @@ pub struct Counts {
     pub pictures: usize,
     pub videos: usize,
     pub archives: usize,
+    pub pdfs: usize,
+    pub documents: usize,
+    pub sheets: usize,
+    pub slides: usize,
 }
 
 impl Counts {
@@ -112,6 +140,13 @@ impl Counts {
                 c.videos += 1;
             } else if crate::vfs::is_archive_name(&e.name) {
                 c.archives += 1;
+            } else if let Some(k) = office_kind(ext) {
+                *match k {
+                    Figure::Pdfs => &mut c.pdfs,
+                    Figure::Sheets => &mut c.sheets,
+                    Figure::Slides => &mut c.slides,
+                    _ => &mut c.documents,
+                } += 1;
             }
         }
         c
@@ -123,9 +158,24 @@ impl Counts {
             Figure::Pictures => self.pictures,
             Figure::Videos => self.videos,
             Figure::Archives => self.archives,
+            Figure::Pdfs => self.pdfs,
+            Figure::Documents => self.documents,
+            Figure::Sheets => self.sheets,
+            Figure::Slides => self.slides,
             Figure::Space => 0,
         }
     }
+}
+
+/// Which document figure a file counts under, by its extension.
+fn office_kind(ext: &str) -> Option<Figure> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "pdf" => Figure::Pdfs,
+        "docx" | "docm" | "dotx" | "doc" | "dot" | "odt" | "ott" | "rtf" | "wpd" | "pages" => Figure::Documents,
+        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "ots" | "csv" | "tsv" | "numbers" => Figure::Sheets,
+        "pptx" | "pptm" | "ppsx" | "potx" | "ppt" | "pps" | "odp" | "otp" | "key" => Figure::Slides,
+        _ => return None,
+    })
 }
 
 /// The disk's size and space used, looked at now and then off the UI
@@ -166,7 +216,7 @@ mod tests {
 
     #[test]
     fn counts() {
-        let es = [entry("Photos", true), entry("a.JPG", false), entry("b.heic", false), entry("c.mkv", false), entry("d.tar.gz", false), entry("e.txt", false), entry("f.png", true)];
-        assert_eq!(Counts::of(&es), Counts { folders: 2, pictures: 2, videos: 1, archives: 1 });
+        let es = [entry("Photos", true), entry("a.JPG", false), entry("b.heic", false), entry("c.mkv", false), entry("d.tar.gz", false), entry("e.txt", false), entry("f.png", true), entry("g.PDF", false), entry("h.docx", false), entry("i.odt", false), entry("j.csv", false), entry("k.pptx", false)];
+        assert_eq!(Counts::of(&es), Counts { folders: 2, pictures: 2, videos: 1, archives: 1, pdfs: 1, documents: 2, sheets: 1, slides: 1 });
     }
 }
