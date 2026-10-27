@@ -965,6 +965,7 @@ impl App {
                 vec![(Action::Left, tr("Adjust")), (Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]
             }
             Some(Overlay::Settings(st)) => vec![
+                (Action::PrevTab, tr("Section")),
                 (Action::Left, tr("Adjust")),
                 (Action::Accept, tr("OK")),
                 (Action::Actions, if st.row == crate::app::row::SCHEME { tr("Your own schemes (JSON)") } else { tr("Delete color") }),
@@ -1509,6 +1510,7 @@ impl App {
             return;
         }
         let pad = self.pad;
+        let show_pad = self.show_pad();
         let mut run: Option<Cmd> = None;
         let mut menu_click: Option<(usize, usize)> = None;
         let mut osk_key: Option<OskKey> = None;
@@ -1560,13 +1562,13 @@ impl App {
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0).max(240.0);
-                        settings_ev = egui::ScrollArea::vertical().id_salt("settings-scroll").max_height(max_h).show(ui, |ui| draw_settings(ui, st, cfg, icons, schemes)).inner;
+                        settings_ev = draw_settings(ui, st, cfg, icons, schemes, max_h, dark, show_pad.then_some(pad));
                     }
                     Some(Overlay::IconPicker(p)) => run = draw_icon_picker(ui, p, icons, pad),
                     Some(Overlay::Compress(d)) => compress_ev = draw_compress(ui, d, pad),
-                    Some(Overlay::ViewerSettings(st)) => viewer_ev = crate::viewer::draw::draw_settings(ui, st, &vprefs),
+                    Some(Overlay::ViewerSettings(st)) => viewer_ev = crate::viewer::draw::draw_settings(ui, st.row, &vprefs, 380.0, true),
                     Some(Overlay::TermKeys(q)) => qkey_ev = crate::terminal::draw::draw_keys(ui, q, pad),
-                    Some(Overlay::TermSettings(st)) => term_set_ev = crate::terminal::draw::draw_settings(ui, st, &cfg.terminal, vprefs.font.as_deref(), dark),
+                    Some(Overlay::TermSettings(st)) => term_set_ev = crate::terminal::draw::draw_settings(ui, st.row, &cfg.terminal, vprefs.font.as_deref(), dark, 400.0, true),
                     None => {}
                 });
             });
@@ -3121,6 +3123,10 @@ fn spring_bar(ui: &Ui, rect: Rect, t: f32) {
 // ---------------------------------------------------------------- settings
 
 pub enum SettingsEvent {
+    /// A category picked.
+    Cat(usize),
+    /// An item that isn't one of Polka's own rows (d: its ←/→, 0 a click).
+    Item(crate::app::SItem, isize),
     LayoutChip(usize),
     /// A window buttons' look picked.
     WinStyle(usize),
@@ -3156,6 +3162,11 @@ impl App {
                 self.run(Cmd::IconThemes);
             }
             SettingsEvent::Close => self.overlay = None,
+            SettingsEvent::Cat(c) => st.go(c, 0),
+            SettingsEvent::Item(it, d) => {
+                st.go_to(it);
+                self.settings_item(it, d);
+            }
             SettingsEvent::SchemesFolder => self.run(Cmd::SchemesFolder),
             SettingsEvent::Chip(i) => self.settings_toggle_open(i),
             SettingsEvent::LayoutChip(i) => self.settings_toggle_layout(i),
@@ -3214,389 +3225,512 @@ pub(crate) fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::has
     (rect, r)
 }
 
-fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons: &mut Icons, schemes: &[crate::schemes::Scheme]) -> Option<SettingsEvent> {
-    use crate::app::row;
+fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons: &mut Icons, schemes: &[crate::schemes::Scheme], max_h: f32, dark: bool, pad: Option<PadKind>) -> Option<SettingsEvent> {
+    use crate::app::{NO_ROW, SETTINGS_CATS, SItem, row, settings_cat_name, settings_items};
     if let Some(ed) = &st.editor {
         return draw_color_editor(ui, ed);
     }
     let mut ev = None;
     ui.label(egui::RichText::new(tr("Settings")).strong().size(18.0));
     ui.add_space(8.0);
-    ui.spacing_mut().item_spacing.y = 4.0;
     let v = ui.visuals().clone();
-    let label_font = FontId::proportional(15.0);
-
-    // Highlight colour: swatches, wrapped.
-    let sw = crate::app::swatches(cfg);
-    let per_line = 14;
-    let lines = (sw.len() + 1).div_ceil(per_line);
-    // Label sits ~10pt below the top; the last swatch line (with its cursor
-    // ring) ends 19pt below its centre. Same 10pt below it.
-    let (rect, r) = settings_row(ui, 52.0 + 19.0 + 10.0 + (lines - 1) as f32 * 34.0, st.row == row::ACCENT, "accent");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::ACCENT));
-    }
-    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Highlight color"), label_font.clone(), v.text_color());
-    for i in 0..=sw.len() {
-        let (line, col) = (i / per_line, i % per_line);
-        let c = pos2(rect.min.x + 30.0 + col as f32 * 36.0, rect.min.y + 52.0 + line as f32 * 34.0);
-        let hit = Rect::from_center_size(c, Vec2::splat(32.0));
-        let resp = ui.interact(hit, ui.id().with(("swatch", i)), Sense::click());
-        let cursor = st.row == row::ACCENT && st.swatch == i;
-        if let Some(sc) = sw.get(i) {
-            let fill = rgb(sc.unwrap_or_else(crate::schemes::default_accent));
-            ui.painter().circle_filled(c, 13.0, fill);
-            if *sc == cfg.accent {
-                ui.painter().circle_stroke(c, 13.0, Stroke::new(2.0, Color32::WHITE));
-                ui.painter().circle_filled(c, 3.5, Color32::WHITE);
+    // (The same height for every category: the window doesn't jump.)
+    let h = max_h.min(640.0);
+    ui.horizontal_top(|ui| {
+        // The categories (LB / RB on the pad).
+        ui.vertical(|ui| {
+            ui.set_width(CATS_W);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for c in 0..SETTINGS_CATS {
+                let (rect, r) = ui.allocate_exact_size(vec2(CATS_W, 36.0), Sense::click());
+                let on = c == st.cat;
+                if on {
+                    ui.painter().rect_filled(rect, 8.0, tint(&v, 0.45));
+                } else if r.hovered() {
+                    ui.painter().rect_filled(rect, 8.0, v.widgets.hovered.weak_bg_fill.gamma_multiply(0.6));
+                }
+                let color = if on { v.strong_text_color() } else { v.text_color() };
+                let g = elided(ui, settings_cat_name(c), FontId::proportional(15.0), color, CATS_W - 24.0, 1);
+                ui.painter().galley(pos2(rect.min.x + 12.0, rect.center().y - g.size().y / 2.0), g, color);
+                if r.clicked() {
+                    ev = Some(SettingsEvent::Cat(c));
+                }
             }
-            let r = resp.on_hover_text(match sc {
-                None => tr("Default").to_string(),
-                Some([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
-            });
-            if r.clicked() {
-                ev = Some(SettingsEvent::Pick(i));
+            if let Some(pad) = pad {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::hover());
+                    shoulder_glyph(ui.painter(), r, Action::PrevTab, pad);
+                    let (r, _) = ui.allocate_exact_size(vec2(34.0, 22.0), Sense::hover());
+                    shoulder_glyph(ui.painter(), r, Action::NextTab, pad);
+                });
             }
-        } else {
-            ui.painter().circle_stroke(c, 12.0, Stroke::new(1.5, v.text_color()));
-            ui.painter().text(c, Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
-            if resp.on_hover_text(tr("New color")).clicked() {
-                ev = Some(SettingsEvent::Pick(i));
-            }
+        });
+        let (line, _) = ui.allocate_exact_size(vec2(9.0, h), Sense::hover());
+        ui.painter().vline(line.center().x, line.y_range(), Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color));
+        ui.vertical(|ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("settings-scroll", st.cat))
+                .max_height(h)
+                .min_scrolled_height(h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_width(SETTINGS_W);
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    let label_font = FontId::proportional(15.0);
+                    let items = settings_items(st.cat);
+                    let cur = st.current();
+                    // The viewer's and the terminal's: as beside a file or
+                    // over the terminal, without their own title.
+                    if items.iter().any(|i| matches!(i, SItem::Viewer(_))) {
+                        let r = if let SItem::Viewer(r) = cur { r } else { NO_ROW };
+                        if let Some((r, d)) = crate::viewer::draw::draw_settings(ui, r, &cfg.viewer, SETTINGS_W, false) {
+                            ev = Some(SettingsEvent::Item(SItem::Viewer(r), d));
+                        }
+                        ui.add_space(4.0);
+                    }
+                    if items.iter().any(|i| matches!(i, SItem::Term(_))) {
+                        let r = if let SItem::Term(r) = cur { r } else { NO_ROW };
+                        if let Some((r, d)) = crate::terminal::draw::draw_settings(ui, r, &cfg.terminal, cfg.viewer.font.as_deref(), dark, SETTINGS_W, false) {
+                            ev = Some(SettingsEvent::Item(SItem::Term(r), d));
+                        }
+                    }
+                    for it in items {
+                        match it {
+                                SItem::Row(row::ACCENT) => {
+                                    // Highlight colour: swatches, wrapped.
+                                    let sw = crate::app::swatches(cfg);
+                                    let per_line = 14;
+                                    let lines = (sw.len() + 1).div_ceil(per_line);
+                                    // Label sits ~10pt below the top; the last swatch line (with its cursor
+                                    // ring) ends 19pt below its centre. Same 10pt below it.
+                                    let (rect, r) = settings_row(ui, 52.0 + 19.0 + 10.0 + (lines - 1) as f32 * 34.0, st.row == row::ACCENT, "accent");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::ACCENT));
+                                    }
+                                    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Highlight color"), label_font.clone(), v.text_color());
+                                    for i in 0..=sw.len() {
+                                        let (line, col) = (i / per_line, i % per_line);
+                                        let c = pos2(rect.min.x + 30.0 + col as f32 * 36.0, rect.min.y + 52.0 + line as f32 * 34.0);
+                                        let hit = Rect::from_center_size(c, Vec2::splat(32.0));
+                                        let resp = ui.interact(hit, ui.id().with(("swatch", i)), Sense::click());
+                                        let cursor = st.row == row::ACCENT && st.swatch == i;
+                                        if let Some(sc) = sw.get(i) {
+                                            let fill = rgb(sc.unwrap_or_else(crate::schemes::default_accent));
+                                            ui.painter().circle_filled(c, 13.0, fill);
+                                            if *sc == cfg.accent {
+                                                ui.painter().circle_stroke(c, 13.0, Stroke::new(2.0, Color32::WHITE));
+                                                ui.painter().circle_filled(c, 3.5, Color32::WHITE);
+                                            }
+                                            let r = resp.on_hover_text(match sc {
+                                                None => tr("Default").to_string(),
+                                                Some([r, g, b]) => format!("#{r:02x}{g:02x}{b:02x}"),
+                                            });
+                                            if r.clicked() {
+                                                ev = Some(SettingsEvent::Pick(i));
+                                            }
+                                        } else {
+                                            ui.painter().circle_stroke(c, 12.0, Stroke::new(1.5, v.text_color()));
+                                            ui.painter().text(c, Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
+                                            if resp.on_hover_text(tr("New color")).clicked() {
+                                                ev = Some(SettingsEvent::Pick(i));
+                                            }
+                                        }
+                                        if cursor {
+                                            ui.painter().circle_stroke(c, 17.0, Stroke::new(2.0, v.strong_text_color()));
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::APPEARANCE) => {
+                                    // Light or dark: three segments.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::APPEARANCE, "appearance");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::APPEARANCE));
+                                    }
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Appearance"), label_font.clone(), v.text_color());
+                                    let names = [tr("System"), tr("Dark"), tr("Light")];
+                                    let seg_w = 96.0;
+                                    let x0 = rect.max.x - 10.0 - seg_w * 3.0;
+                                    let whole = Rect::from_min_size(pos2(x0, rect.center().y - 15.0), vec2(seg_w * 3.0, 30.0));
+                                    ui.painter().rect_filled(whole, 8.0, v.extreme_bg_color);
+                                    for (i, name) in names.iter().enumerate() {
+                                        let seg = Rect::from_min_size(pos2(x0 + i as f32 * seg_w, whole.min.y), vec2(seg_w, 30.0)).shrink(2.0);
+                                        let resp = ui.interact(seg, ui.id().with(("appearance", i)), Sense::click());
+                                        let on = cfg.appearance as usize == i;
+                                        // A colour scheme is light or dark of itself.
+                                        let off = cfg.scheme.is_some();
+                                        if on {
+                                            ui.painter().rect_filled(seg, 6.0, if off { v.selection.bg_fill.gamma_multiply(0.35) } else { v.selection.bg_fill });
+                                        } else if resp.hovered() {
+                                            ui.painter().rect_filled(seg, 6.0, v.widgets.hovered.weak_bg_fill);
+                                        }
+                                        let c = if off { v.weak_text_color() } else if on { v.selection.stroke.color } else { v.text_color() };
+                                        ui.painter().text(seg.center(), Align2::CENTER_CENTER, *name, FontId::proportional(14.0), c);
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::Appearance(i as u8));
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::SCHEME) => {
+                                    // Colour scheme: ‹ name ›, its colours beside it.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::SCHEME, "scheme");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::SCHEME));
+                                    }
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Color scheme"), label_font.clone(), v.text_color());
+                                    // One's own schemes: their folder (△ on the pad).
+                                    let fb = Rect::from_center_size(pos2(rect.max.x - 340.0, rect.center().y), Vec2::splat(28.0));
+                                    let fresp = ui.interact(fb, ui.id().with("scheme-folder"), Sense::click());
+                                    if fresp.hovered() {
+                                        ui.painter().rect_filled(fb, 6.0, v.widgets.hovered.weak_bg_fill);
+                                    }
+                                    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 20.0)) {
+                                        egui::Image::new(u).paint_at(ui, fb.shrink(4.0));
+                                    }
+                                    if fresp.on_hover_text(tr("Your own schemes (JSON)")).clicked() {
+                                        ev = Some(SettingsEvent::SchemesFolder);
+                                    }
+                                    let scheme = cfg.scheme.as_ref().and_then(|id| schemes.iter().find(|s| s.id == *id));
+                                    let name = scheme.map_or_else(|| tr("Standard").to_string(), |s| s.label());
+                                    let (minus, plus) = (
+                                        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+                                    );
+                                    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
+                                        let resp = ui.interact(b, ui.id().with(("scheme", label)), Sense::click());
+                                        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::Step(row::SCHEME, d));
+                                        }
+                                    }
+                                    let mid = (minus.max.x + plus.min.x) / 2.0;
+                                    ui.painter().text(pos2(mid, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
+                                    if let Some(s) = scheme {
+                                        // Background, controls, text, highlight: a strip under the name.
+                                        for (i, c) in [s.background, s.surface, s.text, s.accent].into_iter().enumerate() {
+                                            let at = Rect::from_center_size(pos2(mid - 27.0 + i as f32 * 18.0, rect.max.y - 6.0), vec2(16.0, 5.0));
+                                            ui.painter().rect(at, 2.0, c, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color), StrokeKind::Outside);
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::LANGUAGE) => {
+                                    // Language: ‹ name ›.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::LANGUAGE, "language");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::LANGUAGE));
+                                    }
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Language"), label_font.clone(), v.text_color());
+                                    let name = match cfg.language.as_deref().and_then(|c| crate::i18n::LANGUAGES.iter().find(|(l, _, _)| *l == c)) {
+                                        Some((_, own, _)) => own.to_string(),
+                                        None => format!("{} ({})", tr("As the system"), crate::i18n::LANGUAGES[crate::i18n::detect()].1),
+                                    };
+                                    let (minus, plus) = (
+                                        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+                                    );
+                                    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
+                                        let resp = ui.interact(b, ui.id().with(("lang", label)), Sense::click());
+                                        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::Step(row::LANGUAGE, d));
+                                        }
+                                    }
+                                    ui.painter().text(pos2((minus.max.x + plus.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
+                                }
+                                SItem::Row(r @ (row::SIDE_ICON | row::LIST_ICON | row::GRID_ICON | row::ZOOM)) => {
+                                    // Steppers.
+                                    let steppers: [(usize, &str, String); 4] = [
+                                        (row::SIDE_ICON, tr("Sidebar icons"), format!("{} px", cfg.side_icon)),
+                                        (row::LIST_ICON, tr("List icons"), format!("{} px", cfg.list_icon)),
+                                        (row::GRID_ICON, tr("Grid icons"), format!("{} px", cfg.grid_icon)),
+                                        (row::ZOOM, tr("Interface scale"), format!("{:.0}%", if crate::steam_add::game_mode() { cfg.zoom_game } else { cfg.zoom } * 100.0)),
+                                    ];
+                                    for (r_i, label, value) in steppers.into_iter().filter(|s| s.0 == r) {
+                                        let (rect, r) = settings_row(ui, 44.0, st.row == r_i, r_i);
+                                        if r.clicked() {
+                                            ev = Some(SettingsEvent::Row(r_i));
+                                        }
+                                        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, label_font.clone(), v.text_color());
+                                        let plus = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(30.0));
+                                        let minus = Rect::from_center_size(pos2(rect.max.x - 136.0, rect.center().y), Vec2::splat(30.0));
+                                        for (b, t, d) in [(minus, "−", -1.0), (plus, "+", 1.0)] {
+                                            let br = ui.interact(b, ui.id().with(("step", r_i, t)), Sense::click());
+                                            ui.painter().rect(b, 6.0, if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill }, Stroke::NONE, StrokeKind::Inside);
+                                            ui.painter().text(b.center(), Align2::CENTER_CENTER, t, FontId::proportional(18.0), v.text_color());
+                                            if br.clicked() {
+                                                ev = Some(SettingsEvent::Step(r_i, d));
+                                            }
+                                        }
+                                        ui.painter().text(pos2((plus.min.x + minus.max.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, value, label_font.clone(), v.strong_text_color());
+                                    }
+                                }
+                                SItem::Row(row::THEME) => {
+                                    // Icon theme.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::THEME, "theme");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Icon theme…"), label_font.clone(), v.text_color());
+                                    let ir = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(24.0));
+                                    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 24.0)) {
+                                        egui::Image::new(u).paint_at(ui, ir);
+                                    }
+                                    ui.painter().text(pos2(ir.min.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Theme);
+                                    }
+                                }
+                                SItem::Row(row::OPEN_IN) => {
+                                    // Open in Polka: a chip per kind.
+                                    let (rect, r) = settings_row(ui, 86.0, st.row == row::OPEN_IN, "open-in");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::OPEN_IN));
+                                    }
+                                    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
+                                    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
+                                    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos];
+                                    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
+                                    for (i, label) in kinds.iter().enumerate() {
+                                        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
+                                        let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
+                                        let on = flags[i];
+                                        let cursor = st.row == row::OPEN_IN && st.chip == i;
+                                        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+                                        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+                                        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
+                                        let color = v.text_color();
+                                        let text = if on { format!("✔ {label}") } else { label.to_string() };
+                                        ui.painter().text(chip.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), color);
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::Chip(i));
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::VOLUMES) => {
+                                    // Folding multi-volume archives.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::VOLUMES, "volumes");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Fold multi-volume archives"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.collapse_volumes {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::VOLUMES));
+                                    }
+                                }
+                                SItem::Row(row::WEB_IMAGES) => {
+                                    // Pictures from the internet in Markdown.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::WEB_IMAGES, "web-images");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Load Markdown pictures from the internet"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.viewer.web_images {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::WEB_IMAGES));
+                                    }
+                                }
+                                SItem::Row(row::LAYOUTS) => {
+                                    // Keyboard layouts for ⇄.
+                                    // Up to eight a line.
+                                    const PER_LINE: usize = 8;
+                                    let lines = crate::keyboard::CODES.len().div_ceil(PER_LINE);
+                                    let (rect, r) = settings_row(ui, 44.0 + 42.0 * lines as f32, st.row == row::LAYOUTS, "layouts");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::LAYOUTS));
+                                    }
+                                    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Keyboard layouts"), label_font.clone(), v.text_color());
+                                    let on_layouts = cfg.layouts();
+                                    let n = crate::keyboard::CODES.len().min(PER_LINE);
+                                    let chip_w = (SETTINGS_W - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
+                                    for (i, code) in crate::keyboard::CODES.iter().enumerate() {
+                                        let (line, col) = (i / PER_LINE, i % PER_LINE);
+                                        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 6.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
+                                        let resp = ui.interact(chip, ui.id().with(("layout-chip", i)), Sense::click());
+                                        let on = on_layouts.iter().any(|c| c == code);
+                                        let cursor = st.row == row::LAYOUTS && st.layout_chip == i;
+                                        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+                                        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+                                        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
+                                        let label = crate::keyboard::LAYOUTS[i].name;
+                                        ui.painter().text(chip.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), v.text_color());
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::LayoutChip(i));
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::INSTALL) => {
+                                    // Packages install on ✕.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::INSTALL, "install");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Install packages on open"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.install_on_open {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::INSTALL));
+                                    }
+                                }
+                                SItem::Row(row::PASSWORDS) => {
+                                    // How typed passwords show.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::PASSWORDS, "passwords");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Passwords as you type"), label_font.clone(), v.text_color());
+                                    let shown = if cfg.password_hidden { tr("Hidden") } else { "* * * *" };
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::PASSWORDS));
+                                    }
+                                }
+                                SItem::Row(row::REMEMBER_RIGHT) => {
+                                    // Dual mode: the right pane where it was.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::REMEMBER_RIGHT, "remember-right");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Right pane opens where it was"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.remember_right {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
+                                    }
+                                }
+                                SItem::Row(row::PAD_HINTS) => {
+                                    // The gamepad's hints: while it's in use, always or never.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::PAD_HINTS, "pad-hints");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Gamepad hints"), label_font.clone(), v.text_color());
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {} ▶", cfg.pad_hints.label()), FontId::proportional(15.0), v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::PAD_HINTS));
+                                    }
+                                }
+                                SItem::Row(row::TOUCH_OPEN) => {
+                                    // A finger opens on one tap or two.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TOUCH_OPEN, "touch-open");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Open by touch"), label_font.clone(), v.text_color());
+                                    let shown = if cfg.touch_double { tr("Double tap") } else { tr("One tap") };
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TOUCH_OPEN));
+                                    }
+                                }
+                                SItem::Row(row::TITLEBAR) => {
+                                    // The desktop's title bar, or Polka's top bar as one.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TITLEBAR, "titlebar");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("System title bar"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.system_titlebar {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TITLEBAR));
+                                    }
+                                }
+                                SItem::Row(row::WIN_STYLE) => {
+                                    // Its buttons (shown without the system's title bar): the look, each
+                                    // tile a preview…
+                                    use crate::titlebar::{ORDERS, STYLES, preview};
+                                    let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
+                                    const PER: usize = 4;
+                                    let lines = STYLES.len().div_ceil(PER);
+                                    let (rect, r) = settings_row(ui, 44.0 + 66.0 * lines as f32, st.row == row::WIN_STYLE, "win-style");
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Row(row::WIN_STYLE));
+                                    }
+                                    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Window buttons"), label_font.clone(), v.text_color());
+                                    let tile_w = (SETTINGS_W - 28.0 - (PER as f32 - 1.0) * 8.0) / PER as f32;
+                                    for (i, style) in STYLES.iter().enumerate() {
+                                        let (line, col) = (i / PER, i % PER);
+                                        let tile = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (tile_w + 8.0), rect.min.y + 38.0 + line as f32 * 66.0), vec2(tile_w, 60.0));
+                                        let resp = ui.interact(tile, ui.id().with(("win-style", i)), Sense::click());
+                                        let on = cfg.win_style == *style;
+                                        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+                                        let stroke = if on && st.row == row::WIN_STYLE { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
+                                        ui.painter().rect(tile, 8.0, fill, stroke, StrokeKind::Inside);
+                                        preview(ui, icons, *style, &order, Rect::from_min_size(tile.min, vec2(tile.width(), 36.0)), 0.75);
+                                        ui.painter().text(pos2(tile.center().x, tile.max.y - 13.0), Align2::CENTER_CENTER, style.name(), FontId::proportional(13.0), v.text_color());
+                                        if resp.clicked() {
+                                            ev = Some(SettingsEvent::WinStyle(i));
+                                        }
+                                    }
+                                }
+                                SItem::Row(row::WIN_SIDE) => {
+                                    // …their side…
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::WIN_SIDE, "win-side");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Window buttons side"), label_font.clone(), v.text_color());
+                                    let shown = if cfg.win_left { tr("Left") } else { tr("Right") };
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::WIN_SIDE));
+                                    }
+                                }
+                                SItem::Row(row::WIN_ORDER) => {
+                                    // …and order.
+                                    use crate::titlebar::{ORDERS, preview};
+                                    let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
+                                    let (rect, r) = settings_row(ui, 48.0, st.row == row::WIN_ORDER, "win-order");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Button order"), label_font.clone(), v.text_color());
+                                    let f = FontId::proportional(15.0);
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "▶", f.clone(), v.strong_text_color());
+                                    let shown = Rect::from_min_max(pos2(rect.max.x - 210.0, rect.min.y), pos2(rect.max.x - 36.0, rect.max.y));
+                                    preview(ui, icons, cfg.win_style, &order, shown, 1.0);
+                                    ui.painter().text(pos2(shown.min.x - 4.0, rect.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::WIN_ORDER));
+                                    }
+                                }
+                            SItem::Row(_) | SItem::Viewer(_) | SItem::Term(_) => {}
+                            // A status bar figure: shown or not.
+                            SItem::Status(f) => {
+                                let (rect, r) = settings_row(ui, 44.0, cur == it, ("status-fig", f.label()));
+                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, f.label(), label_font.clone(), v.text_color());
+                                let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                if cfg.status.get(f) {
+                                    ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                }
+                                if r.clicked() {
+                                    ev = Some(SettingsEvent::Item(it, 0));
+                                }
+                            }
+                            // About: which Polka this is, its versions, its page.
+                            SItem::Versions => {
+                                ui.label(egui::RichText::new(format!("Polka {}", env!("CARGO_PKG_VERSION"))).strong().size(16.0));
+                                ui.label(egui::RichText::new(tr("Gamepad-first file manager")).color(v.weak_text_color()));
+                                ui.add_space(6.0);
+                                let (rect, r) = settings_row(ui, 44.0, cur == it, "versions");
+                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Versions and updates…"), label_font.clone(), v.text_color());
+                                if r.clicked() {
+                                    ev = Some(SettingsEvent::Item(it, 0));
+                                }
+                            }
+                            SItem::Page => {
+                                let (rect, r) = settings_row(ui, 44.0, cur == it, "page");
+                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Project page"), label_font.clone(), v.text_color());
+                                ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "github.com/sendement/polka", FontId::proportional(13.0), v.weak_text_color());
+                                if r.clicked() {
+                                    ev = Some(SettingsEvent::Item(it, 0));
+                                }
+                            }
+                        }
+                    }
+                });
+        });
+    });
+    // For the mouse: B closes on the pad.
+    ui.add_space(6.0);
+    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        if ui.button(tr("Close")).clicked() {
+            ev = Some(SettingsEvent::Close);
         }
-        if cursor {
-            ui.painter().circle_stroke(c, 17.0, Stroke::new(2.0, v.strong_text_color()));
-        }
-    }
-
-    // Light or dark: three segments.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::APPEARANCE, "appearance");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::APPEARANCE));
-    }
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Appearance"), label_font.clone(), v.text_color());
-    let names = [tr("System"), tr("Dark"), tr("Light")];
-    let seg_w = 96.0;
-    let x0 = rect.max.x - 10.0 - seg_w * 3.0;
-    let whole = Rect::from_min_size(pos2(x0, rect.center().y - 15.0), vec2(seg_w * 3.0, 30.0));
-    ui.painter().rect_filled(whole, 8.0, v.extreme_bg_color);
-    for (i, name) in names.iter().enumerate() {
-        let seg = Rect::from_min_size(pos2(x0 + i as f32 * seg_w, whole.min.y), vec2(seg_w, 30.0)).shrink(2.0);
-        let resp = ui.interact(seg, ui.id().with(("appearance", i)), Sense::click());
-        let on = cfg.appearance as usize == i;
-        // A colour scheme is light or dark of itself.
-        let off = cfg.scheme.is_some();
-        if on {
-            ui.painter().rect_filled(seg, 6.0, if off { v.selection.bg_fill.gamma_multiply(0.35) } else { v.selection.bg_fill });
-        } else if resp.hovered() {
-            ui.painter().rect_filled(seg, 6.0, v.widgets.hovered.weak_bg_fill);
-        }
-        let c = if off { v.weak_text_color() } else if on { v.selection.stroke.color } else { v.text_color() };
-        ui.painter().text(seg.center(), Align2::CENTER_CENTER, *name, FontId::proportional(14.0), c);
-        if resp.clicked() {
-            ev = Some(SettingsEvent::Appearance(i as u8));
-        }
-    }
-
-    // Colour scheme: ‹ name ›, its colours beside it.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::SCHEME, "scheme");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::SCHEME));
-    }
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Color scheme"), label_font.clone(), v.text_color());
-    // One's own schemes: their folder (△ on the pad).
-    let fb = Rect::from_center_size(pos2(rect.max.x - 340.0, rect.center().y), Vec2::splat(28.0));
-    let fresp = ui.interact(fb, ui.id().with("scheme-folder"), Sense::click());
-    if fresp.hovered() {
-        ui.painter().rect_filled(fb, 6.0, v.widgets.hovered.weak_bg_fill);
-    }
-    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 20.0)) {
-        egui::Image::new(u).paint_at(ui, fb.shrink(4.0));
-    }
-    if fresp.on_hover_text(tr("Your own schemes (JSON)")).clicked() {
-        ev = Some(SettingsEvent::SchemesFolder);
-    }
-    let scheme = cfg.scheme.as_ref().and_then(|id| schemes.iter().find(|s| s.id == *id));
-    let name = scheme.map_or_else(|| tr("Standard").to_string(), |s| s.label());
-    let (minus, plus) = (
-        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
-        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
-    );
-    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
-        let resp = ui.interact(b, ui.id().with(("scheme", label)), Sense::click());
-        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
-        if resp.clicked() {
-            ev = Some(SettingsEvent::Step(row::SCHEME, d));
-        }
-    }
-    let mid = (minus.max.x + plus.min.x) / 2.0;
-    ui.painter().text(pos2(mid, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
-    if let Some(s) = scheme {
-        // Background, controls, text, highlight: a strip under the name.
-        for (i, c) in [s.background, s.surface, s.text, s.accent].into_iter().enumerate() {
-            let at = Rect::from_center_size(pos2(mid - 27.0 + i as f32 * 18.0, rect.max.y - 6.0), vec2(16.0, 5.0));
-            ui.painter().rect(at, 2.0, c, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color), StrokeKind::Outside);
-        }
-    }
-
-    // Language: ‹ name ›.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::LANGUAGE, "language");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::LANGUAGE));
-    }
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Language"), label_font.clone(), v.text_color());
-    let name = match cfg.language.as_deref().and_then(|c| crate::i18n::LANGUAGES.iter().find(|(l, _, _)| *l == c)) {
-        Some((_, own, _)) => own.to_string(),
-        None => format!("{} ({})", tr("As the system"), crate::i18n::LANGUAGES[crate::i18n::detect()].1),
-    };
-    let (minus, plus) = (
-        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
-        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
-    );
-    for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
-        let resp = ui.interact(b, ui.id().with(("lang", label)), Sense::click());
-        ui.painter().rect_filled(b, 6.0, if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, label, FontId::proportional(18.0), v.text_color());
-        if resp.clicked() {
-            ev = Some(SettingsEvent::Step(row::LANGUAGE, d));
-        }
-    }
-    ui.painter().text(pos2((minus.max.x + plus.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
-
-    // Steppers.
-    let steppers: [(usize, &str, String); 4] = [
-        (row::SIDE_ICON, tr("Sidebar icons"), format!("{} px", cfg.side_icon)),
-        (row::LIST_ICON, tr("List icons"), format!("{} px", cfg.list_icon)),
-        (row::GRID_ICON, tr("Grid icons"), format!("{} px", cfg.grid_icon)),
-        (row::ZOOM, tr("Interface scale"), format!("{:.0}%", if crate::steam_add::game_mode() { cfg.zoom_game } else { cfg.zoom } * 100.0)),
-    ];
-    for (r_i, label, value) in steppers {
-        let (rect, r) = settings_row(ui, 44.0, st.row == r_i, r_i);
-        if r.clicked() {
-            ev = Some(SettingsEvent::Row(r_i));
-        }
-        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, label_font.clone(), v.text_color());
-        let plus = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(30.0));
-        let minus = Rect::from_center_size(pos2(rect.max.x - 136.0, rect.center().y), Vec2::splat(30.0));
-        for (b, t, d) in [(minus, "−", -1.0), (plus, "+", 1.0)] {
-            let br = ui.interact(b, ui.id().with(("step", r_i, t)), Sense::click());
-            ui.painter().rect(b, 6.0, if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill }, Stroke::NONE, StrokeKind::Inside);
-            ui.painter().text(b.center(), Align2::CENTER_CENTER, t, FontId::proportional(18.0), v.text_color());
-            if br.clicked() {
-                ev = Some(SettingsEvent::Step(r_i, d));
-            }
-        }
-        ui.painter().text(pos2((plus.min.x + minus.max.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, value, label_font.clone(), v.strong_text_color());
-    }
-
-    // Icon theme.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::THEME, "theme");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Icon theme…"), label_font.clone(), v.text_color());
-    let ir = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(24.0));
-    if let Some(u) = icons.named(&["folder"], lookup_px(ui, 24.0)) {
-        egui::Image::new(u).paint_at(ui, ir);
-    }
-    ui.painter().text(pos2(ir.min.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Theme);
-    }
-
-    // Open in Polka: a chip per kind.
-    let (rect, r) = settings_row(ui, 86.0, st.row == row::OPEN_IN, "open-in");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::OPEN_IN));
-    }
-    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
-    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video")];
-    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos];
-    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
-    for (i, label) in kinds.iter().enumerate() {
-        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
-        let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
-        let on = flags[i];
-        let cursor = st.row == row::OPEN_IN && st.chip == i;
-        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
-        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
-        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
-        let color = v.text_color();
-        let text = if on { format!("✔ {label}") } else { label.to_string() };
-        ui.painter().text(chip.center(), Align2::CENTER_CENTER, text, FontId::proportional(14.0), color);
-        if resp.clicked() {
-            ev = Some(SettingsEvent::Chip(i));
-        }
-    }
-
-    // Folding multi-volume archives.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::VOLUMES, "volumes");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Fold multi-volume archives"), label_font.clone(), v.text_color());
-    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-    if cfg.collapse_volumes {
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
-    }
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::VOLUMES));
-    }
-
-    // Pictures from the internet in Markdown.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::WEB_IMAGES, "web-images");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Load Markdown pictures from the internet"), label_font.clone(), v.text_color());
-    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-    if cfg.viewer.web_images {
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
-    }
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::WEB_IMAGES));
-    }
-
-    // Keyboard layouts for ⇄.
-    // Up to eight a line.
-    const PER_LINE: usize = 8;
-    let lines = crate::keyboard::CODES.len().div_ceil(PER_LINE);
-    let (rect, r) = settings_row(ui, 44.0 + 42.0 * lines as f32, st.row == row::LAYOUTS, "layouts");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::LAYOUTS));
-    }
-    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Keyboard layouts"), label_font.clone(), v.text_color());
-    let on_layouts = cfg.layouts();
-    let n = crate::keyboard::CODES.len().min(PER_LINE);
-    let chip_w = (SETTINGS_W - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
-    for (i, code) in crate::keyboard::CODES.iter().enumerate() {
-        let (line, col) = (i / PER_LINE, i % PER_LINE);
-        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 6.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
-        let resp = ui.interact(chip, ui.id().with(("layout-chip", i)), Sense::click());
-        let on = on_layouts.iter().any(|c| c == code);
-        let cursor = st.row == row::LAYOUTS && st.layout_chip == i;
-        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
-        let stroke = if cursor { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
-        ui.painter().rect(chip, 8.0, fill, stroke, StrokeKind::Inside);
-        let label = crate::keyboard::LAYOUTS[i].name;
-        ui.painter().text(chip.center(), Align2::CENTER_CENTER, label, FontId::proportional(15.0), v.text_color());
-        if resp.clicked() {
-            ev = Some(SettingsEvent::LayoutChip(i));
-        }
-    }
-
-    // Packages install on ✕.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::INSTALL, "install");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Install packages on open"), label_font.clone(), v.text_color());
-    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-    if cfg.install_on_open {
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
-    }
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::INSTALL));
-    }
-
-    // How typed passwords show.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::PASSWORDS, "passwords");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Passwords as you type"), label_font.clone(), v.text_color());
-    let shown = if cfg.password_hidden { tr("Hidden") } else { "* * * *" };
-    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::PASSWORDS));
-    }
-
-    // Dual mode: the right pane where it was.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::REMEMBER_RIGHT, "remember-right");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Right pane opens where it was"), label_font.clone(), v.text_color());
-    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-    if cfg.remember_right {
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
-    }
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
-    }
-
-    // The gamepad's hints: while it's in use, always or never.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::PAD_HINTS, "pad-hints");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Gamepad hints"), label_font.clone(), v.text_color());
-    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {} ▶", cfg.pad_hints.label()), FontId::proportional(15.0), v.strong_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::PAD_HINTS));
-    }
-
-    // A finger opens on one tap or two.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::TOUCH_OPEN, "touch-open");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Open by touch"), label_font.clone(), v.text_color());
-    let shown = if cfg.touch_double { tr("Double tap") } else { tr("One tap") };
-    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::TOUCH_OPEN));
-    }
-
-    // The desktop's title bar, or Polka's top bar as one.
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::TITLEBAR, "titlebar");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("System title bar"), label_font.clone(), v.text_color());
-    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-    if cfg.system_titlebar {
-        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
-    }
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::TITLEBAR));
-    }
-
-    // Its buttons (shown without the system's title bar): the look, each
-    // tile a preview…
-    use crate::titlebar::{ORDERS, STYLES, preview};
-    let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
-    const PER: usize = 4;
-    let lines = STYLES.len().div_ceil(PER);
-    let (rect, r) = settings_row(ui, 44.0 + 66.0 * lines as f32, st.row == row::WIN_STYLE, "win-style");
-    if r.clicked() {
-        ev = Some(SettingsEvent::Row(row::WIN_STYLE));
-    }
-    ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Window buttons"), label_font.clone(), v.text_color());
-    let tile_w = (SETTINGS_W - 28.0 - (PER as f32 - 1.0) * 8.0) / PER as f32;
-    for (i, style) in STYLES.iter().enumerate() {
-        let (line, col) = (i / PER, i % PER);
-        let tile = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (tile_w + 8.0), rect.min.y + 38.0 + line as f32 * 66.0), vec2(tile_w, 60.0));
-        let resp = ui.interact(tile, ui.id().with(("win-style", i)), Sense::click());
-        let on = cfg.win_style == *style;
-        let fill = if on { tint(&v, 0.45) } else if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
-        let stroke = if on && st.row == row::WIN_STYLE { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
-        ui.painter().rect(tile, 8.0, fill, stroke, StrokeKind::Inside);
-        preview(ui, icons, *style, &order, Rect::from_min_size(tile.min, vec2(tile.width(), 36.0)), 0.75);
-        ui.painter().text(pos2(tile.center().x, tile.max.y - 13.0), Align2::CENTER_CENTER, style.name(), FontId::proportional(13.0), v.text_color());
-        if resp.clicked() {
-            ev = Some(SettingsEvent::WinStyle(i));
-        }
-    }
-
-    // …their side…
-    let (rect, r) = settings_row(ui, 44.0, st.row == row::WIN_SIDE, "win-side");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Window buttons side"), label_font.clone(), v.text_color());
-    let shown = if cfg.win_left { tr("Left") } else { tr("Right") };
-    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::WIN_SIDE));
-    }
-
-    // …and order.
-    let (rect, r) = settings_row(ui, 48.0, st.row == row::WIN_ORDER, "win-order");
-    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Button order"), label_font.clone(), v.text_color());
-    let f = FontId::proportional(15.0);
-    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "▶", f.clone(), v.strong_text_color());
-    let shown = Rect::from_min_max(pos2(rect.max.x - 210.0, rect.min.y), pos2(rect.max.x - 36.0, rect.max.y));
-    preview(ui, icons, cfg.win_style, &order, shown, 1.0);
-    ui.painter().text(pos2(shown.min.x - 4.0, rect.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Toggle(row::WIN_ORDER));
-    }
-
-    // Close.
-    let (rect, r) = settings_row(ui, 40.0, st.row == row::CLOSE, "close");
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("Close"), label_font, v.text_color());
-    if r.clicked() {
-        ev = Some(SettingsEvent::Close);
-    }
+    });
     ev
 }
+
+/// The settings' category list.
+const CATS_W: f32 = 180.0;
 
 fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<SettingsEvent> {
     let mut ev = None;

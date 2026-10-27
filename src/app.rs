@@ -1102,7 +1102,86 @@ impl IconPicker {
     }
 }
 
-pub const SETTINGS_ROWS: usize = row::CLOSE + 1;
+/// Settings in categories: the list on the left, the category's items on
+/// the right (LB / RB go through them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SItem {
+    /// One of Polka's own rows (row::*).
+    Row(usize),
+    /// The viewer's (vrow::*) and the terminal's (trow::*) settings.
+    Viewer(usize),
+    Term(usize),
+    /// A status bar figure shown or not.
+    Status(crate::status::Figure),
+    /// Versions and updates, and the project's page.
+    Versions,
+    Page,
+}
+
+pub const SETTINGS_CATS: usize = 8;
+pub const NO_ROW: usize = usize::MAX;
+
+/// A category's name.
+pub fn settings_cat_name(cat: usize) -> &'static str {
+    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "About"][cat.min(SETTINGS_CATS - 1)])
+}
+
+/// What a category holds, in order.
+pub fn settings_items(cat: usize) -> Vec<SItem> {
+    use crate::terminal::app::trow;
+    let rows = |r: &[usize]| r.iter().map(|r| SItem::Row(*r)).collect::<Vec<_>>();
+    match cat {
+        0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
+        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER]),
+        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
+        3 => rows(&[row::OPEN_IN, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
+        4 => {
+            let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
+            v.push(SItem::Row(row::WEB_IMAGES));
+            v
+        }
+        5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
+        6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
+        _ => vec![SItem::Versions, SItem::Page],
+    }
+}
+
+impl Settings {
+    pub fn new(swatch: usize) -> Self {
+        Settings { cat: 0, item: 0, row: row::ACCENT, chip: 0, layout_chip: 0, swatch, editor: None }
+    }
+
+    pub fn current(&self) -> SItem {
+        let items = settings_items(self.cat);
+        items[self.item.min(items.len() - 1)]
+    }
+
+    /// On this item (its row kept in step).
+    pub fn go(&mut self, cat: usize, item: usize) {
+        self.cat = cat;
+        self.item = item;
+        self.row = match self.current() {
+            SItem::Row(r) => r,
+            _ => NO_ROW,
+        };
+    }
+
+    /// Onto one of Polka's own rows, in whichever category has it.
+    pub fn go_to_row(&mut self, r: usize) {
+        for c in 0..SETTINGS_CATS {
+            if let Some(i) = settings_items(c).iter().position(|x| *x == SItem::Row(r)) {
+                return self.go(c, i);
+            }
+        }
+    }
+
+    /// Onto an item by what it is (a click).
+    pub fn go_to(&mut self, it: SItem) {
+        if let Some(i) = settings_items(self.cat).iter().position(|x| *x == it) {
+            self.go(self.cat, i);
+        }
+    }
+}
 
 /// The gamepad channel's sender when there's no gamepad thread (tests),
 /// the latest window's.
@@ -1150,6 +1229,11 @@ impl Config {
 
 /// Settings dialog. Changes apply (and save) immediately.
 pub struct Settings {
+    /// The category shown (one of SETTINGS_CATS), and the item in it the
+    /// cursor is on.
+    pub cat: usize,
+    pub item: usize,
+    /// The item's row, when it's one of Polka's own (row::*; else NO_ROW).
     pub row: usize,
     /// Cursor among the "open in Polka" kinds.
     pub chip: usize,
@@ -3478,13 +3562,23 @@ impl App {
             Action::Right => 1.0,
             _ => 0.0,
         };
+        let it = st.current();
         match a {
+            // LB / RB: the categories.
+            Action::PrevTab | Action::NextTab => {
+                let cat = (st.cat as isize + if a == Action::PrevTab { -1 } else { 1 }).rem_euclid(SETTINGS_CATS as isize) as usize;
+                st.go(cat, 0);
+            }
             Action::Up | Action::Down => {
-                st.row = if a == Action::Up { st.row.saturating_sub(1) } else { (st.row + 1).min(SETTINGS_ROWS - 1) };
+                let n = settings_items(st.cat).len();
+                let item = if a == Action::Up { st.item.saturating_sub(1) } else { (st.item + 1).min(n - 1) };
+                let cat = st.cat;
+                st.go(cat, item);
                 // Long settings scroll to the row.
                 self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-reveal"), true));
             }
             Action::Back | Action::Menu => self.overlay = None,
+            Action::Left | Action::Right | Action::Accept if !matches!(it, SItem::Row(_)) => self.settings_item(it, d as isize),
             Action::Left | Action::Right => {
                 let row = st.row;
                 self.settings_step(row, d);
@@ -3625,6 +3719,23 @@ impl App {
             p.symlink_metadata().is_ok() || ops::volume_path(&p, 1).symlink_metadata().is_ok()
         });
         self.start(Op::Compress { sources, out: dir.join(name), opts });
+    }
+
+    /// ←/→ (d = ±1) or ✕ (d = 0) on an item that isn't Polka's own row.
+    pub fn settings_item(&mut self, it: SItem, d: isize) {
+        match it {
+            SItem::Row(r) => self.settings_step(r, d as f32),
+            SItem::Viewer(r) => self.viewer_step(r, d),
+            SItem::Term(r) => self.term_settings_step(r, d),
+            SItem::Status(f) => self.run(Cmd::ToggleStatus(f)),
+            SItem::Versions if d == 0 => self.versions_open(),
+            SItem::Page if d == 0 => {
+                if let Err(e) = crate::launch::open(std::path::Path::new("https://github.com/sendement/polka")) {
+                    self.toast(format!("{}: {e}", tr("Failed")), true);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// ←/→ on a settings row.
@@ -4353,7 +4464,7 @@ impl App {
                 self.apply_appearance();
                 let sw = swatches(&self.cfg);
                 let swatch = sw.iter().position(|c| *c == self.cfg.accent).unwrap_or(0);
-                self.overlay = Some(Overlay::Settings(Settings { row: 0, chip: 0, layout_chip: 0, swatch, editor: None }));
+                self.overlay = Some(Overlay::Settings(Settings::new(swatch)));
             }
             Cmd::IconThemes => {
                 let system = crate::icons::detect_theme().unwrap_or_else(|| "hicolor".into());

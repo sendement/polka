@@ -608,14 +608,17 @@ pub fn draw_keys(ui: &mut Ui, q: &mut super::app::QuickKeys, pad: crate::input::
 }
 
 /// Terminal settings: (row, step) on a click.
-pub fn draw_settings(ui: &mut Ui, st: &super::app::TermSettings, p: &crate::config::TermPrefs, font_name: Option<&str>, dark: bool) -> Option<(usize, isize)> {
+/// Its rows and the scheme's colours; `standalone` (over the terminal):
+/// with its title and a Close row.
+pub fn draw_settings(ui: &mut Ui, row: usize, p: &crate::config::TermPrefs, font_name: Option<&str>, dark: bool, w: f32, standalone: bool) -> Option<(usize, isize)> {
     use super::app::trow;
     let mut ev = None;
     let vis = ui.visuals().clone();
-    let w = 400.0;
     ui.set_width(w);
-    ui.label(egui::RichText::new(tr("Terminal settings")).strong().size(18.0));
-    ui.add_space(6.0);
+    if standalone {
+        ui.label(egui::RichText::new(tr("Terminal settings")).strong().size(18.0));
+        ui.add_space(6.0);
+    }
     ui.spacing_mut().item_spacing.y = 4.0;
     let shell = p.shell.clone().unwrap_or_else(|| format!("{} ({})", tr("System default"), super::shell_name(p)));
     let rows: [(usize, &str, String, bool); 7] = [
@@ -629,7 +632,7 @@ pub fn draw_settings(ui: &mut Ui, st: &super::app::TermSettings, p: &crate::conf
     ];
     for (r_i, label, value, arrows) in rows {
         let (rect, r) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
-        if st.row == r_i {
+        if row == r_i {
             ui.painter().rect(rect, 8.0, crate::view::tint(&vis, 0.25), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
         } else if r.hovered() {
             ui.painter().rect_filled(rect, 8.0, vis.widgets.hovered.weak_bg_fill.gamma_multiply(0.5));
@@ -672,8 +675,11 @@ pub fn draw_settings(ui: &mut Ui, st: &super::app::TermSettings, p: &crate::conf
         let cell = Rect::from_min_size(pos2(r.min.x + 12.0 + i as f32 * sw, r.max.y - 22.0), vec2(sw - 2.0, 14.0));
         ui.painter().rect_filled(cell, 3.0, c32(*c));
     }
+    if !standalone {
+        return ev;
+    }
     let (cr, cresp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
-    if st.row == trow::CLOSE {
+    if row == trow::CLOSE {
         ui.painter().rect(cr, 8.0, crate::view::tint(&vis, 0.25), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
     }
     ui.painter().text(cr.center(), Align2::CENTER_CENTER, tr("Close"), FontId::proportional(15.0), vis.text_color());

@@ -711,14 +711,17 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
 pub const SAMPLE: &str = "// Polka: просмотр текста\nfn main() {\n    let name = \"мир\";\n    println!(\"Привет, {name}!\");\n}\n";
 
 /// Sidebar of viewer settings, drawn next to the open file.
-pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &ViewerPrefs) -> Option<(usize, isize)> {
+/// Its rows and a preview; `standalone` (beside an open file): with its
+/// title and a Close row.
+pub fn draw_settings(ui: &mut Ui, row: usize, prefs: &ViewerPrefs, w: f32, standalone: bool) -> Option<(usize, isize)> {
     use crate::app::vrow;
     let mut ev = None;
     let vis = ui.visuals().clone();
-    let w = 380.0;
     ui.set_width(w);
-    ui.label(egui::RichText::new(tr("Viewer settings")).strong().size(18.0));
-    ui.add_space(6.0);
+    if standalone {
+        ui.label(egui::RichText::new(tr("Viewer settings")).strong().size(18.0));
+        ui.add_space(6.0);
+    }
     ui.spacing_mut().item_spacing.y = 4.0;
     let font_name = prefs.font.clone().unwrap_or_else(|| tr("System monospace").to_string());
     let rows: [(usize, &str, String, bool); 5] = [
@@ -730,7 +733,7 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
     ];
     for (r_i, label, value, arrows) in rows {
         let (rect, r) = ui.allocate_exact_size(vec2(w, 42.0), Sense::click());
-        if st.row == r_i {
+        if row == r_i {
             ui.painter().rect(rect, 8.0, crate::view::tint(&vis, 0.25), Stroke::new(1.5, vis.selection.bg_fill), StrokeKind::Inside);
         } else if r.hovered() {
             ui.painter().rect_filled(rect, 8.0, vis.widgets.hovered.weak_bg_fill.gamma_multiply(0.5));
@@ -788,9 +791,12 @@ pub fn draw_settings(ui: &mut Ui, st: &crate::app::ViewerSettings, prefs: &Viewe
     let (rect, _) = ui.allocate_exact_size(vec2(w, g.size().y + 20.0), Sense::hover());
     ui.painter().rect_filled(rect, 8.0, theme.bg);
     ui.painter().galley(rect.min + vec2(12.0, 10.0), g, theme.fg);
+    if !standalone {
+        return ev;
+    }
     ui.add_space(6.0);
     let (rect, r) = ui.allocate_exact_size(vec2(w, 38.0), Sense::click());
-    let focused = st.row == vrow::CLOSE;
+    let focused = row == vrow::CLOSE;
     let fill = if focused { crate::view::tint(&vis, 0.5) } else if r.hovered() { vis.widgets.hovered.weak_bg_fill } else { vis.widgets.inactive.weak_bg_fill };
     ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, vis.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("Close"), FontId::proportional(15.0), vis.text_color());
