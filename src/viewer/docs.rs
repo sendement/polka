@@ -316,12 +316,44 @@ fn office_pdf(path: &Path) -> Result<PathBuf, String> {
         return Ok(pdf);
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let soffice = ["soffice", "libreoffice"].into_iter().find(|t| !crate::terminal::installed(&[t]).is_empty()).ok_or_else(|| tr("needs LibreOffice").to_string())?;
-    let out = tool(soffice).args(["--headless", "--convert-to", "pdf", "--outdir"]).arg(host(&dir)).arg(host(path)).output().map_err(|e| e.to_string())?;
+    let work = work_dir()?;
+    let mut cmd = libreoffice(&work, path).ok_or_else(|| tr("needs LibreOffice").to_string())?;
+    // Its own profile: a LibreOffice already open would take the job and
+    // drop it.
+    let profile = work.join("office-profile");
+    let out = cmd
+        .arg(format!("-env:UserInstallation={}", crate::icons::uri(&crate::sandbox::host_path(&profile))))
+        .args(["--headless", "--convert-to", "pdf", "--outdir"])
+        .arg(host(&dir))
+        .arg(host(path))
+        .output()
+        .map_err(|e| e.to_string())?;
     if !pdf.exists() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(pdf)
+}
+
+/// LibreOffice's Flatpak (on the Steam Deck it's the only way to have it).
+const LIBREOFFICE_APP: &str = "org.libreoffice.LibreOffice";
+
+/// LibreOffice to run: the system's, else its Flatpak, let into our work
+/// folder and the file's.
+fn libreoffice(out: &Path, file: &Path) -> Option<std::process::Command> {
+    if let Some(t) = ["soffice", "libreoffice"].into_iter().find(|t| !crate::terminal::installed(&[t]).is_empty()) {
+        return Some(tool(t));
+    }
+    let installed = tool("flatpak").args(["info", LIBREOFFICE_APP]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    if !installed {
+        return None;
+    }
+    let mut c = tool("flatpak");
+    c.args(["run", "--command=libreoffice"]).arg(format!("--filesystem={}", host(out)));
+    if let Some(dir) = file.parent() {
+        c.arg(format!("--filesystem={}:ro", host(dir)));
+    }
+    c.arg(LIBREOFFICE_APP);
+    Some(c)
 }
 
 // ---------------------------------------------------------------- PDF

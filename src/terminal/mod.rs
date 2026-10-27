@@ -493,7 +493,13 @@ pub fn installed(names: &[&'static str]) -> Vec<&'static str> {
     } else {
         std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default()
     };
-    names.iter().copied().filter(|n| dirs.iter().any(|d| d.join(n).is_file())).collect()
+    names.iter().copied().filter(|n| dirs.iter().any(|d| present(&d.join(n)))).collect()
+}
+
+/// A file, or a link to one. In Flatpak the host's links to /usr/lib/…
+/// lead nowhere (that's the runtime's /usr), but the program is there.
+fn present(p: &Path) -> bool {
+    p.is_file() || (crate::sandbox::flatpak() && p.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()))
 }
 
 pub fn cursor_names() -> [&'static str; 3] {
