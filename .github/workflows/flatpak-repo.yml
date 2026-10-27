@@ -30,13 +30,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Flatpak tools
-        # (apt has hung here before: better to fail and run again.)
-        timeout-minutes: 10
+        # (apt has hung here before: better to fail and run again. A slow
+        # mirror takes long, though: what flatpak-builder recommends is
+        # needed — appstream's compose reads the SVG icon through it.)
+        timeout-minutes: 25
         run: |
           sudo apt-get update
-          # (Without what they'd recommend: ffmpeg's libraries and the like,
-          # slow on a slow mirror.)
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree jq
+          sudo apt-get install -y flatpak flatpak-builder ostree jq
 
       - name: Runtime and SDK
         run: |
