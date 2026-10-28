@@ -28,6 +28,10 @@ use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum
 use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 
 const URIS: &str = "text/uri-list";
+/// The files through xdg-desktop-portal: a key a sandboxed program (a
+/// Flatpak's Telegram, say) trades for paths it may open. (A plain path
+/// it can't reach reads as an empty file.) The older name too.
+const PORTAL: [&str; 2] = ["application/vnd.portal.filetransfer", "application/vnd.portal.files"];
 /// Text kinds, the best first.
 const TEXT: [&str; 5] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
 
@@ -266,6 +270,11 @@ impl State {
         }
         let src = m.create_data_source(&self.qh, Source::Drag);
         src.offer(URIS.into());
+        if portal::works() {
+            for m in PORTAL {
+                src.offer(m.into());
+            }
+        }
         src.offer("text/plain;charset=utf-8".into());
         if src.version() >= 3 {
             src.set_actions(DndAction::Copy | DndAction::Move);
@@ -582,6 +591,9 @@ impl Dispatch<WlDataSource, Source> for State {
             (Source::Drag, wl_data_source::Event::Send { mime_type, fd }) => {
                 let text = if mime_type == URIS {
                     uri_list(&st.out_files)
+                } else if PORTAL.contains(&mime_type.as_str()) {
+                    // (A key each time it's asked: it's spent once retrieved.)
+                    portal::export(&st.out_files).unwrap_or_default()
                 } else {
                     st.out_files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n")
                 };
@@ -604,6 +616,52 @@ impl Dispatch<WlDataSource, Source> for State {
             }
             _ => {}
         }
+    }
+}
+
+/// xdg-desktop-portal's FileTransfer.
+mod portal {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    use zbus::zvariant::Value;
+
+    fn proxy() -> Option<&'static zbus::blocking::Proxy<'static>> {
+        static P: OnceLock<Option<zbus::blocking::Proxy<'static>>> = OnceLock::new();
+        P.get_or_init(|| {
+            let c = zbus::blocking::Connection::session().ok()?;
+            zbus::blocking::Proxy::new(&c, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents", "org.freedesktop.portal.FileTransfer").ok()
+        })
+        .as_ref()
+    }
+
+    fn start() -> Option<String> {
+        let opts: HashMap<&str, Value> = [("writable", Value::from(false)), ("autostop", Value::from(true))].into();
+        proxy()?.call("StartTransfer", &(opts,)).ok()
+    }
+
+    /// Whether it answers (asked once): offered only then, as a program
+    /// that sees the offer takes it over the paths.
+    pub fn works() -> bool {
+        static OK: OnceLock<bool> = OnceLock::new();
+        *OK.get_or_init(|| {
+            let ok = start().is_some_and(|k| proxy().is_some_and(|p| p.call::<_, _, ()>("StopTransfer", &(k.as_str(),)).is_ok()));
+            crate::log::line(&format!("drag and drop through the file transfer portal: {}", if ok { "on" } else { "off" }));
+            ok
+        })
+    }
+
+    /// The files handed over; the key to them.
+    pub fn export(files: &[PathBuf]) -> Option<String> {
+        let key = start()?;
+        let fds: Vec<zbus::zvariant::OwnedFd> = files.iter().filter_map(|f| std::fs::File::open(f).ok()).map(|f| std::os::fd::OwnedFd::from(f).into()).collect();
+        // (In bunches, as the portal takes only so many at once.)
+        for chunk in fds.chunks(16) {
+            let fds: Vec<zbus::zvariant::Fd> = chunk.iter().map(zbus::zvariant::Fd::from).collect();
+            proxy()?.call::<_, _, ()>("AddFiles", &(key.as_str(), fds, HashMap::<&str, Value>::new())).ok()?;
+        }
+        Some(key)
     }
 }
 
