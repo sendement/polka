@@ -1,8 +1,8 @@
 //! The "Convert…" dialog: the chosen files sorted into pictures, sound,
-//! video, archives and tables. Each kind shows its files, then what they
-//! become (archives with the archive dialog's own settings; tables with a
-//! CSV separator, previewed, rows to cut at, and gluing); what can't be
-//! converted is listed last, with why. Then what becomes of the originals.
+//! video, archives, tables, documents and presentations. Each kind shows
+//! its files, then what they become (archives with the archive dialog's
+//! own settings; tables with a CSV separator, previewed, rows to cut at,
+//! and gluing); what can't be converted is listed last, with why. Then what becomes of the originals.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -93,6 +93,11 @@ pub enum Ready {
 }
 
 impl GroupRow {
+    /// Some format of its kind loses something.
+    pub fn has_quality(&self) -> bool {
+        self.targets.iter().any(|t| t.lossy())
+    }
+
     pub fn target(&self) -> Target {
         self.targets[self.pick]
     }
@@ -206,7 +211,9 @@ impl ConvertDlg {
                 }
             } else {
                 v.push(CRow::Target(i));
-                v.push(CRow::Quality(i));
+                if g.has_quality() {
+                    v.push(CRow::Quality(i));
+                }
             }
         }
         if self.can_trash() {
@@ -390,6 +397,8 @@ fn group_name(g: Group) -> &'static str {
         Group::Video => tr("Video"),
         Group::Archive => tr("Archive"),
         Group::Table => tr("Tables"),
+        Group::Document => tr("Documents"),
+        Group::Slides => tr("Presentations"),
     }
 }
 
@@ -676,6 +685,8 @@ fn prepare(paths: Vec<PathBuf>, last: &[(Group, Target)], numbering: crate::tabl
                     Group::Video => Target::Mp4,
                     Group::Archive => Target::Archive(ArchiveFormat::Zip),
                     Group::Table => Target::Table(crate::table::Format::Csv),
+                    // A document mostly wants to be a PDF.
+                    Group::Document | Group::Slides => Target::Pdf,
                 };
                 let want = last.iter().find(|(k, _)| *k == g).map(|(_, t)| *t).unwrap_or(usual);
                 let pick = targets.iter().position(|t| *t == want).unwrap_or(0);
@@ -915,6 +926,11 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
                     if let Some(t) = &g.table {
                         table_rows(ui, d, i, g, t, &stepper, &mut ev);
                     }
+                    ui.add_space(8.0);
+                    continue;
+                }
+                // (Documents: no quality to speak of.)
+                if !g.has_quality() {
                     ui.add_space(8.0);
                     continue;
                 }

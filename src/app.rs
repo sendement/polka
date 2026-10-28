@@ -1223,7 +1223,7 @@ pub mod row {
 }
 
 /// "Open in Polka" kinds, in the settings' order.
-pub const OPEN_KINDS: usize = 5;
+pub const OPEN_KINDS: usize = 8;
 
 impl Config {
     pub fn open_flag(&mut self, i: usize) -> &mut bool {
@@ -1232,7 +1232,10 @@ impl Config {
             1 => &mut self.open_images,
             2 => &mut self.open_music,
             3 => &mut self.open_videos,
-            _ => &mut self.open_docs,
+            4 => &mut self.open_pdf,
+            5 => &mut self.open_docs,
+            6 => &mut self.open_sheets,
+            _ => &mut self.open_slides,
         }
     }
 }
@@ -3172,7 +3175,8 @@ impl App {
     }
 
     pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
-        let mut v = Viewer::open(path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
+        let k = crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).or_else(|| crate::viewer::kind(&path, &name));
+        let mut v = Viewer::open_as(k, path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
         v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
         self.range = None;

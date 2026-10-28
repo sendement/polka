@@ -67,12 +67,15 @@ pub struct OpenIn {
     pub images: bool,
     pub audio: bool,
     pub video: bool,
+    pub pdf: bool,
     pub docs: bool,
+    pub sheets: bool,
+    pub slides: bool,
 }
 
 impl OpenIn {
     pub fn from(cfg: &crate::config::Config) -> Self {
-        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music, video: cfg.open_videos, docs: cfg.open_docs }
+        OpenIn { text: cfg.open_text, images: cfg.open_images, audio: cfg.open_music, video: cfg.open_videos, pdf: cfg.open_pdf, docs: cfg.open_docs, sheets: cfg.open_sheets, slides: cfg.open_slides }
     }
 }
 
@@ -83,7 +86,15 @@ pub fn kind_in(path: &Path, name: &str, open: OpenIn) -> Option<Kind> {
         Kind::Image if open.images => Some(Kind::Image),
         Kind::Audio if open.audio => Some(Kind::Audio),
         Kind::Video if open.video => Some(Kind::Video),
-        Kind::Doc if open.docs => Some(Kind::Doc),
+        Kind::Doc => match docs::family(name)? {
+            docs::Family::Pdf if open.pdf => Some(Kind::Doc),
+            docs::Family::Text if open.docs => Some(Kind::Doc),
+            docs::Family::Sheets if open.sheets => Some(Kind::Doc),
+            docs::Family::Slides if open.slides => Some(Kind::Doc),
+            // A CSV not as a table: as text.
+            docs::Family::Sheets if open.text && crate::table::is_csv(name) => Some(Kind::Text),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -157,8 +168,15 @@ pub enum Out {
 }
 
 impl Viewer {
+    #[cfg(test)]
     pub fn open(path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>, volume: f32, ctx: &egui::Context) -> Self {
-        let content = match kind(&path, &name) {
+        let k = kind(&path, &name);
+        Self::open_as(k, path, name, origin, siblings, volume, ctx)
+    }
+
+    /// Shown as this kind (a CSV as text, say).
+    pub fn open_as(k: Option<Kind>, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>, volume: f32, ctx: &egui::Context) -> Self {
+        let content = match k {
             Some(Kind::Audio) => Content::Audio(Box::new(audio::AudioState::open(path.clone(), siblings, volume, ctx))),
             Some(Kind::Video) => Content::Video(Box::new(video::VideoState::open(path.clone(), siblings, volume, ctx))),
             Some(Kind::Doc) => Content::Doc(Box::new(docs::DocState::open(&path, &name, ctx))),

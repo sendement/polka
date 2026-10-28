@@ -65,8 +65,12 @@ pub struct Config {
     pub open_images: bool,
     pub open_music: bool,
     pub open_videos: bool,
-    /// PDF, word processing, presentations, spreadsheets.
+    pub open_pdf: bool,
+    /// Word processing (doc, docx, odt, rtf…).
     pub open_docs: bool,
+    /// Spreadsheets, CSV too.
+    pub open_sheets: bool,
+    pub open_slides: bool,
     /// Show a multi-volume archive as one item until it's pointed at.
     pub collapse_volumes: bool,
     /// Disk usage page: rings, tiles or list.
@@ -251,7 +255,10 @@ impl Default for Config {
             open_images: true,
             open_music: true,
             open_videos: true,
+            open_pdf: true,
             open_docs: true,
+            open_sheets: true,
+            open_slides: true,
             collapse_volumes: true,
             usage_mode: 0,
             appearance: 0,

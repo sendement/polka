@@ -54,6 +54,9 @@ instead: Settings → "Open in Polka"):
 - Music: mp3, flac, ogg, m4a/aac, alac, wav, aiff and more (Symphonia); Opus, WMA, APE and other
   formats through `ffmpeg` if installed. Tags and cover art (embedded or `cover.jpg` next to the
   tracks), the folder as a playlist, repeat, volume. Music keeps playing in a background tab.
+- Documents: PDF (through poppler), Word and OpenDocument text, presentations, spreadsheets and
+  CSV/TSV as a table; doc, ppt, rtf and the like through LibreOffice (the system's or its
+  Flatpak). PDF, documents, spreadsheets and presentations each have their own switch.
 
 | Player | Gamepad | Keyboard |
 |---|---|---|
@@ -260,7 +263,7 @@ filter take `#tag` words: `#work report` finds items tagged *work* with *report*
 □ (or 🔍) on a tag in the Tags dialog looks for it from the current folder down.
 
 **Converting.** △ → Convert… on any files: they're sorted into pictures, sound, video,
-archives and tables; each kind shows its files (thumbnails), then the format they become — archives with the
+archives, tables, documents and presentations; each kind shows its files (thumbnails), then the format they become — archives with the
 archive dialog's own settings (format, method, level, split, password) — and what can't be
 converted is listed last with why. Each kind gets a format of its own — a mix of PNG, JPEG and WebP all become PNG (the
 ones already PNG stay as they are), while the songs picked along with them become MP3. Pictures:
@@ -271,7 +274,9 @@ are repacked as zip, 7z or a tarball; a multi-volume set becomes one archive; pa
 ones are left out. Quality: high, balanced or small; the originals can go to the trash after. The
 results go beside the originals. Plain pictures and archives need nothing else; ImageMagick does
 pictures best (HEIC, AVIF, the camera's rotation), libheif's `heif-dec` / `heif-enc` and `avifenc`
-fill in without it; sound and video need ffmpeg. HEIC, AVIF and JPEG XL also open in the viewer and
+fill in without it; sound and video need ffmpeg. Documents (docx, odt, doc, rtf…) become PDF,
+DOCX, ODT, RTF, DOC or plain text, presentations (pptx, odp, ppt…) PDF, PPTX, ODP or PPT — by
+LibreOffice, the system's or its Flatpak. HEIC, AVIF and JPEG XL also open in the viewer and
 get thumbnails.
 
 **Tables.** CSV (any separator: found by itself, or chosen — a preview shows how the first CSV reads

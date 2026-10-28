@@ -6385,6 +6385,7 @@ fn docs_screens() {
     fixtures::pptx(&dir.join("d-roadmap.pptx"));
     fixtures::odp(&dir.join("e-impress.odp"));
     fixtures::xlsx(&dir.join("f-sales.xlsx"));
+    std::fs::write(dir.join("g-people.csv"), "Name;Age;City\nАнна;30;Москва\nBob;41;Paris\n").unwrap();
     let mut h = harness(dir.clone());
     h.state_mut().cfg.dual = false;
     settle(&mut h);
@@ -6491,4 +6492,52 @@ fn docs_screens() {
     assert!((doc(&h).zoom - 1.25).abs() < 1e-3);
     shot(&mut h, "dc10-xlsx-zoomed");
     h.state_mut().close_viewer();
+    // A CSV opens as a table; with spreadsheets not in Polka, as text.
+    open(&mut h, "g-people.csv");
+    assert!(matches!(doc(&h).body, Body::Sheets(_)));
+    assert!(h.query_by_label("Москва").is_some());
+    shot(&mut h, "dc11-csv");
+    h.state_mut().close_viewer();
+    h.state_mut().cfg.open_sheets = false;
+    let i = h.state().pane().entries.iter().position(|e| e.name == "g-people.csv").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(h.state().cur_tab().viewer.as_ref().map(|v| &v.content), Some(Content::Text(_))), "not as text");
+    h.state_mut().close_viewer();
+    h.state_mut().cfg.open_sheets = true;
+    // Each switch its own kind.
+    let open_in = |f: &dyn Fn(&mut crate::config::Config)| {
+        let mut c = h.state().cfg.clone();
+        f(&mut c);
+        let o = crate::viewer::OpenIn::from(&c);
+        ["a-report.pdf", "b-quarter.docx", "f-sales.xlsx", "d-roadmap.pptx"].map(|n| crate::viewer::kind_in(&dir.join(n), n, o).is_some())
+    };
+    assert_eq!(open_in(&|c| c.open_pdf = false), [false, true, true, true]);
+    assert_eq!(open_in(&|c| c.open_docs = false), [true, false, true, true]);
+    assert_eq!(open_in(&|c| c.open_sheets = false), [true, true, false, true]);
+    assert_eq!(open_in(&|c| c.open_slides = false), [true, true, true, false]);
+    // Converting: documents and presentations apart, the PDF left out.
+    unsafe { std::env::set_var("POLKA_CONVERT_TOOLS", "libreoffice") };
+    for n in ["a-report.pdf", "b-quarter.docx", "c-notes.odt", "d-roadmap.pptx"] {
+        h.state_mut().pane_mut().selected.insert(n.to_string());
+    }
+    h.state_mut().run(crate::app::Cmd::ConvertAsk);
+    for _ in 0..20 {
+        settle(&mut h);
+    }
+    match &h.state().overlay {
+        Some(crate::app::Overlay::Convert(d)) => {
+            let groups: Vec<_> = d.groups.iter().map(|g| (g.group, g.items.len(), g.target())).collect();
+            use crate::convert::{Group, Target};
+            assert_eq!(groups, [(Group::Document, 2, Target::Pdf), (Group::Slides, 1, Target::Pdf)]);
+            assert!(d.groups[0].targets.contains(&Target::Docx) && d.groups[1].targets.contains(&Target::Pptx));
+            assert_eq!(d.refused.len(), 1);
+        }
+        _ => panic!("no dialog"),
+    }
+    shot(&mut h, "dc12-convert");
+    h.state_mut().overlay = None;
+    unsafe { std::env::set_var("POLKA_CONVERT_TOOLS", "") };
+    assert_eq!(crate::convert::refusal(&dir.join("b-quarter.docx"), "b-quarter.docx"), Some(crate::i18n::tr("needs LibreOffice")));
+    unsafe { std::env::remove_var("POLKA_CONVERT_TOOLS") };
 }

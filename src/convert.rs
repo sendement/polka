@@ -1,8 +1,9 @@
 //! Converting files in bulk: pictures (iPhone's HEIC too), sound, video
 //! (also to sound), archives (repacked, multi-volume sets as one;
-//! password-protected ones aren't touched) and tables (see table.rs). Whatever the system has does
-//! the work: ImageMagick, ffmpeg, libheif's tools, 7-Zip; plain pictures
-//! and archives need nothing but Polka.
+//! password-protected ones aren't touched), tables (see table.rs),
+//! documents and presentations. Whatever the system has does the work:
+//! ImageMagick, ffmpeg, libheif's tools, 7-Zip, LibreOffice; plain
+//! pictures and archives need nothing but Polka.
 
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
@@ -19,9 +20,12 @@ pub enum Group {
     Video,
     Archive,
     Table,
+    /// Word processing: docx, odt, doc, rtf…
+    Document,
+    Slides,
 }
 
-pub const GROUPS: [Group; 5] = [Group::Image, Group::Audio, Group::Video, Group::Archive, Group::Table];
+pub const GROUPS: [Group; 7] = [Group::Image, Group::Audio, Group::Video, Group::Archive, Group::Table, Group::Document, Group::Slides];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -45,6 +49,15 @@ pub enum Target {
     Mov,
     Archive(ArchiveFormat),
     Table(crate::table::Format),
+    Pdf,
+    Docx,
+    Odt,
+    Rtf,
+    Doc,
+    Txt,
+    Pptx,
+    Odp,
+    Ppt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -61,6 +74,9 @@ pub const QUALITIES: [Quality; 3] = [Quality::High, Quality::Balanced, Quality::
 const IMAGE_OWN: &[&str] = &["png", "jpg", "jpeg", "jpe", "webp", "bmp", "gif", "tif", "tiff", "ico"];
 /// Pictures read with an outside tool: iPhone's HEIC, AVIF, JPEG XL.
 const IMAGE_TOOL: &[&str] = &["heic", "heif", "hif", "avif", "jxl"];
+/// Documents LibreOffice reads.
+const DOCUMENTS: &[&str] = &["docx", "docm", "dotx", "odt", "ott", "doc", "dot", "rtf", "wpd", "pages", "fodt"];
+const SLIDES: &[&str] = &["pptx", "pptm", "ppsx", "potx", "odp", "otp", "ppt", "pps", "key", "fodp"];
 
 fn ext(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default()
@@ -83,6 +99,10 @@ pub fn group_of(name: &str) -> Option<Group> {
         Some(Group::Table)
     } else if crate::vfs::is_archive_name(name) || crate::volumes::parse(name).is_some() {
         Some(Group::Archive)
+    } else if DOCUMENTS.contains(&e.as_str()) {
+        Some(Group::Document)
+    } else if SLIDES.contains(&e.as_str()) {
+        Some(Group::Slides)
     } else {
         None
     }
@@ -117,6 +137,15 @@ impl Target {
                 ArchiveFormat::TarXz => "tar.xz",
             },
             Target::Table(f) => f.label(),
+            Target::Pdf => "PDF",
+            Target::Docx => "DOCX (Word)",
+            Target::Odt => "ODT",
+            Target::Rtf => "RTF",
+            Target::Doc => "DOC (Word 97)",
+            Target::Txt => "TXT",
+            Target::Pptx => "PPTX (PowerPoint)",
+            Target::Odp => "ODP",
+            Target::Ppt => "PPT (PowerPoint 97)",
         }
     }
 
@@ -142,6 +171,25 @@ impl Target {
             Target::Mov => ".mov",
             Target::Archive(f) => f.ext(),
             Target::Table(f) => f.ext(),
+            Target::Pdf => ".pdf",
+            Target::Docx => ".docx",
+            Target::Odt => ".odt",
+            Target::Rtf => ".rtf",
+            Target::Doc => ".doc",
+            Target::Txt => ".txt",
+            Target::Pptx => ".pptx",
+            Target::Odp => ".odp",
+            Target::Ppt => ".ppt",
+        }
+    }
+
+    /// What LibreOffice is asked to make.
+    fn office(self) -> &'static str {
+        match self {
+            Target::Txt => "txt:Text (encoded):UTF8",
+            Target::Doc => "doc:MS Word 97",
+            Target::Ppt => "ppt:MS PowerPoint 97",
+            t => t.ext().trim_start_matches('.'),
         }
     }
 
@@ -224,6 +272,8 @@ pub fn targets(g: Group) -> Vec<Target> {
             v
         }
         Group::Table => crate::table::FORMATS.iter().map(|f| Target::Table(*f)).collect(),
+        Group::Document if crate::viewer::docs::have_libreoffice() => vec![Target::Pdf, Target::Docx, Target::Odt, Target::Rtf, Target::Doc, Target::Txt],
+        Group::Slides if crate::viewer::docs::have_libreoffice() => vec![Target::Pdf, Target::Pptx, Target::Odp, Target::Ppt],
         _ => Vec::new(),
     }
 }
@@ -234,6 +284,7 @@ pub fn refusal(path: &Path, name: &str) -> Option<&'static str> {
     match g {
         Group::Image if IMAGE_TOOL.contains(&ext(name).as_str()) && !(has("magick") || has("heif-dec") || has("ffmpeg")) => Some(crate::i18n::tr("needs ImageMagick or libheif")),
         Group::Audio | Group::Video if !has("ffmpeg") => Some(crate::i18n::tr("needs ffmpeg")),
+        Group::Document | Group::Slides if !crate::viewer::docs::have_libreoffice() => Some(crate::i18n::tr("needs LibreOffice")),
         Group::Archive if crate::archive_rw::probe_encrypted(&crate::volumes::first(path)).unwrap_or(false) => Some(crate::i18n::tr("password-protected")),
         _ => None,
     }
@@ -325,6 +376,7 @@ pub fn run(items: &[Item], trash: bool, archive_opts: &crate::ops::CompressOpts,
             Some(Group::Image) => image(&it.src, &out, it.target, it.quality),
             Some(Group::Audio) | Some(Group::Video) => media(&it.src, &out, it.target, it.quality, job),
             Some(Group::Archive) => archive(&it.src, &out, it.target, archive_opts),
+            Some(Group::Document) | Some(Group::Slides) => office(&it.src, &out, it.target),
             Some(Group::Table) | None => Err("not convertible".into()),
         };
         match r {
@@ -372,6 +424,28 @@ fn scratch(name: &str) -> PathBuf {
     let d = dirs::cache_dir().map(|c| c.join("polka/convert")).unwrap_or_else(crate::vfs::temp_root);
     let _ = std::fs::create_dir_all(&d);
     d.join(format!("convert-{}-{:?}-{name}", std::process::id(), std::thread::current().id()))
+}
+
+// ---------------------------------------------------------------- documents
+
+/// By LibreOffice, in a folder of its own (it names the file after the
+/// original), then put in place.
+fn office(src: &Path, out: &Path, t: Target) -> Result<(), String> {
+    let dir = crate::viewer::docs::office_scratch()?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let r = crate::viewer::docs::office_convert(src, t.office(), &dir).and_then(|made| {
+        // (Its text comes with a byte-order mark nothing here wants.)
+        if t == Target::Txt {
+            if let Ok(b) = std::fs::read(&made) {
+                if let Some(rest) = b.strip_prefix("\u{feff}".as_bytes()) {
+                    std::fs::write(&made, rest).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        std::fs::rename(&made, out).or_else(|_| std::fs::copy(&made, out).map(|_| ())).map_err(|e| e.to_string())
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    r
 }
 
 // ---------------------------------------------------------------- pictures
@@ -624,11 +698,60 @@ mod tests {
         assert_eq!(group_of("voice.m4a"), Some(Group::Audio));
         assert_eq!(group_of("pack.part2.rar"), Some(Group::Archive));
         assert_eq!(group_of("notes.txt"), None);
+        assert_eq!(group_of("Report.DOCX"), Some(Group::Document));
+        assert_eq!(group_of("old.rtf"), Some(Group::Document));
+        assert_eq!(group_of("talk.ppt"), Some(Group::Slides));
+        assert_eq!(group_of("paper.pdf"), None);
+        assert!(Target::Docx.same_as("a.docx") && !Target::Pdf.same_as("a.docx"));
+        assert_eq!(Target::Odt.office(), "odt");
+        assert_eq!(Target::Txt.office(), "txt:Text (encoded):UTF8");
         assert!(Target::Jpg.same_as("a.JPEG") && Target::Png.same_as("x.png") && !Target::Png.same_as("x.webp"));
         assert!(Target::Archive(ArchiveFormat::TarGz).same_as("a.tar.gz"));
         assert_eq!(archive_stem("photos.tar.gz"), "photos");
         assert_eq!(archive_stem("box.7z"), "box");
         let d = std::env::temp_dir();
         assert_eq!(out_path(&d.join("polka-none-IMG_1.heic"), Target::Jpg), d.join("polka-none-IMG_1.jpg"));
+    }
+
+    /// Documents and slides through a real LibreOffice (when there is one).
+    #[test]
+    #[ignore]
+    fn office_for_real() {
+        if !crate::viewer::docs::have_libreoffice() {
+            return eprintln!("no LibreOffice here");
+        }
+        // (Somewhere LibreOffice's Flatpak may go; from /run a copy.)
+        let d = dirs::cache_dir().unwrap().join("polka-test-office");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        unsafe { std::env::set_var("POLKA_OFFICE_WORK", d.join("work")) };
+        // (The viewer's fixtures are too bare for LibreOffice: a real
+        // document, made by LibreOffice from text.)
+        std::fs::write(d.join("quarter.txt"), "Quarterly report\n\nSales grew twelve percent.\n").unwrap();
+        let made = crate::viewer::docs::office_convert(&d.join("quarter.txt"), "docx", &d.join("made")).unwrap();
+        std::fs::rename(made, d.join("quarter.docx")).unwrap();
+        std::fs::remove_file(d.join("quarter.txt")).unwrap();
+        // A flat presentation it reads as is.
+        std::fs::write(d.join("roadmap.fodp"), r#"<?xml version="1.0" encoding="UTF-8"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page draw:name="one"><draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="3cm"><draw:text-box><text:p>Polka roadmap</text:p></draw:text-box></draw:frame></draw:page></office:presentation></office:body></office:document>"#).unwrap();
+        for (src, t) in [("quarter.docx", Target::Pdf), ("quarter.docx", Target::Odt), ("quarter.docx", Target::Txt), ("quarter.docx", Target::Rtf), ("roadmap.fodp", Target::Pdf), ("roadmap.fodp", Target::Pptx), ("roadmap.pptx", Target::Odp), ("roadmap.pptx", Target::Ppt)] {
+            let src = d.join(src);
+            let out = out_path(&src, t);
+            office(&src, &out, t).unwrap_or_else(|e| panic!("{} → {}: {e}", src.display(), t.label()));
+            assert!(std::fs::metadata(&out).is_ok_and(|m| m.len() > 0), "{}", out.display());
+        }
+        let text = std::fs::read_to_string(d.join("quarter.txt")).unwrap();
+        assert!(text.starts_with("Quarterly report"), "{text:?}");
+        // The same name again: beside it, not over it.
+        let again = out_path(&d.join("quarter.docx"), Target::Pdf);
+        assert!(!again.exists() && again != d.join("quarter.pdf"));
+        office(&d.join("quarter.docx"), &again, Target::Pdf).unwrap();
+        assert!(again.exists());
+        let hidden = crate::vfs::temp_root().join("office-hidden.docx");
+        std::fs::copy(d.join("quarter.docx"), &hidden).unwrap();
+        office(&hidden, &d.join("from-run.odt"), Target::Odt).unwrap();
+        assert!(d.join("from-run.odt").exists());
+        let _ = std::fs::remove_file(hidden);
+        eprintln!("{}", text.lines().take(3).collect::<Vec<_>>().join(" | "));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

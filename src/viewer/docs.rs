@@ -34,9 +34,30 @@ pub fn doc_kind(name: &str) -> Option<DocKind> {
         "pdf" => DocKind::Pdf,
         "docx" | "docm" | "dotx" | "odt" | "ott" => DocKind::Word,
         "pptx" | "pptm" | "ppsx" | "potx" | "odp" | "otp" => DocKind::Slides,
-        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "ots" => DocKind::Sheets,
+        "xlsx" | "xlsm" | "xlsb" | "xls" | "ods" | "ots" | "csv" | "tsv" => DocKind::Sheets,
         "doc" | "dot" | "rtf" | "ppt" | "pps" | "odg" | "wpd" | "pages" | "key" => DocKind::Office,
         _ => return None,
+    })
+}
+
+/// Which "Open in Polka" switch a document goes by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    Pdf,
+    Text,
+    Sheets,
+    Slides,
+}
+
+pub fn family(name: &str) -> Option<Family> {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    Some(match doc_kind(name)? {
+        DocKind::Pdf => Family::Pdf,
+        DocKind::Word => Family::Text,
+        DocKind::Sheets => Family::Sheets,
+        DocKind::Slides => Family::Slides,
+        DocKind::Office if matches!(ext.as_str(), "ppt" | "pps" | "key") => Family::Slides,
+        DocKind::Office => Family::Text,
     })
 }
 
@@ -300,7 +321,9 @@ fn host(p: &Path) -> String {
 
 /// Where pages are drawn to and documents converted.
 fn work_dir() -> Result<PathBuf, String> {
-    let d = if cfg!(test) { crate::vfs::temp_root().join("docs") } else { dirs::cache_dir().ok_or("no cache folder")?.join("polka/docs") };
+    let d = if cfg!(test) {
+        std::env::var_os("POLKA_OFFICE_WORK").map(PathBuf::from).unwrap_or_else(|| crate::vfs::temp_root().join("docs"))
+    } else { dirs::cache_dir().ok_or("no cache folder")?.join("polka/docs") };
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     Ok(d)
 }
@@ -315,31 +338,80 @@ fn office_pdf(path: &Path) -> Result<PathBuf, String> {
     if pdf.exists() {
         return Ok(pdf);
     }
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    office_convert(path, "pdf", &dir)
+}
+
+/// A document in another format ("docx", "txt:Text (encoded):UTF8"…), by
+/// LibreOffice, into this folder; the file it made.
+pub fn office_convert(path: &Path, to: &str, dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let work = work_dir()?;
-    let mut cmd = libreoffice(&work, path).ok_or_else(|| tr("needs LibreOffice").to_string())?;
+    // LibreOffice's Flatpak can't be let into /run or /tmp (where files
+    // out of archives wait): a copy, then.
+    let hidden = ["/run/", "/tmp/"].iter().any(|r| crate::sandbox::host_path(path).starts_with(r));
+    let staged = hidden.then(|| work.join(format!("stage-{}-{:?}", std::process::id(), std::thread::current().id())));
+    let path = match &staged {
+        Some(stage) => {
+            let _ = std::fs::remove_dir_all(stage);
+            std::fs::create_dir_all(stage).map_err(|e| e.to_string())?;
+            let copy = stage.join(path.file_name().ok_or("no name")?);
+            std::fs::copy(path, &copy).map_err(|e| e.to_string())?;
+            copy
+        }
+        None => path.to_path_buf(),
+    };
+    let r = office_run(&path, to, dir, &work);
+    if let Some(stage) = staged {
+        let _ = std::fs::remove_dir_all(stage);
+    }
+    r
+}
+
+fn office_run(path: &Path, to: &str, dir: &Path, work: &Path) -> Result<PathBuf, String> {
+    let mut cmd = libreoffice(&[work, dir], path).ok_or_else(|| tr("needs LibreOffice").to_string())?;
     // Its own profile: a LibreOffice already open would take the job and
     // drop it.
     let profile = work.join("office-profile");
     let out = cmd
         .arg(format!("-env:UserInstallation={}", crate::icons::uri(&crate::sandbox::host_path(&profile))))
-        .args(["--headless", "--convert-to", "pdf", "--outdir"])
-        .arg(host(&dir))
+        .args(["--headless", "--convert-to", to, "--outdir"])
+        .arg(host(dir))
         .arg(host(path))
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;
-    if !pdf.exists() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = to.split(':').next().unwrap_or(to);
+    let made = dir.join(format!("{stem}.{ext}"));
+    if !made.exists() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() { "LibreOffice failed".to_string() } else { err });
     }
-    Ok(pdf)
+    Ok(made)
+}
+
+/// Where documents being converted wait (LibreOffice may write there).
+pub fn office_scratch() -> Result<PathBuf, String> {
+    work_dir().map(|w| w.join(format!("convert-{}-{:?}", std::process::id(), std::thread::current().id())))
+}
+
+/// There is a LibreOffice to run (asked once).
+pub fn have_libreoffice() -> bool {
+    if cfg!(test) {
+        if let Ok(v) = std::env::var("POLKA_CONVERT_TOOLS") {
+            return v.split(',').any(|t| t == "libreoffice");
+        }
+    }
+    static HAVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAVE.get_or_init(|| libreoffice(&[], Path::new("/")).is_some())
 }
 
 /// LibreOffice's Flatpak (on the Steam Deck it's the only way to have it).
 const LIBREOFFICE_APP: &str = "org.libreoffice.LibreOffice";
 
-/// LibreOffice to run: the system's, else its Flatpak, let into our work
-/// folder and the file's.
-fn libreoffice(out: &Path, file: &Path) -> Option<std::process::Command> {
+/// LibreOffice to run: the system's, else its Flatpak, let into the
+/// folders it writes to and the file's.
+fn libreoffice(out: &[&Path], file: &Path) -> Option<std::process::Command> {
     if let Some(t) = ["soffice", "libreoffice"].into_iter().find(|t| !crate::terminal::installed(&[t]).is_empty()) {
         return Some(tool(t));
     }
@@ -348,7 +420,10 @@ fn libreoffice(out: &Path, file: &Path) -> Option<std::process::Command> {
         return None;
     }
     let mut c = tool("flatpak");
-    c.args(["run", "--command=libreoffice"]).arg(format!("--filesystem={}", host(out)));
+    c.args(["run", "--command=libreoffice"]);
+    for o in out {
+        c.arg(format!("--filesystem={}", host(o)));
+    }
     if let Some(dir) = file.parent() {
         c.arg(format!("--filesystem={}:ro", host(dir)));
     }
@@ -1874,7 +1949,10 @@ mod tests {
         assert_eq!(length("1in"), Some(72.0));
         assert_eq!(doc_kind("Report.DOCX"), Some(DocKind::Word));
         assert_eq!(doc_kind("a.odp"), Some(DocKind::Slides));
-        assert_eq!(doc_kind("a.csv"), None);
+        assert_eq!(doc_kind("a.csv"), Some(DocKind::Sheets));
+        assert_eq!(family("old.ppt"), Some(Family::Slides));
+        assert_eq!(family("old.doc"), Some(Family::Text));
+        assert_eq!(family("a.tsv"), Some(Family::Sheets));
         let sizes = page_sizes("Pages:           2\nPage    1 size: 595.276 x 841.89 pts (A4)\nPage    1 rot:  0\nPage    2 size: 612 x 792 pts (letter)\n");
         assert_eq!(sizes, vec![vec2(595.276, 841.89), vec2(612.0, 792.0)]);
         let html = r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><body><doc><page width="612" height="792"><flow><block><line xMin="72" yMin="70" xMax="200" yMax="84"><word xMin="72" yMin="70" xMax="110" yMax="84">Hello</word><word xMin="114" yMin="70" xMax="200" yMax="84">world</word></line></block></flow></page></doc></body></html>"#;

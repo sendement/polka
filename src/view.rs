@@ -3550,16 +3550,18 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 }
                                 SItem::Row(row::OPEN_IN) => {
                                     // Open in Polka: a chip per kind.
-                                    let (rect, r) = settings_row(ui, 86.0, st.row == row::OPEN_IN, "open-in");
+                                    let (rect, r) = settings_row(ui, 128.0, st.row == row::OPEN_IN, "open-in");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::OPEN_IN));
                                     }
                                     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Open in Polka"), label_font.clone(), v.text_color());
-                                    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video"), tr("Documents")];
-                                    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos, cfg.open_docs];
-                                    let chip_w = (SETTINGS_W - 28.0 - 4.0 * 8.0) / 5.0;
+                                    // Four a line.
+                                    let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video"), "PDF", tr("Documents"), tr("Spreadsheets"), tr("Presentations")];
+                                    let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos, cfg.open_pdf, cfg.open_docs, cfg.open_sheets, cfg.open_slides];
+                                    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
                                     for (i, label) in kinds.iter().enumerate() {
-                                        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + i as f32 * (chip_w + 8.0), rect.min.y + 38.0), vec2(chip_w, 36.0));
+                                        let (line, col) = (i / 4, i % 4);
+                                        let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 8.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
                                         let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
                                         let on = flags[i];
                                         let cursor = st.row == row::OPEN_IN && st.chip == i;
