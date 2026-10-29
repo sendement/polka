@@ -36,6 +36,8 @@ pub struct Config {
     /// Flip the sort key's natural order.
     pub sort_reverse: bool,
     pub dirs_first: bool,
+    /// The search button looks in subfolders (else filters the folder).
+    pub search_subfolders: bool,
     pub dual: bool,
     pub thumbnails: bool,
     /// Overrides the detected icon theme.
@@ -237,6 +239,7 @@ impl Default for Config {
             sort: SortKey::Name,
             sort_reverse: false,
             dirs_first: true,
+            search_subfolders: true,
             dual: false,
             thumbnails: true,
             icon_theme: None,

@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "コマンド履歴"),
     ("Commit", "コミット"),
     ("Copied", "コピーしました"),
+    ("In subfolders", "サブフォルダーも"),
+    ("Copy address", "アドレスをコピー"),
     ("Cursor", "カーソル"),
     ("End process", "プロセスを終了"),
     ("Exit", "終了"),

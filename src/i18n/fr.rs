@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "Historique des commandes"),
     ("Commit", "Commit"),
     ("Copied", "Copié"),
+    ("In subfolders", "Dans les sous-dossiers"),
+    ("Copy address", "Copier l’adresse"),
     ("Cursor", "Curseur"),
     ("End process", "Terminer le processus"),
     ("Exit", "Quitter"),

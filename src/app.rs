@@ -570,6 +570,8 @@ pub enum Cmd {
     DeleteInArchive { archive: PathBuf, inners: Vec<String> },
     Filter,
     Search,
+    /// The search button: in subfolders or filtering, as last chosen.
+    FindOrFilter,
     CompressAsk,
     /// Hand the file to the desktop's default app.
     OpenExternal,
@@ -826,6 +828,11 @@ pub struct Osk {
     pub alt: bool,
     /// The character typed just before (it may combine with the next).
     pub prev: Option<char>,
+    /// Typed in the address bar (filter, search, a path): what its text
+    /// field last showed, text and caret (a change here goes to it).
+    pub bar_seen: Option<(String, usize)>,
+    /// The bar's field starts with all of it chosen (a path to copy).
+    pub select_all: bool,
 }
 
 pub use crate::keyboard::OskKey;
@@ -860,7 +867,14 @@ impl Osk {
             ctrl: false,
             alt: false,
             prev: None,
+            bar_seen: None,
+            select_all: false,
         }
+    }
+
+    /// Typed in the address bar, not in the keyboard's own window.
+    pub fn in_bar(&self) -> bool {
+        matches!(self.purpose, OskPurpose::Filter { .. } | OskPurpose::Search { .. } | OskPurpose::GoTo)
     }
 
     /// Typing straight into the terminal, nothing kept here.
@@ -1469,6 +1483,8 @@ pub struct App {
     /// (side, rect, folder), the sidebar rows, the tabs, where the two
     /// addresses meet.
     pub crumb_rects: Vec<(usize, egui::Rect, Location)>,
+    /// The address fields as last drawn (pane, where).
+    pub addr_rects: Vec<(usize, egui::Rect)>,
     pub side_rects: Vec<egui::Rect>,
     pub tab_rects: Vec<egui::Rect>,
     pub addr_mid: Option<f32>,
@@ -1480,6 +1496,10 @@ pub struct App {
     pub term_hist: Vec<String>,
     /// Top of the pad's keyboard while it types into the terminal.
     pub osk_top: Option<f32>,
+    /// Typing in the address bar: its field, and the keyboard below (a
+    /// click elsewhere ends the typing).
+    pub bar_rect: Option<egui::Rect>,
+    pub keys_rect: Option<egui::Rect>,
     /// A terminal window running one command (installing, a script).
     pub term_window: Option<Box<crate::terminal::Terminal>>,
     pub term_window_title: String,
@@ -1620,6 +1640,8 @@ impl App {
             text_clip: None,
             term_hist: Vec::new(),
             osk_top: None,
+            bar_rect: None,
+            keys_rect: None,
             term_window: None,
             term_window_title: String::new(),
             sudo_pw: None,
@@ -1644,6 +1666,7 @@ impl App {
             spring_seen: false,
             spring_off: false,
             crumb_rects: Vec::new(),
+            addr_rects: Vec::new(),
             side_rects: Vec::new(),
             tab_rects: Vec::new(),
             addr_mid: None,
@@ -2838,6 +2861,33 @@ impl App {
         let text = text.trim_end_matches(['\r', '\n']);
         let line = if k.secret { text.to_string() } else { text.split(['\r', '\n', '\t']).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ") };
         k.insert(&line);
+    }
+
+    /// The address bar's "in subfolders" box: filtering here, or searching
+    /// down from here, with what's typed so far.
+    pub fn bar_toggle_search(&mut self) {
+        let root = self.pane().loc.local_path().map(Path::to_path_buf);
+        let Some(Overlay::Osk(k)) = self.overlay.as_mut() else { return };
+        let purpose = match (&k.purpose, root) {
+            (OskPurpose::Filter { .. }, Some(root)) => OskPurpose::Search { root },
+            (OskPurpose::Search { .. }, _) => OskPurpose::Filter { prev: None },
+            _ => return,
+        };
+        let old = std::mem::replace(&mut k.purpose, purpose);
+        let search = matches!(k.purpose, OskPurpose::Search { .. });
+        k.title = if search { tr("Search in subfolders") } else { tr("Filter") }.into();
+        match old {
+            // The filter as it was before (searching filters nothing).
+            OskPurpose::Filter { prev } => self.pane_mut().set_filter(prev),
+            _ => {
+                let prev = self.pane().filter.clone();
+                if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
+                    k.purpose = OskPurpose::Filter { prev };
+                }
+            }
+        }
+        self.cfg.search_subfolders = search;
+        self.cfg.save();
     }
 
     pub fn osk_cancel(&mut self) {
@@ -4142,6 +4192,10 @@ impl App {
                     self.overlay = Some(Overlay::Osk(Osk::new(tr("Search in subfolders"), "", OskPurpose::Search { root })));
                 }
             }
+            Cmd::FindOrFilter => {
+                let sub = self.cfg.search_subfolders && self.pane().loc.local_path().is_some();
+                self.run(if sub { Cmd::Search } else { Cmd::Filter });
+            }
             Cmd::TrashAsk | Cmd::DeleteAsk => {
                 let paths = self.local_targets();
                 if paths.is_empty() {
@@ -4571,7 +4625,9 @@ impl App {
             Cmd::Submenu(_) => {}
             Cmd::GoTo => {
                 let cur = self.pane().loc.display();
-                self.overlay = Some(Overlay::Osk(Osk::new(tr("Path"), &cur, OskPurpose::GoTo)));
+                let mut k = Osk::new(tr("Path"), &cur, OskPurpose::GoTo);
+                k.select_all = true;
+                self.overlay = Some(Overlay::Osk(k));
             }
             Cmd::SelectAll => {
                 let p = self.pane_mut();

@@ -178,6 +178,19 @@ impl App {
             self.range = None;
         }
         let mut events = ctx.input(|i| i.events.clone());
+        // Typing in the address bar: its text field takes the keys, only
+        // Enter and Esc are Polka's.
+        if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar()) {
+            for ev in events {
+                match ev {
+                    egui::Event::Key { key: Key::Enter, pressed: true, .. } => self.osk_submit(),
+                    egui::Event::Key { key: Key::Escape, pressed: true, .. } => self.osk_cancel(),
+                    _ => continue,
+                }
+                break;
+            }
+            return;
+        }
         let osk = matches!(self.overlay, Some(Overlay::Osk(_)));
         // The terminal's own keyboard: real keys go to the shell too.
         if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live()) {
@@ -549,7 +562,16 @@ impl App {
                 vec![(0, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             };
             let mut drawn = Vec::new();
+            // Typing a filter, a search or a path: in the active field.
+            let typing = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar());
+            let typed_at = viewing.as_ref().map_or(active, |(o, _)| *o);
+            let mut typed_rect = None;
+            self.addr_rects = fields.clone();
             for (idx, rect) in fields {
+                if typing && idx == typed_at {
+                    typed_rect = Some(rect);
+                    continue;
+                }
                 let pane = self.pane_at(idx);
                 let highlight = dual && idx == active && viewing.is_none();
                 let file = viewing.as_ref().map(|(_, n)| n.as_str());
@@ -562,6 +584,15 @@ impl App {
                 }
             }
             self.crumb_rects = drawn;
+            self.bar_rect = typed_rect;
+            if let Some(rect) = typed_rect {
+                let local = self.pane_at(typed_at).loc.local_path().is_some();
+                if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
+                    if let Some(a) = bar_field(ui, rect, k, local) {
+                        act = Some(a);
+                    }
+                }
+            }
         });
 
         if let Some((side, loc)) = resting {
@@ -586,17 +617,22 @@ impl App {
                     self.handle(Input::Press(a));
                 }
             }
-            TopAction::Search => {
-                self.run(if self.pane().loc.local_path().is_some() { Cmd::Search } else { Cmd::Filter });
+            TopAction::Search => self.run(Cmd::FindOrFilter),
+            TopAction::Edit(i) => {
+                self.focus = Focus::Panes;
+                self.set_side(i);
+                self.run(Cmd::GoTo);
             }
+            TopAction::Copy(text) => {
+                ui.ctx().copy_text(text);
+                self.toast(tr("Copied"), false);
+            }
+            TopAction::SubSearch => self.bar_toggle_search(),
+            TopAction::EndTyping => self.osk_cancel(),
             TopAction::Dual => self.run(Cmd::ToggleDual),
             TopAction::Menu => {
                 self.focus = Focus::Panes;
                 self.handle(Input::Press(Action::Menu));
-            }
-            TopAction::Focus(i) => {
-                self.focus = Focus::Panes;
-                self.set_side(i);
             }
             TopAction::Go(i, loc) => {
                 self.focus = Focus::Panes;
@@ -1525,11 +1561,34 @@ impl App {
         }
         let screen = ctx.content_rect();
         let mut close = false;
+        // Typing in the address bar: nothing dims, a click elsewhere ends
+        // it (a filter stays), the keyboard is only for the pad and the
+        // touch screen.
+        let in_bar = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar());
+        if in_bar {
+            let away = ctx.input(|i| if i.pointer.any_pressed() { i.pointer.interact_pos() } else { None })
+                .is_some_and(|p| !self.bar_rect.is_some_and(|r| r.contains(p)) && !self.keys_rect.is_some_and(|r| r.contains(p)));
+            if away {
+                if matches!(&self.overlay, Some(Overlay::Osk(k)) if matches!(k.purpose, crate::app::OskPurpose::Filter { .. })) {
+                    self.osk_submit();
+                } else {
+                    self.osk_cancel();
+                }
+                return;
+            }
+            if !(self.pad_active || self.touch.active) {
+                self.keys_rect = None;
+                return;
+            }
+        }
         // Viewer settings sit beside the file so changes show live.
-        let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live());
+        let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live() || k.in_bar());
         let side = live || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
         let bottom = live || matches!(self.overlay, Some(Overlay::TermKeys(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
+            if in_bar {
+                return;
+            }
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side { 0 } else { 140 }));
             close = resp.clicked();
@@ -1582,7 +1641,7 @@ impl App {
                 egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| {
                     match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
-                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live())),
+                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live() || k.in_bar())),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad, self.help_scroll.take()),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
@@ -1607,6 +1666,7 @@ impl App {
                 });
             });
         self.osk_top = live.then_some(shown.response.rect.min.y);
+        self.keys_rect = in_bar.then_some(shown.response.rect);
         if dismiss {
             self.overlay = None;
         }
@@ -2516,8 +2576,9 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32) -> Option<OskKey
     let key_h = 40.0 * scale;
     let width = 15.0 * unit;
     ui.set_width(width);
-    // Typing into a terminal: no title, the terminal shows where it goes.
-    if !k.live() {
+    // Typing into a terminal: no title, the terminal shows where it goes
+    // (the address bar the same).
+    if !k.live() && !k.in_bar() {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&k.title).strong().size(16.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2528,7 +2589,7 @@ fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32) -> Option<OskKey
     }
 
     // Text field with caret (none when typing straight into the terminal).
-    if !k.live() {
+    if !k.live() && !k.in_bar() {
         let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
         ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
         ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
@@ -2990,8 +3051,14 @@ enum TopAction {
     Search,
     Dual,
     Menu,
-    /// Click on an address field's background: make that pane active.
-    Focus(usize),
+    /// Click on an address field's background: make that pane active
+    /// and type a path there (the whole of it chosen, to copy).
+    Edit(usize),
+    /// The address, to the clipboard.
+    Copy(String),
+    /// Typing in the bar: "in subfolders" switched, ✕.
+    SubSearch,
+    EndTyping,
     Go(usize, crate::vfs::Location),
     ClearFilter(usize),
     /// Polka's own title bar: dragged, double-clicked, its buttons.
@@ -3056,16 +3123,32 @@ fn address_field(
     let v = ui.visuals().clone();
     let stroke = if highlight { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };
     ui.painter().rect(rect, 8.0, v.extreme_bg_color, stroke, StrokeKind::Inside);
-    if title_bar && bg.double_clicked() {
-        act = Some(TopAction::Maximize);
-    } else if bg.clicked() {
-        act = Some(TopAction::Focus(idx));
+    if bg.clicked() {
+        act = Some(TopAction::Edit(idx));
     } else if moved(&bg) {
         act = Some(TopAction::MoveWindow);
     }
     let inner = rect.shrink2(vec2(6.0, 4.0));
     let painter = ui.painter().with_clip_rect(rect.shrink(1.0));
     let mut right = inner.max.x;
+
+    // The mouse over it: a button at its end copies the address.
+    if !dragging && ui.rect_contains_pointer(rect) {
+        let b = Rect::from_center_size(pos2(right - 13.0, inner.center().y), Vec2::splat(26.0));
+        let r = ui.interact(b, ui.id().with(("addr-copy", idx)), Sense::click()).on_hover_text(tr("Copy address"));
+        if r.hovered() {
+            painter.rect_filled(b, 6.0, v.widgets.hovered.weak_bg_fill);
+        }
+        copy_glyph(&painter, b.center(), if r.hovered() { v.strong_text_color() } else { v.weak_text_color() });
+        if r.clicked() {
+            let mut text = pane.loc.display();
+            if let Some(f) = file {
+                text = format!("{}/{f}", text.trim_end_matches('/'));
+            }
+            act = Some(TopAction::Copy(text));
+        }
+        right = b.min.x - 4.0;
+    }
 
     if let Some(f) = &pane.filter {
         let font = FontId::proportional(14.0);
@@ -3147,8 +3230,10 @@ fn address_field(
             rest = Some((idx, crumbs[i].1.clone()));
         }
         painter.galley(pos2(r.min.x + pad / 2.0, r.center().y - g.size().y / 2.0), g, v.text_color());
+        // The last one is where it is: a click there types the path, as
+        // on the field's empty end.
         if resp.clicked() {
-            act = Some(TopAction::Go(idx, crumbs[i].1.clone()));
+            act = Some(if i + 1 == n { TopAction::Edit(idx) } else { TopAction::Go(idx, crumbs[i].1.clone()) });
         }
         x += w;
         if i + 1 < n {
@@ -3157,6 +3242,102 @@ fn address_field(
         }
     }
     (act, rest)
+}
+
+/// Two overlapping sheets: "copy".
+fn copy_glyph(p: &egui::Painter, c: Pos2, color: Color32) {
+    let s = Stroke::new(1.5, color);
+    p.rect_stroke(Rect::from_min_size(c + vec2(-6.0, -7.0), vec2(9.0, 11.0)), 2.0, s, StrokeKind::Inside);
+    p.rect_stroke(Rect::from_min_size(c + vec2(-3.0, -4.0), vec2(9.0, 11.0)), 2.0, s, StrokeKind::Inside);
+}
+
+/// The address field while a filter, a search or a path is typed in it:
+/// a text field (the mouse chooses, copies, pastes in it), "in
+/// subfolders" for a filter or a search, ✕.
+fn bar_field(ui: &mut Ui, rect: Rect, k: &mut Osk, local: bool) -> Option<TopAction> {
+    use crate::app::OskPurpose;
+    let mut act = None;
+    let v = ui.visuals().clone();
+    ui.painter().rect(rect, 8.0, v.extreme_bg_color, Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+    let inner = rect.shrink2(vec2(8.0, 4.0));
+    let mut right = inner.max.x;
+    // ✕ at the end.
+    let x = Rect::from_center_size(pos2(right - 13.0, inner.center().y), Vec2::splat(26.0));
+    let xr = ui.interact(x, ui.id().with("bar-cancel"), Sense::click()).on_hover_text(tr("Cancel"));
+    if xr.hovered() {
+        ui.painter().rect_filled(x, 6.0, v.widgets.hovered.weak_bg_fill);
+    }
+    ui.painter().text(x.center(), Align2::CENTER_CENTER, "✕", FontId::proportional(14.0), v.text_color());
+    if xr.clicked() {
+        act = Some(TopAction::EndTyping);
+    }
+    right = x.min.x - 6.0;
+    // Filter or search: the box that tells them apart.
+    let finding = matches!(k.purpose, OskPurpose::Filter { .. } | OskPurpose::Search { .. });
+    if finding && local {
+        let on = matches!(k.purpose, OskPurpose::Search { .. });
+        let font = FontId::proportional(14.0);
+        let g = ui.painter().layout_no_wrap(tr("In subfolders").to_string(), font, v.text_color());
+        let w = 20.0 + 8.0 + g.size().x + 16.0;
+        let chip = Rect::from_min_max(pos2(right - w, inner.min.y + 1.0), pos2(right, inner.max.y - 1.0));
+        let r = ui.interact(chip, ui.id().with("bar-sub"), Sense::click());
+        ui.painter().rect_filled(chip, 6.0, if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+        let b = Rect::from_center_size(pos2(chip.min.x + 8.0 + 9.0, chip.center().y), Vec2::splat(16.0));
+        ui.painter().rect_stroke(b, 3.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+        if on {
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(13.0), v.strong_text_color());
+        }
+        ui.painter().galley(pos2(b.max.x + 8.0, chip.center().y - g.size().y / 2.0), g, v.text_color());
+        if r.clicked() {
+            act = Some(TopAction::SubSearch);
+        }
+        right = chip.min.x - 6.0;
+    }
+    // What's typed: Polka's keyboard (the pad's, the screen's) and the
+    // field share it.
+    let id = ui.id().with("bar-text");
+    let mut s = k.string();
+    let outside = k.bar_seen.as_ref().is_none_or(|(t, c)| *t != s || *c != k.caret);
+    // (Until the field has the focus, egui keeps no more than a caret: all
+    // of it is chosen again then.)
+    let focused = ui.memory(|m| m.has_focus(id));
+    if !focused {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    if outside || k.select_all {
+        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+        let range = if k.select_all {
+            egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(k.text.len()))
+        } else {
+            egui::text::CCursorRange::one(egui::text::CCursor::new(k.caret))
+        };
+        st.cursor.set_char_range(Some(range));
+        st.store(ui.ctx(), id);
+        k.select_all &= !focused;
+    }
+    let hint = match k.purpose {
+        OskPurpose::Filter { .. } => tr("Filter"),
+        OskPurpose::Search { .. } => tr("Search in subfolders"),
+        _ => tr("Path"),
+    };
+    let field = Rect::from_min_max(inner.min, pos2(right, inner.max.y));
+    let out = egui::TextEdit::singleline(&mut s)
+        .id(id)
+        .frame(egui::Frame::NONE)
+        .font(FontId::proportional(16.0))
+        .hint_text(hint)
+        .vertical_align(egui::Align::Center)
+        .desired_width(field.width())
+        .min_size(field.size())
+        .show(&mut ui.new_child(egui::UiBuilder::new().max_rect(field)));
+    let caret = out.cursor_range.map_or(s.chars().count(), |r| r.primary.index.into());
+    if out.response.changed() || outside || caret != k.caret {
+        k.text = s.chars().collect();
+        k.caret = caret.min(k.text.len());
+        k.prev = None;
+    }
+    k.bar_seen = Some((k.string(), k.caret));
+    act
 }
 
 /// How far a drag resting on `at` is from opening it (None: it isn't).

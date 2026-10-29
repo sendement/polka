@@ -6541,3 +6541,110 @@ fn docs_screens() {
     assert_eq!(crate::convert::refusal(&dir.join("b-quarter.docx"), "b-quarter.docx"), Some(crate::i18n::tr("needs LibreOffice")));
     unsafe { std::env::remove_var("POLKA_CONVERT_TOOLS") };
 }
+
+/// The address bar under the mouse: its copy button, the path chosen in
+/// it on a click; the filter and the search typed in it, "in subfolders"
+/// between them, the keyboard below only for the pad.
+#[test]
+#[ignore]
+fn address_screens() {
+    use crate::app::{Cmd, Overlay, OskPurpose};
+    use egui::{Event, PointerButton, Pos2, pos2};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    h.state_mut().cfg.search_subfolders = true;
+    settle(&mut h);
+    let click = |h: &mut Harness<'static, App>, pos: Pos2| {
+        h.event(Event::PointerMoved(pos));
+        h.step();
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        settle(h);
+    };
+    let field = |h: &Harness<'static, App>| h.state().addr_rects[0].1;
+    let purpose = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Osk(k)) => Some(match k.purpose {
+            OskPurpose::Filter { .. } => "filter",
+            OskPurpose::Search { .. } => "search",
+            OskPurpose::GoTo => "path",
+            _ => "other",
+        }),
+        _ => None,
+    };
+    // Over it: the copy button at its end.
+    let f = field(&h);
+    h.event(Event::PointerMoved(f.center()));
+    settle(&mut h);
+    shot(&mut h, "ad1-copy-button");
+    click(&mut h, pos2(f.max.x - 19.0, f.center().y));
+    assert_eq!(h.state().toast.as_ref().map(|t| t.0.as_str()), Some(crate::i18n::tr("Copied")));
+    assert!(h.state().overlay.is_none());
+    // A click on its empty part: the path, all of it chosen.
+    click(&mut h, pos2(f.max.x - 80.0, f.center().y));
+    assert_eq!(purpose(&h), Some("path"));
+    shot(&mut h, "ad2-path-chosen");
+    // Typed over: somewhere else, Enter goes there.
+    type_text(&mut h, &dir.join("folder").to_string_lossy());
+    key(&mut h, egui::Key::Enter, Default::default());
+    settle(&mut h);
+    assert!(h.state().overlay.is_none());
+    assert_eq!(h.state().pane().loc.local_path(), Some(dir.join("folder").as_path()));
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_mut().go_up(&cfg);
+    settle(&mut h);
+    // The search button: in subfolders, as last chosen; no keyboard for
+    // the mouse.
+    h.state_mut().run(Cmd::FindOrFilter);
+    settle(&mut h);
+    assert_eq!(purpose(&h), Some("search"));
+    assert!(h.state().keys_rect.is_none(), "a keyboard for the mouse");
+    shot(&mut h, "ad3-search");
+    // Off: the folder filtered as it's typed.
+    let bar = h.state().bar_rect.expect("typed in the bar");
+    let chip_x = bar.max.x - 60.0;
+    click(&mut h, pos2(chip_x, bar.center().y));
+    assert_eq!(purpose(&h), Some("filter"));
+    assert!(!h.state().cfg.search_subfolders);
+    type_text(&mut h, "o");
+    settle(&mut h);
+    assert!(h.state().pane().entries.iter().all(|e| e.name.to_lowercase().contains('o')));
+    shot(&mut h, "ad4-filter");
+    // A click on the list: the filter stays.
+    let list = h.state().pane().drawn.first().map(|d| d.1).expect("rows drawn");
+    click(&mut h, pos2(list.max.x - 40.0, list.center().y));
+    assert!(h.state().overlay.is_none());
+    assert_eq!(h.state().pane().filter.as_deref(), Some("o"));
+    h.state_mut().pane_mut().set_filter(None);
+    // The pad: the keyboard below, typing into the bar.
+    h.state_mut().pad_active = true;
+    h.state_mut().run(Cmd::FindOrFilter);
+    settle(&mut h);
+    assert_eq!(purpose(&h), Some("filter"));
+    let keys = h.state().keys_rect.expect("no keyboard for the pad");
+    assert!(keys.min.y > field(&h).max.y + 100.0, "the keyboard isn't below");
+    h.state_mut().osk_key(crate::app::OskKey::Char('n'));
+    settle(&mut h);
+    assert_eq!(h.state().pane().filter.as_deref(), Some("n"));
+    shot(&mut h, "ad5-pad-keyboard");
+    press(&mut h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    assert!(h.state().pane().filter.is_none());
+    h.state_mut().pad_active = false;
+    // Two panes: typed in the active one's field.
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(&mut h);
+    h.state_mut().run(Cmd::Filter);
+    settle(&mut h);
+    let bar = h.state().bar_rect.expect("typed in the bar");
+    let side = h.state().side();
+    let other = h.state().addr_rects.iter().find(|(i, _)| *i != side).map(|r| r.1).unwrap();
+    assert!(!bar.intersects(other));
+    shot(&mut h, "ad6-dual");
+    key(&mut h, egui::Key::Escape, Default::default());
+    assert!(h.state().overlay.is_none());
+    h.state_mut().run(Cmd::ToggleDual);
+    h.state_mut().cfg.search_subfolders = true;
+}

@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "Buyruqlar tarixi"),
     ("Commit", "Commit"),
     ("Copied", "Nusxalandi"),
+    ("In subfolders", "Ichki jildlarda"),
+    ("Copy address", "Manzilni nusxalash"),
     ("Cursor", "Kursor"),
     ("End process", "Jarayonni tugatish"),
     ("Exit", "Chiqish"),

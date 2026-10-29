@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "명령 기록"),
     ("Commit", "커밋"),
     ("Copied", "복사됨"),
+    ("In subfolders", "하위 폴더 포함"),
+    ("Copy address", "주소 복사"),
     ("Cursor", "커서"),
     ("End process", "프로세스 종료"),
     ("Exit", "종료"),

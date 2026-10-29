@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "命令历史"),
     ("Commit", "提交"),
     ("Copied", "已复制"),
+    ("In subfolders", "包括子文件夹"),
+    ("Copy address", "复制地址"),
     ("Cursor", "光标"),
     ("End process", "结束进程"),
     ("Exit", "退出"),

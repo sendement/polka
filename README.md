@@ -191,6 +191,13 @@ The right stick and the touchpad are intentionally left unbound.
 Menus: → or ✕/A opens a submenu (View, Sorting), ← or ○/B goes back; toggles keep the menu open.
 
 Filter: app menu → Filter… or Ctrl+F (○/B clears it). Search in subfolders: app menu or Ctrl+Shift+F.
+Both are typed in the address bar; the search button opens it as last left, its *In subfolders*
+box switches between them. The on-screen keyboard comes up below only for the gamepad or the touch
+screen.
+
+Address bar: a click on the current folder (or the bar's empty end) turns it into a text field with
+the whole path chosen, to copy or to type another one (Ctrl+L too); the mouse over it shows a copy
+button at its end.
 
 On-screen keyboard: ✕/A types the key, □/X erases, △/Y inserts a space, L1/R1 move
 the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu confirms.
@@ -234,7 +241,7 @@ minimize / maximize / close buttons. Settings → Window buttons picks their loo
 the desktop's own (Breeze on KDE, Adwaita's round buttons on GNOME, else the icon theme's), Breeze,
 Adwaita, Ubuntu (an orange close), macOS traffic lights, Windows 11, the icon theme's or simple lines;
 also which side they sit on and their order; drag the address bar (or the room around it) to move
-the window, double click it to maximize; the window's edges resize it.
+the window, double click the room around it to maximize; the window's edges resize it.
 
 **Sidebar.** Its edge pulled to the left folds it to icons, pulled back out unfolds it (a click
 or tap on the edge flips it). ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to

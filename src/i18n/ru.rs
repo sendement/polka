@@ -152,6 +152,8 @@ pub const T: &[(&str, &str)] = &[
     ("Command history", "История команд"),
     ("Commit", "Коммит"),
     ("Copied", "Скопировано"),
+    ("In subfolders", "В подпапках"),
+    ("Copy address", "Копировать адрес"),
     ("Cursor", "Курсор"),
     ("End process", "Завершить процесс"),
     ("Exit", "Выход"),
