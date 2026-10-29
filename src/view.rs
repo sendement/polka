@@ -1317,7 +1317,10 @@ impl App {
     fn draw_center(&mut self, ui: &mut Ui) {
         let dual = self.cfg.dual;
         let tab = self.tab;
-        let focused = self.focus == Focus::Panes && self.overlay.is_none();
+        // (Typing a filter or a search in the address bar: the pane it's
+        // for keeps its frame.)
+        let typing_bar = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar());
+        let focused = self.focus == Focus::Panes && (self.overlay.is_none() || typing_bar);
         let active = self.side();
         // Each side shows its own tab.
         let tab_of = [self.tab_of(0), self.tab_of(1)];
