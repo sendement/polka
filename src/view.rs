@@ -17,6 +17,9 @@ use crate::input::{Action, Input, PadKind};
 
 /// Top bar button size and the icon inside it.
 const TOOL_BTN: f32 = 38.0;
+/// Narrower than this, an address field (folded for the other in dual
+/// mode) is a square with a folder.
+const FOLDED_ADDR: f32 = 64.0;
 const TOOL_ICON: f32 = 24.0;
 /// Tab height; L1/R1 glyphs next to the tabs match it.
 const TAB_H: f32 = 30.0;
@@ -545,10 +548,18 @@ impl App {
                 if let Some((_, t)) = self.addr_hover.filter(|_| wide.is_none()) {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs_f32((rest_for - t.elapsed().as_secs_f32()).max(0.0)));
                 }
-                let strip = 140.0_f32.min((addr_end - addr_start) / 4.0);
+                // (A square, as big as a button.)
+                let strip = TOOL_BTN + 4.0;
+                // (The field typed in doesn't fold away.)
+                let typed_side = if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar()) { Some(active) } else { None };
+                let wide = wide.filter(|w| typed_side.is_none_or(|t| t == *w));
+                // (While the mouse waits on the other field, it all stays
+                // as it is: a folded square can be clicked.)
+                let before = ui.ctx().data(|d| d.get_temp::<f32>(id.with("target")));
                 let target = match wide {
                     Some(0) => addr_end - strip,
                     Some(_) => addr_start + strip,
+                    None if self.addr_hover.is_some() => before.unwrap_or(even),
                     None => even,
                 };
                 ui.ctx().data_mut(|d| d.insert_temp(id.with("target"), target));
@@ -570,6 +581,24 @@ impl App {
             for (idx, rect) in fields {
                 if typing && idx == typed_at {
                     typed_rect = Some(rect);
+                    continue;
+                }
+                // Folded away for the other: a square with the folder.
+                if rect.width() < FOLDED_ADDR {
+                    let pane = self.pane_at(idx);
+                    let tip = pane.loc.title();
+                    let r = ui.interact(rect, ui.id().with(("addr-folded", idx)), Sense::click()).on_hover_text(tip);
+                    let v = ui.visuals().clone();
+                    let fill = if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.extreme_bg_color };
+                    let stroke = if idx == active { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };
+                    ui.painter().rect(rect, 8.0, fill, stroke, StrokeKind::Inside);
+                    let size = (rect.width() - 14.0).clamp(4.0, 22.0);
+                    if let Some(u) = self.icons.named(&["folder"], lookup_px(ui, 22.0)) {
+                        egui::Image::new(u).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
+                    }
+                    if r.clicked() {
+                        act = Some(TopAction::Side(idx));
+                    }
                     continue;
                 }
                 let pane = self.pane_at(idx);
@@ -622,6 +651,10 @@ impl App {
                 self.focus = Focus::Panes;
                 self.set_side(i);
                 self.run(Cmd::GoTo);
+            }
+            TopAction::Side(i) => {
+                self.focus = Focus::Panes;
+                self.set_side(i);
             }
             TopAction::Copy(text) => {
                 ui.ctx().copy_text(text);
@@ -3057,6 +3090,8 @@ enum TopAction {
     /// Click on an address field's background: make that pane active
     /// and type a path there (the whole of it chosen, to copy).
     Edit(usize),
+    /// A folded address field clicked: that pane active.
+    Side(usize),
     /// The address, to the clipboard.
     Copy(String),
     /// Typing in the bar: "in subfolders" switched, ✕.

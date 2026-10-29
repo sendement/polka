@@ -4427,7 +4427,17 @@ fn spring_screens() {
     wait(&mut h, 600);
     let wide = h.state().addr_mid.unwrap();
     assert!(wide > even + 150.0, "{wide} vs {even}");
+    // The other folded to a square the size of a button.
+    let folded = h.state().addr_rects.iter().find(|r| r.0 == 1).map(|r| r.1).unwrap();
+    assert!((folded.width() - folded.height()).abs() < 3.0, "not a square: {folded:?}");
     shot(&mut h, "sp0-address-widened");
+    // Clicked, it makes its pane the active one.
+    h.state_mut().set_side(0);
+    button(&mut h, folded.center(), true);
+    button(&mut h, folded.center(), false);
+    settle(&mut h);
+    assert_eq!(h.state().side(), 1);
+    h.state_mut().set_side(0);
     move_to(&mut h, pos2(on_left.center().x, 400.0));
     wait(&mut h, 400);
     assert!((h.state().addr_mid.unwrap() - even).abs() < 2.0, "didn't come back");
