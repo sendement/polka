@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "Oyna tugmalari tomoni"),
     ("Left", "Chapda"),
     ("Right", "Oʻngda"),
+    ("Centre", "Markazda"),
     ("Button order", "Tugmalar tartibi"),
     ("Disk space", "Diskdagi joy"),
     ("Folders", "Jildlar"),

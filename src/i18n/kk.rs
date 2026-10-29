@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "Терезе түймелерінің жағы"),
     ("Left", "Сол жақта"),
     ("Right", "Оң жақта"),
+    ("Centre", "Ортасында"),
     ("Button order", "Түймелер реті"),
     ("Disk space", "Дискідегі орын"),
     ("Folders", "Қалталар"),

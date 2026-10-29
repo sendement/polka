@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "ウィンドウボタンの位置"),
     ("Left", "左"),
     ("Right", "右"),
+    ("Centre", "中央"),
     ("Button order", "ボタンの順序"),
     ("Disk space", "ディスク容量"),
     ("Folders", "フォルダー"),

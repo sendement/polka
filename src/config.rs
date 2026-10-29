@@ -106,6 +106,8 @@ pub struct Config {
     pub win_style: crate::titlebar::Style,
     pub win_order: u8,
     pub win_left: bool,
+    /// Where the tabs sit in their row: 0 left, 1 in the middle, 2 right.
+    pub tabs_align: u8,
     /// The status bar's figures.
     pub status: crate::status::Shown,
     /// The gamepad's button hints: shown while it's in use, always, never.
@@ -278,6 +280,7 @@ impl Default for Config {
             win_style: crate::titlebar::Style::Auto,
             win_order: 0,
             win_left: false,
+            tabs_align: 1,
             pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),
         }

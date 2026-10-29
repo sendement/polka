@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "창 버튼 위치"),
     ("Left", "왼쪽"),
     ("Right", "오른쪽"),
+    ("Centre", "가운데"),
     ("Button order", "버튼 순서"),
     ("Disk space", "디스크 공간"),
     ("Folders", "폴더"),

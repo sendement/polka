@@ -241,7 +241,8 @@ minimize / maximize / close buttons. Settings → Window buttons picks their loo
 the desktop's own (Breeze on KDE, Adwaita's round buttons on GNOME, else the icon theme's), Breeze,
 Adwaita, Ubuntu (an orange close), macOS traffic lights, Windows 11, the icon theme's or simple lines;
 also which side they sit on and their order; drag the address bar (or the room around it) to move
-the window, double click the room around it to maximize; the window's edges resize it.
+the window, double click the room around it to maximize; the window's edges resize it. Settings → Window → Tabs puts
+the tabs on the left, in the middle or on the right; the mouse drags them into another order.
 
 **Sidebar.** Its edge pulled to the left folds it to icons, pulled back out unfolds it (a click
 or tap on the edge flips it). ✕ (or a click) opens a place and the sidebar keeps the focus; → or ○ goes over to

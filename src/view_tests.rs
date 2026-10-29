@@ -6658,3 +6658,100 @@ fn address_screens() {
     h.state_mut().run(Cmd::ToggleDual);
     h.state_mut().cfg.search_subfolders = true;
 }
+
+/// Tabs: dragged along the row to another place (the active one stays
+/// active wherever it goes); set to the left, the middle or the right.
+#[test]
+#[ignore]
+fn tab_order_screens() {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    use egui::{Event, PointerButton, Pos2, pos2};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("taborder");
+    let _ = std::fs::remove_dir_all(&dir);
+    for n in ["alpha", "beta", "gamma"] {
+        std::fs::create_dir_all(dir.join(n)).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.tabs_align = 1;
+    h.state_mut().cfg = cfg.clone();
+    h.state_mut().pane_mut().navigate(Location::Local(dir.join("alpha")), None, &cfg);
+    for n in ["beta", "gamma"] {
+        h.state_mut().run(Cmd::NewTab);
+        h.state_mut().pane_mut().navigate(Location::Local(dir.join(n)), None, &cfg);
+    }
+    h.state_mut().pick_tab(0);
+    settle(&mut h);
+    let names = |h: &Harness<'static, App>| h.state().tabs.iter().map(|t| t.pane.loc.title()).collect::<Vec<_>>();
+    assert_eq!(names(&h), ["alpha", "beta", "gamma"]);
+    let button = |h: &mut Harness<'static, App>, p: Pos2, down: bool| {
+        h.event(Event::PointerMoved(p));
+        h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: Default::default() });
+        h.step();
+    };
+    let move_to = |h: &mut Harness<'static, App>, p: Pos2| {
+        h.event(Event::PointerMoved(p));
+        h.step();
+    };
+    // (Empty folders: their panes used to take clicks meant for the tabs.)
+    let r = h.state().tab_rects.clone();
+    button(&mut h, r[1].center(), true);
+    button(&mut h, r[1].center(), false);
+    settle(&mut h);
+    assert_eq!(h.state().tab, 1, "a click on a tab over an empty folder");
+    h.state_mut().pick_tab(0);
+    settle(&mut h);
+    // alpha (active) dragged past gamma.
+    let r = h.state().tab_rects.clone();
+    let from = r[0].center();
+    button(&mut h, from, true);
+    for k in 1..=10 {
+        move_to(&mut h, pos2(from.x + (r[2].max.x + 30.0 - from.x) * k as f32 / 10.0, from.y));
+    }
+    settle(&mut h);
+    shot(&mut h, "to1-tab-dragged");
+    button(&mut h, pos2(r[2].max.x + 30.0, from.y), false);
+    settle(&mut h);
+    assert_eq!(names(&h), ["beta", "gamma", "alpha"]);
+    assert_eq!(h.state().tab, 2, "the active tab didn't follow");
+    assert_eq!(h.state().pane().loc.title(), "alpha");
+    // A click still switches.
+    let r = h.state().tab_rects.clone();
+    button(&mut h, r[0].center(), true);
+    button(&mut h, r[0].center(), false);
+    settle(&mut h);
+    assert_eq!(h.state().tab, 0);
+    // Left, right, the middle.
+    let row = |h: &Harness<'static, App>| {
+        let r = &h.state().tab_rects;
+        (r[0].min.x, r[r.len() - 1].max.x)
+    };
+    let (c0, c1) = row(&h);
+    h.state_mut().cfg.tabs_align = 0;
+    settle(&mut h);
+    let (l0, _) = row(&h);
+    assert!(l0 < c0 - 50.0, "{l0} vs {c0}");
+    shot(&mut h, "to2-tabs-left");
+    h.state_mut().cfg.tabs_align = 2;
+    settle(&mut h);
+    let (_, r1) = row(&h);
+    assert!(r1 > c1 + 50.0, "{r1} vs {c1}");
+    shot(&mut h, "to3-tabs-right");
+    h.state_mut().cfg.tabs_align = 1;
+    // In the settings, under Window.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(crate::app::Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::TABS_ALIGN);
+    }
+    settle(&mut h);
+    press(&mut h, &[Action::Right]);
+    assert_eq!(h.state().cfg.tabs_align, 2);
+    press(&mut h, &[Action::Left, Action::Left]);
+    assert_eq!(h.state().cfg.tabs_align, 0);
+    shot(&mut h, "to4-settings");
+    h.state_mut().overlay = None;
+    h.state_mut().cfg.tabs_align = 1;
+}

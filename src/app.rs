@@ -618,6 +618,8 @@ pub enum Cmd {
     NewTab,
     CloseTab,
     CloseTabAt(usize),
+    /// A tab to another place in the row.
+    MoveTab(usize, usize),
     /// Browse for a picture to use as a pinned folder's icon.
     PickIconFile(PathBuf),
     NewFolder,
@@ -1146,7 +1148,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     let rows = |r: &[usize]| r.iter().map(|r| SItem::Row(*r)).collect::<Vec<_>>();
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
-        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER]),
+        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN]),
         2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
         3 => rows(&[row::OPEN_IN, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
@@ -1234,6 +1236,7 @@ pub mod row {
     pub const WIN_SIDE: usize = 20;
     pub const WIN_ORDER: usize = 21;
     pub const CLOSE: usize = 22;
+    pub const TABS_ALIGN: usize = 23;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1485,6 +1488,8 @@ pub struct App {
     pub crumb_rects: Vec<(usize, egui::Rect, Location)>,
     /// The address fields as last drawn (pane, where).
     pub addr_rects: Vec<(usize, egui::Rect)>,
+    /// A tab being dragged along the row: which, and where the mouse took it.
+    pub tab_drag: Option<(usize, f32)>,
     pub side_rects: Vec<egui::Rect>,
     pub tab_rects: Vec<egui::Rect>,
     pub addr_mid: Option<f32>,
@@ -1667,6 +1672,7 @@ impl App {
             spring_off: false,
             crumb_rects: Vec::new(),
             addr_rects: Vec::new(),
+            tab_drag: None,
             side_rects: Vec::new(),
             tab_rects: Vec::new(),
             addr_mid: None,
@@ -3678,7 +3684,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN => self.settings_step(row, 0.0),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -3908,6 +3914,7 @@ impl App {
                 self.cfg.win_style = STYLES[(at + if d == 0.0 { 1 } else { d as isize }).rem_euclid(STYLES.len() as isize) as usize];
             }
             row::WIN_SIDE => self.cfg.win_left = !self.cfg.win_left,
+            row::TABS_ALIGN => self.cfg.tabs_align = (self.cfg.tabs_align as isize + if d == 0.0 { 1 } else { d as isize }).rem_euclid(3) as u8,
             row::WIN_ORDER => {
                 let n = crate::titlebar::ORDERS.len() as isize;
                 self.cfg.win_order = (self.cfg.win_order as isize + if d == 0.0 { 1 } else { d as isize }).rem_euclid(n) as u8;
@@ -4457,6 +4464,17 @@ impl App {
                         self.other_tab -= 1;
                     }
                     self.keep_sides_apart();
+                    self.range = None;
+                }
+            }
+            Cmd::MoveTab(from, to) => {
+                if from < self.tabs.len() && to < self.tabs.len() && from != to {
+                    let t = self.tabs.remove(from);
+                    self.tabs.insert(to, t);
+                    // Both sides keep their tab wherever it went.
+                    let at = |k: usize| if k == from { to } else if from < k && k <= to { k - 1 } else if to <= k && k < from { k + 1 } else { k };
+                    self.tab = at(self.tab);
+                    self.other_tab = at(self.other_tab);
                     self.range = None;
                 }
             }

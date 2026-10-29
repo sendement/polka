@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "Seite der Fensterknöpfe"),
     ("Left", "Links"),
     ("Right", "Rechts"),
+    ("Centre", "Mitte"),
     ("Button order", "Reihenfolge der Knöpfe"),
     ("Disk space", "Speicherplatz"),
     ("Folders", "Ordner"),

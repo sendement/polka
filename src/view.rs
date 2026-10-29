@@ -719,7 +719,12 @@ impl App {
         let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
-        let mut x = (row.center().x - total / 2.0).max(row.min.x);
+        let mut x = match self.cfg.tabs_align {
+            0 => row.min.x,
+            2 => row.max.x - total,
+            _ => row.center().x - total / 2.0,
+        }
+        .max(row.min.x);
         let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
         let dragging = self.drag.is_some();
@@ -731,12 +736,51 @@ impl App {
             shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
             x += shoulder_w + gap;
         }
+        // A tab dragged along the row follows the mouse, the others make
+        // room where it would go.
+        let lefts: Vec<f32> = widths.iter().scan(x, |cur, w| {
+            let l = *cur;
+            *cur += w + gap;
+            Some(l)
+        }).collect();
+        let moving = self.tab_drag.filter(|(d, _)| *d < widths.len());
+        let mut offsets = vec![0.0; widths.len()];
+        let mut target = None;
+        if let Some((d, x0)) = moving {
+            let dx = ui.input(|i| i.pointer.latest_pos()).map_or(0.0, |p| p.x - x0);
+            let c = lefts[d] + widths[d] / 2.0 + dx;
+            let t = (0..widths.len()).filter(|&k| k != d && lefts[k] + widths[k] / 2.0 < c).count();
+            let room = widths[d] + gap;
+            for (k, o) in offsets.iter_mut().enumerate() {
+                let after = if k < d { k } else { k.saturating_sub(1) };
+                *o = if k == d {
+                    dx
+                } else if k < d && after >= t {
+                    room
+                } else if k > d && after < t {
+                    -room
+                } else {
+                    0.0
+                };
+            }
+            target = Some((d, t));
+            ui.ctx().request_repaint();
+        }
+        let mut picked = None;
+        let lifted = ui.ctx().layer_painter(egui::LayerId::new(Order::Foreground, ui.id().with("tab-lifted"))).with_clip_rect(row.expand(2.0));
         for (i, (title, w)) in titles.into_iter().zip(widths).enumerate() {
-            let rect = at(x, w);
+            let hit = at(x, w);
             x += w + gap;
-            rects.push(rect);
+            let rect = hit.translate(vec2(offsets[i], 0.0));
+            let painter = if moving.is_some_and(|(d, _)| d == i) { lifted.clone() } else { painter.clone() };
+            rects.push(hit);
             let is_active = i == self.tab;
-            let r = ui.interact(rect, ui.id().with(("tab", i)), Sense::click());
+            let r = ui.interact(hit, ui.id().with(("tab", i)), Sense::click_and_drag());
+            if r.drag_started_by(egui::PointerButton::Primary) && !dragging {
+                if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                    picked = Some((i, p.x));
+                }
+            }
             let accent = v.selection.bg_fill;
             // Dragged items held over another tab switch to it in a moment.
             let under = dragging && !is_active && pointer.is_some_and(|p| rect.contains(p));
@@ -806,11 +850,22 @@ impl App {
         }
         ui.add_space(6.0);
         self.tab_rects = rects;
+        if picked.is_some() {
+            self.tab_drag = picked;
+        }
+        // Let go: it goes where it was shown.
+        let mut moved = None;
+        if self.tab_drag.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+            self.tab_drag = None;
+            moved = target.filter(|(d, t)| d != t);
+        }
         if let Some(i) = resting {
             self.spring_rest(crate::app::SpringAt::Tab(i));
         }
 
-        if let Some(i) = close {
+        if let Some((from, to)) = moved {
+            Some(TabAct::Move(from, to))
+        } else if let Some(i) = close {
             Some(TabAct::Close(i))
         } else if let Some(i) = switch {
             Some(TabAct::Switch(i))
@@ -1552,6 +1607,7 @@ impl App {
         match tab_act {
             Some(TabAct::Switch(i)) => self.pick_tab(i),
             Some(TabAct::Close(i)) => self.run(Cmd::CloseTabAt(i)),
+            Some(TabAct::Move(from, to)) => self.run(Cmd::MoveTab(from, to)),
             Some(TabAct::New) => self.run(Cmd::NewTab),
             None => {}
         }
@@ -1782,8 +1838,9 @@ enum PaneEvent {
 #[allow(clippy::too_many_arguments)]
 fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focused: bool, id: (usize, usize), dragging: bool, lifted: Option<&std::collections::HashSet<String>>, springing: Option<(&str, f32)>, tap: Option<bool>, finger: bool) -> Vec<PaneEvent> {
     let mut events = Vec::new();
-    // Dragged items over this pane: dropped on release.
-    let whole = ui.max_rect();
+    // Dragged items over this pane: dropped on release. (Its own room:
+    // the tabs above are in the same ui with one pane.)
+    let whole = ui.available_rect_before_wrap();
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let over = dragging && pointer.is_some_and(|p| whole.contains(p));
     let released = ui.input(|i| i.pointer.primary_released());
@@ -3075,6 +3132,8 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
 
 enum TabAct {
     Switch(usize),
+    /// Dragged from one place in the row to another.
+    Move(usize, usize),
     Close(usize),
     New,
 }
@@ -3969,6 +4028,16 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     ui.painter().text(pos2(shown.min.x - 4.0, rect.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::WIN_ORDER));
+                                    }
+                                }
+                                SItem::Row(row::TABS_ALIGN) => {
+                                    // Where the tabs sit.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TABS_ALIGN, "tabs-align");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Tabs"), label_font.clone(), v.text_color());
+                                    let shown = [tr("Left"), tr("Centre"), tr("Right")][cfg.tabs_align.min(2) as usize];
+                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TABS_ALIGN));
                                     }
                                 }
                             SItem::Row(_) | SItem::Viewer(_) | SItem::Term(_) => {}

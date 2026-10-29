@@ -93,6 +93,7 @@ pub const T: &[(&str, &str)] = &[
     ("Window buttons side", "Бік кнопок вікна"),
     ("Left", "Ліворуч"),
     ("Right", "Праворуч"),
+    ("Centre", "По центру"),
     ("Button order", "Порядок кнопок"),
     ("Disk space", "Місце на диску"),
     ("Folders", "Теки"),
