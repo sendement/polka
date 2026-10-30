@@ -20,6 +20,8 @@ const TOOL_BTN: f32 = 38.0;
 /// Narrower than this, an address field (folded for the other in dual
 /// mode) is a square with a folder.
 const FOLDED_ADDR: f32 = 64.0;
+/// How long a widened address field stays so after the mouse leaves it.
+const ADDR_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 const TOOL_ICON: f32 = 24.0;
 /// Tab height; L1/R1 glyphs next to the tabs match it.
 const TAB_H: f32 = 30.0;
@@ -527,12 +529,37 @@ impl App {
                 // (While the mouse waits on the other field, it all stays
                 // as it is: a folded square can be clicked.)
                 let before = ui.ctx().data(|d| d.get_temp::<f32>(id.with("target")));
+                // The mouse gone, a widened field stays so a while (as it
+                // goes off it on the way elsewhere); a click anywhere but on
+                // it folds it at once.
+                let widened = before.filter(|b| (b - even).abs() > 1.0);
+                let wide_rect = widened.map(|b| {
+                    if b > even {
+                        Rect::from_min_max(pos2(addr_start, row.min.y), pos2(now_mid - 4.0, row.max.y))
+                    } else {
+                        Rect::from_min_max(pos2(now_mid + 4.0, row.min.y), pos2(addr_end, row.max.y))
+                    }
+                });
+                let clicked_away = wide_rect.is_some_and(|r| ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !r.contains(p))));
+                if over.is_some() || widened.is_none() {
+                    self.addr_hold = None;
+                } else if self.addr_hold.is_none() {
+                    self.addr_hold = Some(std::time::Instant::now());
+                }
+                let held = self.addr_hold.is_some_and(|t| t.elapsed() < ADDR_HOLD) && !clicked_away;
+                if held {
+                    ui.ctx().request_repaint_after(ADDR_HOLD);
+                }
                 let target = match wide {
                     Some(0) => addr_end - strip,
                     Some(_) => addr_start + strip,
-                    None if self.addr_hover.is_some() => before.unwrap_or(even),
+                    _ if clicked_away => even,
+                    None if self.addr_hover.is_some() || held => before.unwrap_or(even),
                     None => even,
                 };
+                if clicked_away {
+                    self.addr_hold = None;
+                }
                 ui.ctx().data_mut(|d| d.insert_temp(id.with("target"), target));
                 let mid = now_mid;
                 self.addr_mid = Some(mid);
@@ -558,7 +585,9 @@ impl App {
                 if rect.width() < FOLDED_ADDR {
                     let pane = self.pane_at(idx);
                     let tip = pane.loc.title();
-                    let r = ui.interact(rect, ui.id().with(("addr-folded", idx)), Sense::click()).on_hover_text(tip);
+                    // (The field's own id: a click starts on the square and,
+                    // as it unfolds, ends on the field.)
+                    let r = ui.interact(rect, ui.id().with(("addr", idx)), Sense::click()).on_hover_text(tip);
                     let v = ui.visuals().clone();
                     let fill = if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.extreme_bg_color };
                     let stroke = if idx == active { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };

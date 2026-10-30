@@ -1473,6 +1473,8 @@ pub struct App {
     /// Dual mode: the address field the pointer rests on, and since when
     /// (held a moment, it widens to show the whole path).
     pub addr_hover: Option<(usize, Instant)>,
+    /// When the mouse left a widened address field (it stays a while).
+    pub addr_hold: Option<Instant>,
     /// Dragging and resting on a path crumb or a sidebar place: it opens
     /// after a moment ("spring-loaded"); whether it already did.
     pub spring: Option<(SpringAt, Instant, bool)>,
@@ -1665,6 +1667,7 @@ impl App {
             schemes: crate::schemes::all(),
             last_frame: None,
             addr_hover: None,
+            addr_hold: None,
             spring: None,
             spring_seen: false,
             spring_off: false,

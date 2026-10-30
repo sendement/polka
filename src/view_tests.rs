@@ -4438,9 +4438,45 @@ fn spring_screens() {
     settle(&mut h);
     assert_eq!(h.state().side(), 1);
     h.state_mut().set_side(0);
-    move_to(&mut h, pos2(on_left.center().x, 400.0));
+    // (That click folded the left one back.)
+    // Both halves as they are, or the left one widened.
+    let widths = |h: &Harness<'static, App>| {
+        let r = &h.state().addr_rects;
+        (r[0].1.width(), r[1].1.width())
+    };
+    let left_wide = |h: &Harness<'static, App>| {
+        let (l, r) = widths(h);
+        l > r + 300.0
+    };
+    let even_now = |h: &Harness<'static, App>| {
+        let (l, r) = widths(h);
+        (l - r).abs() < 200.0
+    };
+    // (The mouse stays on the square: the right one may widen in turn.)
+    assert!(!left_wide(&h), "the click on the square didn't fold the other");
+    // Away: it stays a while; a click elsewhere folds it back at once…
+    let away = pos2(on_left.min.x, 400.0);
+    button(&mut h, away, true);
+    button(&mut h, away, false);
     wait(&mut h, 400);
-    assert!((h.state().addr_mid.unwrap() - even).abs() < 2.0, "didn't come back");
+    assert!(even_now(&h), "{:?}", widths(&h));
+    move_to(&mut h, on_left.center());
+    wait(&mut h, 600);
+    assert!(left_wide(&h));
+    move_to(&mut h, away);
+    wait(&mut h, 600);
+    assert!(left_wide(&h), "folded straight away");
+    button(&mut h, away, true);
+    button(&mut h, away, false);
+    wait(&mut h, 400);
+    assert!(even_now(&h), "a click didn't fold it");
+    // …else it does by itself after the wait.
+    move_to(&mut h, on_left.center());
+    wait(&mut h, 600);
+    assert!(left_wide(&h));
+    move_to(&mut h, away);
+    wait(&mut h, 2500);
+    assert!(even_now(&h), "didn't come back");
     // Drag report.txt from the right pane; rest it on the left "alpha".
     h.state_mut().set_side(1);
     settle(&mut h);
