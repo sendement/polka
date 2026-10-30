@@ -466,9 +466,9 @@ pub struct Tab {
     pub usage: Option<Box<crate::usage::Usage>>,
     /// The terminal page (its shells keep running while hidden).
     pub term: Option<Box<crate::terminal::Terminal>>,
-    /// Opened for a file to show (a picture, a document…), beside the tab
-    /// it was opened from: closing the file closes it.
-    pub for_file: bool,
+    /// Opened for a page of its own (a file shown, the terminal, disk
+    /// usage) beside the tab it came from: closing the page closes it.
+    pub own: bool,
 }
 
 /// Where a drag rests to open something: a crumb of a side's address
@@ -488,7 +488,7 @@ pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
-        Tab { pane, for_right: false, viewer: None, usage: None, term: None, for_file: false }
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None, own: false }
     }
 }
 
@@ -844,6 +844,8 @@ pub struct Osk {
     /// The keys asked for with the mouse (the pad and the touch screen
     /// get them anyway).
     pub keys_open: bool,
+    /// A filter begun by typing in the list: emptied, it ends.
+    pub by_typing: bool,
 }
 
 pub use crate::keyboard::OskKey;
@@ -881,6 +883,7 @@ impl Osk {
             bar_seen: None,
             select_all: false,
             keys_open: false,
+            by_typing: false,
         }
     }
 
@@ -1157,7 +1160,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
         1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
-        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
+        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
         3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
@@ -1247,6 +1250,7 @@ pub mod row {
     pub const TABS_ALIGN: usize = 23;
     pub const TOOLBARS: usize = 24;
     pub const PLACES: usize = 25;
+    pub const TYPE_FILTER: usize = 26;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1534,6 +1538,7 @@ pub struct App {
     /// can go this frame.
     pub tool_drag: Option<crate::toolbar::Drag>,
     pub tool_targets: Vec<crate::toolbar::Target>,
+    pub tool_targets_prev: Vec<crate::toolbar::Target>,
     /// What can be undone (the last last), and redone.
     pub undo_steps: Vec<crate::ops::Undo>,
     pub redo_steps: Vec<crate::ops::Undo>,
@@ -1725,6 +1730,7 @@ impl App {
             tab_drag: None,
             tool_drag: None,
             tool_targets: Vec::new(),
+            tool_targets_prev: Vec::new(),
             undo_steps: Vec::new(),
             redo_steps: Vec::new(),
             side_rects: Vec::new(),
@@ -2061,11 +2067,17 @@ impl App {
                 }
             }
         }
-        // The filter keyboard filters live.
+        // The filter keyboard filters live; one begun by typing ends when
+        // it's emptied.
         if let Some(Overlay::Osk(k)) = &self.overlay {
             if let OskPurpose::Filter { .. } = k.purpose {
                 let f = k.string();
-                self.pane_mut().set_filter(Some(f));
+                // (Once its field has shown: before that it's empty anyway.)
+                if k.by_typing && f.is_empty() && k.bar_seen.is_some() {
+                    self.osk_cancel();
+                } else {
+                    self.pane_mut().set_filter(Some(f));
+                }
             }
         }
         // Finished jobs: refresh what they touched, report errors.
@@ -3345,23 +3357,8 @@ impl App {
     pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) -> usize {
         let k = crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).or_else(|| crate::viewer::kind(&path, &name));
         // A file shown gets a tab of its own, beside this one.
-        let tab = if !self.tabs[tab].for_file {
-            let loc = self.tabs[tab].pane.loc.clone();
-            let mut t = Tab::new(Pane::new(loc, &self.cfg));
-            t.for_file = true;
-            self.tabs.insert(tab + 1, t);
-            if self.other_tab > tab {
-                self.other_tab += 1;
-            }
-            if tab == self.tab {
-                self.tab = tab + 1;
-            } else if self.tab > tab {
-                self.tab += 1;
-            }
-            tab + 1
-        } else {
-            tab
-        };
+        // (One already showing a file keeps to its tab.)
+        let tab = if self.tabs[tab].own && self.tabs[tab].viewer.is_some() { tab } else { self.open_beside(tab) };
         let mut v = Viewer::open_as(k, path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
         v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
@@ -3369,20 +3366,62 @@ impl App {
         tab
     }
 
+    /// A tab of its own beside `tab` (for a file shown, the terminal, disk
+    /// usage), at its folder; the current one if `tab` was.
+    pub(crate) fn open_beside(&mut self, tab: usize) -> usize {
+        let loc = self.tabs[tab].pane.loc.clone();
+        let mut t = Tab::new(Pane::new(loc, &self.cfg));
+        t.own = true;
+        self.tabs.insert(tab + 1, t);
+        if self.other_tab > tab {
+            self.other_tab += 1;
+        }
+        if tab == self.tab {
+            self.tab = tab + 1;
+        } else if self.tab > tab {
+            self.tab += 1;
+        }
+        tab + 1
+    }
+
+    /// Such a tab closed: back on the one before it.
+    pub(crate) fn close_beside(&mut self, i: usize) {
+        if self.tabs.len() < 2 || i >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(i);
+        if self.other_tab > i {
+            self.other_tab -= 1;
+        }
+        self.tab = i.saturating_sub(1).min(self.tabs.len() - 1);
+        if self.cfg.dual && self.tab == self.other_tab {
+            self.tab = (0..self.tabs.len()).find(|&k| k != self.other_tab).unwrap_or(0);
+        }
+        self.keep_sides_apart();
+        self.range = None;
+    }
+
+    /// A page (the terminal, disk usage) in a tab of its own: the one that
+    /// has it already, else a new one beside this one.
+    pub(crate) fn tab_for_page(&mut self, has: fn(&Tab) -> bool) {
+        if self.tabs[self.tab].own && has(&self.tabs[self.tab]) {
+            return;
+        }
+        match self.tabs.iter().position(|t| t.own && has(t)) {
+            Some(i) => self.pick_tab(i),
+            None => {
+                let t = self.tab;
+                self.open_beside(t);
+            }
+        }
+    }
+
     pub fn close_viewer(&mut self) {
         // A shown file's own tab goes with it, back to the one it came from.
         let i = self.tab;
-        if self.tabs[i].for_file && self.tabs[i].viewer.is_some() && self.tabs.len() > 1 {
-            let shown = self.tabs.remove(i).viewer.map(|v| v.path);
-            if self.other_tab > i {
-                self.other_tab -= 1;
-            }
-            self.tab = i.saturating_sub(1).min(self.tabs.len() - 1);
-            if self.cfg.dual && self.tab == self.other_tab {
-                self.tab = (0..self.tabs.len()).find(|&k| k != self.other_tab).unwrap_or(0);
-            }
-            self.keep_sides_apart();
-            self.range = None;
+        if self.tabs[i].own && self.tabs[i].viewer.is_some() && self.tabs.len() > 1 {
+            let shown = self.tabs[i].viewer.as_ref().map(|v| v.path.clone());
+            self.close_beside(i);
             // Back on the file shown last (the last track played, say).
             let p = &mut self.tabs[self.tab].pane;
             if let Some(i) = shown.and_then(|f| p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(f.as_path()))) {
@@ -3846,7 +3885,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4082,6 +4121,7 @@ impl App {
                 self.overlay = Some(Overlay::Toolbars);
                 return;
             }
+            row::TYPE_FILTER => self.cfg.type_filter = !self.cfg.type_filter,
             row::PLACES => {
                 self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None }));
                 return;

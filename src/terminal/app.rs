@@ -100,11 +100,11 @@ impl App {
     /// The page in this tab (a new tab if a file is shown here). With a
     /// folder, or with no shell yet, a shell is started there.
     pub fn open_terminal(&mut self, dir: Option<PathBuf>) {
-        if self.cur_tab().viewer.is_some() {
-            self.run(Cmd::NewTab);
-        }
-        let fresh = dir.is_some() || self.term_ref().is_none_or(|t| t.sessions.is_empty());
+        // (Its folder first: the tab it opens in may be another.)
+        let asked = dir.is_some();
         let cwd = self.term_dir(dir);
+        self.tab_for_page(|t| t.term.is_some());
+        let fresh = asked || self.term_ref().is_none_or(|t| t.sessions.is_empty());
         let ctx = self.ctx.clone();
         let prefs = self.cfg.terminal.clone();
         let t = self.tabs[self.tab].term.get_or_insert_with(|| Box::new(Terminal::new()));
@@ -796,12 +796,22 @@ impl App {
                 }
             }
             Cmd::TermHide if self.term_window.is_some() => self.term_window = None,
+            // Its own tab: hidden, back on the one before (the shells go
+            // on); closed, the tab goes.
+            Cmd::TermHide if self.tabs[self.tab].own => {
+                let i = self.tab;
+                self.pick_tab(i.saturating_sub(1));
+            }
             Cmd::TermHide => {
                 if let Some(t) = self.term_mut() {
                     t.shown = false;
                 }
             }
             Cmd::TermClose if self.term_window.is_some() => self.term_window = None,
+            Cmd::TermClose if self.tabs[self.tab].own && self.tabs[self.tab].viewer.is_none() => {
+                let i = self.tab;
+                self.close_beside(i);
+            }
             Cmd::TermClose => self.tabs[self.tab].term = None,
             Cmd::TermRun(c) => {
                 super::remember(&c);

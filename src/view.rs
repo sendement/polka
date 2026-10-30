@@ -104,7 +104,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
             self.full_sent = full;
         }
-        self.tool_targets.clear();
+        // (Last frame's places tell where a dragged button would land.)
+        self.tool_targets_prev = std::mem::take(&mut self.tool_targets);
         if !full {
             self.draw_bottom(ui);
             self.draw_top(ui);
@@ -235,6 +236,23 @@ impl App {
             });
             if up {
                 self.esc_down = false;
+            }
+        }
+        // Typing in the file list: the filter, with what's typed.
+        let list = self.cfg.type_filter && self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.is_none() && !self.usage_shown() && !self.term_shown();
+        if list {
+            let typed: String = events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+            let plain = ctx.input(|i| !i.modifiers.command && !i.modifiers.alt);
+            if plain && !typed.trim().is_empty() {
+                // (The bar's field gets the focus this very frame and types
+                // it itself.)
+                self.run(Cmd::Filter);
+                if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
+                    k.text.clear();
+                    k.caret = 0;
+                    k.by_typing = true;
+                }
+                return;
             }
         }
         // A document shown: Ctrl+C copies its selected text, not files.
@@ -465,9 +483,10 @@ impl App {
             // Left: its buttons (as set in Panel items), after the
             // window's when they're on the left.
             let editing = matches!(self.overlay, Some(Overlay::Toolbars));
+            let lift = self.tool_lift();
             let x = row.min.x + if look.left { win_w } else { 0.0 };
-            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopLeft, x, row, TOOL_BTN, editing);
-            let addr_start = x + crate::toolbar::width(&cfg, crate::toolbar::Zone::TopLeft, TOOL_BTN, editing) + 10.0;
+            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopLeft, x, row, TOOL_BTN, editing, &lift);
+            let addr_start = x + crate::toolbar::width(&cfg, crate::toolbar::Zone::TopLeft, TOOL_BTN, editing, &lift) + 10.0;
             self.tool_targets.push(target);
             let mut tool = pressed;
             let mut lifted = picked;
@@ -484,9 +503,9 @@ impl App {
             if tool_button(ui, btn(menu_x), &mut self.icons, &["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false).clicked() && !editing {
                 act = Some(TopAction::Menu);
             }
-            let right_w = crate::toolbar::width(&cfg, crate::toolbar::Zone::TopRight, TOOL_BTN, editing);
+            let right_w = crate::toolbar::width(&cfg, crate::toolbar::Zone::TopRight, TOOL_BTN, editing, &lift);
             let rx = menu_x - 4.0 - right_w;
-            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopRight, rx, row, TOOL_BTN, editing);
+            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopRight, rx, row, TOOL_BTN, editing, &lift);
             self.tool_targets.push(target);
             tool = tool.or(pressed);
             lifted = lifted.or(picked);
@@ -710,8 +729,9 @@ impl App {
         // The places for buttons at its ends (drawn after the tabs).
         use crate::toolbar::Zone;
         let editing = matches!(self.overlay, Some(Overlay::Toolbars));
-        let lw = crate::toolbar::width(&self.cfg, Zone::TabsLeft, TAB_H, editing);
-        let rw = crate::toolbar::width(&self.cfg, Zone::TabsRight, TAB_H, editing);
+        let lift = self.tool_lift();
+        let lw = crate::toolbar::width(&self.cfg, Zone::TabsLeft, TAB_H, editing, &lift);
+        let rw = crate::toolbar::width(&self.cfg, Zone::TabsRight, TAB_H, editing, &lift);
         let (lo, hi) = (row.min.x + if lw > 0.0 { lw + 10.0 } else { 0.0 }, row.max.x - if rw > 0.0 { rw + 10.0 } else { 0.0 });
         let mut x = match self.cfg.tabs_align {
             0 => lo,
@@ -858,8 +878,8 @@ impl App {
         }
 
         let cfg = self.cfg.clone();
-        let (tl, pl, kl) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsLeft, row.min.x, row, TAB_H, editing);
-        let (tr_, pr, kr) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsRight, row.max.x - rw, row, TAB_H, editing);
+        let (tl, pl, kl) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsLeft, row.min.x, row, TAB_H, editing, &lift);
+        let (tr_, pr, kr) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsRight, row.max.x - rw, row, TAB_H, editing, &lift);
         self.tool_targets.extend([tl, tr_]);
         if let Some(t) = kl.or(kr) {
             self.tool_drag = Some(crate::toolbar::Drag { tool: t, from_bar: true });
@@ -4141,6 +4161,19 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TABS_ALIGN));
+                                    }
+                                }
+                                SItem::Row(row::TYPE_FILTER) => {
+                                    // Typing in the list filters it.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TYPE_FILTER, "type-filter");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Filter by typing"), label_font.clone(), v.text_color());
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.type_filter {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TYPE_FILTER));
                                     }
                                 }
                                 SItem::Row(row::PLACES) => {

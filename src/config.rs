@@ -113,6 +113,8 @@ pub struct Config {
     /// Sidebar places not shown, and the order chosen for them (each kept
     /// within its section), by their keys.
     pub side_hidden: Vec<String>,
+    /// Typing in the file list starts the filter.
+    pub type_filter: bool,
     pub side_order: Vec<String>,
     /// The status bar's figures.
     pub status: crate::status::Shown,
@@ -289,6 +291,7 @@ impl Default for Config {
             tabs_align: 1,
             toolbars: Default::default(),
             side_hidden: Vec::new(),
+            type_filter: true,
             side_order: Vec::new(),
             pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),

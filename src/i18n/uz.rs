@@ -588,6 +588,7 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Matn yozish"),
     ("Type text…", "Matn yozish…"),
     ("Undo", "Bekor qilish"),
+    ("Filter by typing", "Yozish orqali saralash"),
     ("Sidebar places", "Yon paneldagi joylar"),
     ("Sidebar places…", "Yon paneldagi joylar…"),
     ("Untick to hide; drag to put in another order.", "Yashirish uchun belgini olib tashlang; tartibni oʻzgartirish uchun sudrang."),

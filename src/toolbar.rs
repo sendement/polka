@@ -235,16 +235,30 @@ impl Toolbars {
         if let Some((z, i)) = from {
             self.get_mut(z).remove(i);
         }
-        if let Some((z, mut i)) = to {
-            // Along its own row: its old place is gone.
-            if let Some((fz, fi)) = from {
-                if fz == z && fi < i {
-                    i -= 1;
-                }
-            }
+        // (`to` counts the place's buttons without it.)
+        if let Some((z, i)) = to {
             let v = self.get_mut(z);
             v.insert(i.min(v.len()), t);
         }
+    }
+}
+
+/// While a button is dragged: it, gone from its place, and the room made
+/// for it where it would land.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Lift {
+    pub tool: Option<Tool>,
+    pub gap: Option<(Zone, usize)>,
+}
+
+impl Lift {
+    /// A place's buttons as they show now.
+    fn shown(&self, cfg: &Config, zone: Zone) -> Vec<Tool> {
+        cfg.toolbars.get(zone).iter().copied().filter(|t| Some(*t) != self.tool).collect()
+    }
+
+    fn gap_in(&self, zone: Zone) -> Option<usize> {
+        self.gap.filter(|(z, _)| *z == zone).map(|(_, i)| i)
     }
 }
 
@@ -275,14 +289,21 @@ pub fn drop_at(targets: &[Target], p: Pos2) -> Option<(Zone, usize)> {
 /// square to drop on) and its buttons are dragged, not pressed.
 /// Returns its target, a button pressed, and one picked up.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_place(ui: &mut Ui, icons: &mut Icons, cfg: &Config, zone: Zone, x: f32, row: Rect, size: f32, editing: bool) -> (Target, Option<Tool>, Option<Tool>) {
-    let tools = cfg.toolbars.get(zone).clone();
+pub fn draw_place(ui: &mut Ui, icons: &mut Icons, cfg: &Config, zone: Zone, x: f32, row: Rect, size: f32, editing: bool, lift: &Lift) -> (Target, Option<Tool>, Option<Tool>) {
+    let tools = lift.shown(cfg, zone);
+    let gap = lift.gap_in(zone);
     let step = size + 4.0;
     let y = row.center().y - size / 2.0;
     let mut items = Vec::new();
     let (mut pressed, mut picked) = (None, None);
+    // The room for the one being dragged here: a dashed square.
+    if let Some(g) = gap {
+        let r = Rect::from_min_size(pos2(x + g as f32 * step, y), Vec2::splat(size));
+        dashed_rect(ui, r, Stroke::new(1.5, ui.visuals().selection.bg_fill));
+    }
     for (i, t) in tools.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x + i as f32 * step, y), Vec2::splat(size));
+        let slot = if gap.is_some_and(|g| i >= g) { i + 1 } else { i };
+        let r = Rect::from_min_size(pos2(x + slot as f32 * step, y), Vec2::splat(size));
         items.push(r);
         let resp = crate::view::tool_button(ui, r, icons, t.icons(cfg), t.glyph(), t.label(), t.on(cfg));
         if editing {
@@ -294,12 +315,12 @@ pub fn draw_place(ui: &mut Ui, icons: &mut Icons, cfg: &Config, zone: Zone, x: f
             pressed = Some(*t);
         }
     }
-    let w = (tools.len() as f32 * step - 4.0).max(if editing { size } else { 0.0 });
+    let w = width(cfg, zone, size, editing, lift);
     let area = Rect::from_min_size(pos2(x, y), vec2(w.max(0.0), size));
     if editing {
         let v = ui.visuals();
         let stroke = Stroke::new(1.0, v.selection.bg_fill.gamma_multiply(0.7));
-        if tools.is_empty() {
+        if tools.is_empty() && gap.is_none() {
             dashed_rect(ui, area, stroke);
         } else {
             ui.painter().rect_stroke(area.expand(2.0), 8.0, stroke, StrokeKind::Outside);
@@ -309,8 +330,8 @@ pub fn draw_place(ui: &mut Ui, icons: &mut Icons, cfg: &Config, zone: Zone, x: f
 }
 
 /// The room a place takes in its row.
-pub fn width(cfg: &Config, zone: Zone, size: f32, editing: bool) -> f32 {
-    let n = cfg.toolbars.get(zone).len();
+pub fn width(cfg: &Config, zone: Zone, size: f32, editing: bool, lift: &Lift) -> f32 {
+    let n = lift.shown(cfg, zone).len() + lift.gap_in(zone).is_some() as usize;
     if n == 0 {
         if editing { size } else { 0.0 }
     } else {
@@ -464,9 +485,24 @@ impl App {
             Tool::Undo => self.run(Cmd::Undo),
             Tool::Redo => self.run(Cmd::Redo),
             Tool::Properties => self.run(Cmd::Properties),
-            Tool::Usage => self.run(Cmd::UsageOpen(None)),
+            // This folder's, if it's a plain one; else the start screen.
+            Tool::Usage => {
+                let here = match &self.pane().loc {
+                    crate::vfs::Location::Local(p) => Some(p.clone()),
+                    _ => None,
+                };
+                self.run(Cmd::UsageOpen(here));
+            }
             Tool::Settings => self.run(Cmd::Settings),
         }
+    }
+
+    /// The button being dragged, and where it would land.
+    pub fn tool_lift(&self) -> Lift {
+        let Some(d) = self.tool_drag else { return Lift::default() };
+        let p = self.ctx.input(|i| i.pointer.latest_pos());
+        // (Wherever it was, it shows only where it would land.)
+        Lift { tool: Some(d.tool), gap: p.and_then(|p| drop_at(&self.tool_targets_prev, p)) }
     }
 
     /// A button let go: placed where it landed, or taken away.

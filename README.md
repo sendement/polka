@@ -30,8 +30,10 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
   copying, moving, new folders and files, packing, extracting, converting; what's undone goes to
   the trash rather than away, and comes back from it on redo. Replacing files, deleting for good
   and edits inside archives can't be undone. A text file's own edits have their own history
-- Files shown in the viewer (pictures, music, video, text, documents) open in a tab of their own
-  beside the folder's; closing one (✕, back or up) goes back there
+- Files shown in the viewer (pictures, music, video, text, documents), the terminal and disk usage
+  open in a tab of their own beside the folder's (the terminal's and disk usage's are reused);
+  closing one (✕, back or up) goes back there. Disk usage from its panel button measures the
+  folder it's pressed in
 - Sidebar places to taste: drag one along its section in the sidebar, or Settings → Files → Sidebar
   places… to hide any of them (Documents, Music, Steam, Trash…) and put them in another order
   (the mouse, or L1 / R1 on the gamepad)
@@ -203,7 +205,8 @@ them; "Always open this type with it" makes the choice the system's default for 
 The right stick and the touchpad are intentionally left unbound.
 Menus: → or ✕/A opens a submenu (View, Sorting), ← or ○/B goes back; toggles keep the menu open.
 
-Filter: app menu → Filter… or Ctrl+F (○/B clears it). Search in subfolders: app menu or Ctrl+Shift+F.
+Filter: app menu → Filter… or Ctrl+F (○/B clears it), or just start typing in the list (Settings →
+Language and input → Filter by typing; emptied or Esc, it's gone). Search in subfolders: app menu or Ctrl+Shift+F.
 Both are typed in the address bar; the search button opens it as last left, its *In subfolders*
 box switches between them. The on-screen keyboard comes up below only for the gamepad or the touch
 screen.

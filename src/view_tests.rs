@@ -6464,7 +6464,7 @@ fn docs_screens() {
     let tabs = h.state().tabs.len();
     open(&mut h, "a-report.pdf");
     assert_eq!(h.state().tabs.len(), tabs + 1, "no tab of its own");
-    assert!(h.state().cur_tab().for_file && h.state().tab == 1);
+    assert!(h.state().cur_tab().own && h.state().tab == 1);
     h.state_mut().close_viewer();
     settle(&mut h);
     assert_eq!(h.state().tabs.len(), tabs);
@@ -6706,6 +6706,28 @@ fn address_screens() {
     assert!(h.state().overlay.is_none());
     assert!(h.state().pane().filter.is_none());
     h.state_mut().pad_active = false;
+    // Typing in the list: the filter, with what's typed; emptied, it ends.
+    h.state_mut().cfg.type_filter = true;
+    type_text(&mut h, "no");
+    settle(&mut h);
+    assert_eq!(purpose(&h), Some("filter"));
+    assert_eq!(h.state().pane().filter.as_deref(), Some("no"), "typed twice or not at all");
+    shot(&mut h, "ad9-typed-filter");
+    key(&mut h, egui::Key::Backspace, Default::default());
+    key(&mut h, egui::Key::Backspace, Default::default());
+    settle(&mut h);
+    assert!(h.state().overlay.is_none(), "emptied, it stayed");
+    assert!(h.state().pane().filter.is_none());
+    type_text(&mut h, "x");
+    settle(&mut h);
+    key(&mut h, egui::Key::Escape, Default::default());
+    settle(&mut h);
+    assert!(h.state().overlay.is_none() && h.state().pane().filter.is_none(), "Esc didn't close it");
+    // Off: typing does nothing.
+    h.state_mut().cfg.type_filter = false;
+    type_text(&mut h, "q");
+    settle(&mut h);
+    assert!(h.state().overlay.is_none());
     // Two panes: typed in the active one's field.
     h.state_mut().run(Cmd::ToggleDual);
     settle(&mut h);
@@ -7009,10 +7031,30 @@ fn toolbar_screens() {
     assert!(matches!(h.state().overlay, Some(Overlay::Toolbars)));
     settle(&mut h);
     shot(&mut h, "tb1-palette");
-    // Copy onto the right of the tabs (an empty place, shown dashed).
+    // Copy onto the right of the tabs (an empty place, shown dashed); on
+    // the way, room opens up where it would land.
     let from = h.get_by_label(Tool::Copy.label()).rect().center();
+    let t = target(&h, Zone::TopLeft);
+    let over = pos2(t.items[1].min.x + 2.0, t.area.center().y);
+    let w0 = t.area.width();
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    for k in 1..=8 {
+        h.event(Event::PointerMoved(from + (over - from) * k as f32 / 8.0));
+        h.step();
+    }
+    settle(&mut h);
+    assert!(target(&h, Zone::TopLeft).area.width() > w0 + 30.0, "no room made: {} vs {w0}", target(&h, Zone::TopLeft).area.width());
+    shot(&mut h, "tb1b-room");
     let to = target(&h, Zone::TabsRight).area.center();
-    drag(&mut h, from, to);
+    for k in 1..=8 {
+        h.event(Event::PointerMoved(over + (to - over) * k as f32 / 8.0));
+        h.step();
+    }
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
     assert_eq!(h.state().cfg.toolbars.tabs_right, [Tool::Copy]);
     // Dual pane off the top bar: gone.
     let t = target(&h, Zone::TopRight);
@@ -7048,7 +7090,7 @@ fn toolbar_screens() {
             settle(h);
         }
         assert_eq!(h.state().tabs.len(), 2, "{name}: no tab of its own");
-        assert!(h.state().cur_tab().for_file);
+        assert!(h.state().cur_tab().own);
     };
     open(&mut h, "b.png");
     h.state_mut().run_tool(Tool::Back);
@@ -7070,6 +7112,30 @@ fn toolbar_screens() {
     settle(&mut h);
     assert_eq!(h.state().tabs.len(), 1);
     assert!(h.state().cur_tab().viewer.is_none());
+    // Disk usage from its button: a tab of its own, measuring this folder;
+    // closed, the tab goes.
+    h.state_mut().run_tool(Tool::Usage);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 2, "no tab of its own");
+    let scanning = h.state().cur_tab().usage.as_ref().and_then(|u| match &u.state {
+        crate::usage::State::Scanning(s) => Some(s.root.clone()),
+        _ => u.last_root.clone(),
+    });
+    assert_eq!(scanning.as_deref(), Some(dir.as_path()), "not this folder");
+    h.state_mut().run(Cmd::UsageClose);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    // The terminal too: a tab of its own, the same one again, and gone with it.
+    h.state_mut().run(Cmd::TermOpen(None));
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 2);
+    h.state_mut().pick_tab(0);
+    h.state_mut().run(Cmd::TermOpen(None));
+    settle(&mut h);
+    assert_eq!((h.state().tabs.len(), h.state().tab), (2, 1), "a second terminal tab");
+    h.state_mut().run(Cmd::TermClose);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
     h.state_mut().cfg.toolbars = Default::default();
 }
 

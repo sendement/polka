@@ -588,6 +588,7 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "输入文本"),
     ("Type text…", "输入文本…"),
     ("Undo", "撤销"),
+    ("Filter by typing", "输入即筛选"),
     ("Sidebar places", "侧栏位置"),
     ("Sidebar places…", "侧栏位置…"),
     ("Untick to hide; drag to put in another order.", "取消勾选即可隐藏；拖动可调整顺序。"),

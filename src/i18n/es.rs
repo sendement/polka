@@ -588,6 +588,7 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Escribir texto"),
     ("Type text…", "Escribir texto…"),
     ("Undo", "Deshacer"),
+    ("Filter by typing", "Filtrar al escribir"),
     ("Sidebar places", "Lugares de la barra lateral"),
     ("Sidebar places…", "Lugares de la barra lateral…"),
     ("Untick to hide; drag to put in another order.", "Desmarca para ocultar; arrastra para cambiar el orden."),

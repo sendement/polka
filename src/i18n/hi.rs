@@ -588,6 +588,7 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "टेक्स्ट लिखें"),
     ("Type text…", "टेक्स्ट लिखें…"),
     ("Undo", "पूर्ववत करें"),
+    ("Filter by typing", "टाइप करके फ़िल्टर"),
     ("Sidebar places", "साइडबार की जगहें"),
     ("Sidebar places…", "साइडबार की जगहें…"),
     ("Untick to hide; drag to put in another order.", "छिपाने के लिए निशान हटाएँ; क्रम बदलने के लिए खींचें।"),

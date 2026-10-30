@@ -44,9 +44,7 @@ impl App {
     /// The page in this tab (a new tab if a file is shown here); with a
     /// path, measuring starts right away.
     pub fn open_usage(&mut self, path: Option<PathBuf>) {
-        if self.cur_tab().viewer.is_some() {
-            self.run(Cmd::NewTab);
-        }
+        self.tab_for_page(|t| t.usage.is_some());
         let targets = self.usage_targets();
         let mode = Mode::from(self.cfg.usage_mode);
         let ctx = self.ctx.clone();
@@ -242,6 +240,11 @@ impl App {
         let ctx = self.ctx.clone();
         match cmd {
             Cmd::UsageOpen(p) => self.open_usage(p),
+            // Its own tab goes with it.
+            Cmd::UsageClose if self.tabs[self.tab].own && self.tabs[self.tab].viewer.is_none() => {
+                let i = self.tab;
+                self.close_beside(i);
+            }
             Cmd::UsageClose => {
                 self.tabs[self.tab].usage = None;
             }

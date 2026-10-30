@@ -588,6 +588,7 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Text eingeben"),
     ("Type text…", "Text eingeben…"),
     ("Undo", "Rückgängig"),
+    ("Filter by typing", "Filtern beim Tippen"),
     ("Sidebar places", "Orte in der Seitenleiste"),
     ("Sidebar places…", "Orte in der Seitenleiste…"),
     ("Untick to hide; drag to put in another order.", "Haken entfernen zum Ausblenden; ziehen, um die Reihenfolge zu ändern."),
