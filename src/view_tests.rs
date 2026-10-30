@@ -6463,7 +6463,7 @@ fn docs_screens() {
     let tabs = h.state().tabs.len();
     open(&mut h, "a-report.pdf");
     assert_eq!(h.state().tabs.len(), tabs + 1, "no tab of its own");
-    assert!(h.state().cur_tab().doc && h.state().tab == 1);
+    assert!(h.state().cur_tab().for_file && h.state().tab == 1);
     h.state_mut().close_viewer();
     settle(&mut h);
     assert_eq!(h.state().tabs.len(), tabs);
@@ -6959,4 +6959,115 @@ fn history_screens() {
     assert_eq!(h.state().undo_steps.len(), steps, "the files' history was used");
     h.state_mut().close_viewer();
     assert!(matches!(h.state().overlay, None | Some(Overlay::Menu(_))));
+}
+
+/// Panel items: dragged from their window onto the panels, along them and
+/// off them; a placed one works. Files shown in a tab of their own, which
+/// back, up and the ✕ close (✕ on a document used to bring Polka down).
+#[test]
+#[ignore]
+fn toolbar_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::toolbar::{Tool, Zone};
+    use egui::{Event, PointerButton, Pos2, pos2};
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("toolbar");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), "text").unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40])).save(dir.join("b.png")).unwrap();
+    crate::viewer::docs::fixtures::pdf(&dir.join("c.pdf"));
+    let mut h = harness(dir.clone());
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    cfg.toolbars = Default::default();
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    let drag = |h: &mut Harness<'static, App>, from: Pos2, to: Pos2| {
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        for k in 1..=8 {
+            h.event(Event::PointerMoved(from + (to - from) * k as f32 / 8.0));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        settle(h);
+    };
+    let target = |h: &Harness<'static, App>, z: Zone| h.state().tool_targets.iter().find(|t| t.zone == z).cloned().expect("no place");
+    // Settings → Window → Panel items.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::TOOLBARS);
+    }
+    settle(&mut h);
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Toolbars)));
+    settle(&mut h);
+    shot(&mut h, "tb1-palette");
+    // Copy onto the right of the tabs (an empty place, shown dashed).
+    let from = h.get_by_label(Tool::Copy.label()).rect().center();
+    let to = target(&h, Zone::TabsRight).area.center();
+    drag(&mut h, from, to);
+    assert_eq!(h.state().cfg.toolbars.tabs_right, [Tool::Copy]);
+    // Dual pane off the top bar: gone.
+    let t = target(&h, Zone::TopRight);
+    let dual = t.items[1].center();
+    drag(&mut h, dual, pos2(dual.x - 200.0, 400.0));
+    assert_eq!(h.state().cfg.toolbars.top_right, [Tool::Search]);
+    // Back to the end of its row.
+    let t = target(&h, Zone::TopLeft);
+    drag(&mut h, t.items[1].center(), pos2(t.area.max.x - 4.0, t.area.center().y));
+    assert_eq!(h.state().cfg.toolbars.top_left, [Tool::Sidebar, Tool::Forward, Tool::Up, Tool::Back]);
+    shot(&mut h, "tb2-placed");
+    press(&mut h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    // Placed, it works: Copy copies.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "a.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    let c = target(&h, Zone::TabsRight).items[0].center();
+    h.event(Event::PointerMoved(c));
+    h.step();
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(Event::PointerButton { pos: c, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert!(h.state().clip.is_some(), "the copy button didn't copy");
+    shot(&mut h, "tb3-in-use");
+    // Every file shown has a tab of its own; back closes a picture's, up a
+    // text's, ✕ a document's (without bringing Polka down).
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        press(h, &[Action::Accept]);
+        for _ in 0..20 {
+            settle(h);
+        }
+        assert_eq!(h.state().tabs.len(), 2, "{name}: no tab of its own");
+        assert!(h.state().cur_tab().for_file);
+    };
+    open(&mut h, "b.png");
+    h.state_mut().run_tool(Tool::Back);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    open(&mut h, "a.txt");
+    h.state_mut().run_tool(Tool::Up);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    assert_eq!(h.state().pane().current().map(|e| e.name.as_str()), Some("a.txt"));
+    open(&mut h, "c.pdf");
+    // (The viewer's, in its header: not the hint at the foot.)
+    let x = h.get_all_by_label(crate::i18n::tr("Close")).map(|n| n.rect()).find(|r| r.min.y > 50.0 && r.max.y < 300.0).expect("no ✕").center();
+    h.event(Event::PointerMoved(x));
+    h.step();
+    h.event(Event::PointerButton { pos: x, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(Event::PointerButton { pos: x, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), 1);
+    assert!(h.state().cur_tab().viewer.is_none());
+    h.state_mut().cfg.toolbars = Default::default();
 }

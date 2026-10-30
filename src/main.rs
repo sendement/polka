@@ -37,6 +37,7 @@ mod steam_add;
 mod terminal;
 mod thumbs;
 mod titlebar;
+mod toolbar;
 mod touch;
 mod trashbin;
 mod updates;

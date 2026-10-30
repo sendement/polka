@@ -30,7 +30,12 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
   copying, moving, new folders and files, packing, extracting, converting; what's undone goes to
   the trash rather than away, and comes back from it on redo. Replacing files, deleting for good
   and edits inside archives can't be undone. A text file's own edits have their own history
-- Documents open in a tab of their own beside the folder's; closing one goes back there
+- Files shown in the viewer (pictures, music, video, text, documents) open in a tab of their own
+  beside the folder's; closing one (✕, back or up) goes back there
+- Panel buttons to taste: Settings → Window → Panel items… shows all of them (copy, paste, cut,
+  list or grid, sorting, new folder, create…, terminal, hidden files, undo, redo and more), to drag
+  onto the top bar on either side of the address or beside the tabs on either side; drag one off
+  a panel to take it away
 - Quick filter (live, as you type) and recursive search
 - Settings (≡ → Settings…): highlight colour from presets or your own saved mixes, icon sizes for
   the sidebar, list and grid, interface scale, icon theme with live preview

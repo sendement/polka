@@ -104,6 +104,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
             self.full_sent = full;
         }
+        self.tool_targets.clear();
         if !full {
             self.draw_bottom(ui);
             self.draw_top(ui);
@@ -117,6 +118,14 @@ impl eframe::App for App {
             self.draw_jobs(&ctx);
         }
         self.draw_overlay(&ctx);
+        // A panel button being dragged (Panel items open): let go, it lands.
+        if let Some(d) = self.tool_drag {
+            crate::toolbar::draw_drag(&ctx, &mut self.icons, &self.cfg, &d, &self.tool_targets);
+            if !ctx.input(|i| i.pointer.primary_down()) {
+                self.tool_drop();
+            }
+            ctx.request_repaint();
+        }
         self.draw_touch_hold(&ctx);
         if !self.cfg.system_titlebar && !full {
             crate::titlebar::resize_edges(&ctx);
@@ -452,51 +461,42 @@ impl App {
                 }
             }
             let btn = |x: f32| Rect::from_min_size(pos2(x, row.min.y), Vec2::splat(TOOL_BTN));
-            let step = TOOL_BTN + 4.0;
 
-            // Left: sidebar toggle, then history / up.
-            let side_names: &[&str] = if cfg.sidebar_collapsed {
-                &["sidebar-expand-left", "view-left-new", "sidebar-show", "view-sidebar"]
-            } else {
-                &["sidebar-collapse-left", "view-left-close", "sidebar-show", "view-sidebar"]
-            };
-            // The window's buttons first when they're on the left.
-            let mut x = row.min.x + if look.left { win_w } else { 0.0 };
-            let left: [(&[&str], &str, &str, TopAction); 4] = [
-                (side_names, "☰", tr("Sidebar"), TopAction::Sidebar),
-                (&["go-previous", "arrow-left"], "◀", tr("Back"), TopAction::Back),
-                (&["go-next", "arrow-right"], "▶", tr("Forward"), TopAction::Forward),
-                (&["go-up", "arrow-up"], "▲", tr("Up"), TopAction::Up),
-            ];
-            for (i, (names, fb, tip, a)) in left.into_iter().enumerate() {
-                if tool_button(ui, btn(x), &mut self.icons, names, fb, tip, false).clicked() {
-                    act = Some(a);
-                }
-                x += step + if i == 0 { 8.0 } else { 0.0 };
-            }
-            let addr_start = x + 6.0;
+            // Left: its buttons (as set in Panel items), after the
+            // window's when they're on the left.
+            let editing = matches!(self.overlay, Some(Overlay::Toolbars));
+            let x = row.min.x + if look.left { win_w } else { 0.0 };
+            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopLeft, x, row, TOOL_BTN, editing);
+            let addr_start = x + crate::toolbar::width(&cfg, crate::toolbar::Zone::TopLeft, TOOL_BTN, editing) + 10.0;
+            self.tool_targets.push(target);
+            let mut tool = pressed;
+            let mut lifted = picked;
 
-            // Right, pinned: the window's buttons (with no title bar),
-            // search, dual pane, menu.
+            // Right, pinned: the window's buttons (with no title bar), the
+            // menu, and the right place's buttons before it.
             if own {
                 let x0 = if look.left { row.min.x } else { row.max.x - win_w + 10.0 };
                 if let Some(b) = crate::titlebar::buttons(ui, &mut self.icons, look, x0, row.center().y) {
                     act = Some(TopAction::Window(b));
                 }
             }
-            let mut rx = row.max.x - TOOL_BTN - if look.left { 0.0 } else { win_w };
-            let right: [(&[&str], &str, &str, bool, TopAction); 3] = [
-                (&["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false, TopAction::Menu),
-                (&["view-split-left-right", "view-dual"], "◫", tr("Dual pane"), dual, TopAction::Dual),
-                (&["edit-find", "system-search"], "⌕", tr("Search"), false, TopAction::Search),
-            ];
-            for (names, fb, tip, on, a) in right {
-                if tool_button(ui, btn(rx), &mut self.icons, names, fb, tip, on).clicked() {
-                    act = Some(a);
-                }
-                rx -= step;
+            let menu_x = row.max.x - TOOL_BTN - if look.left { 0.0 } else { win_w };
+            if tool_button(ui, btn(menu_x), &mut self.icons, &["open-menu", "application-menu", "view-more-horizontal"], "≡", tr("Menu"), false).clicked() && !editing {
+                act = Some(TopAction::Menu);
             }
-            let addr_end = rx + TOOL_BTN - 6.0;
+            let right_w = crate::toolbar::width(&cfg, crate::toolbar::Zone::TopRight, TOOL_BTN, editing);
+            let rx = menu_x - 4.0 - right_w;
+            let (target, pressed, picked) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, crate::toolbar::Zone::TopRight, rx, row, TOOL_BTN, editing);
+            self.tool_targets.push(target);
+            tool = tool.or(pressed);
+            lifted = lifted.or(picked);
+            if let Some(t) = tool {
+                act = Some(TopAction::Tool(t));
+            }
+            if let Some(t) = lifted {
+                self.tool_drag = Some(crate::toolbar::Drag { tool: t, from_bar: true });
+            }
+            let addr_end = rx - if right_w > 0.0 { 10.0 } else { 6.0 };
 
             // Address field(s); in dual mode split where the panes split.
             let viewing = self.tabs[self.tab].viewer.as_ref().map(|v| (v.origin, v.name.clone()));
@@ -635,21 +635,7 @@ impl App {
             TopAction::MoveWindow => ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag),
             TopAction::Maximize => crate::titlebar::toggle_maximized(ui.ctx()),
             TopAction::Window(b) => crate::titlebar::press(ui.ctx(), b),
-            TopAction::Sidebar => self.run(Cmd::ToggleSidebar),
-            TopAction::Back | TopAction::Forward | TopAction::Up => {
-                self.focus = Focus::Panes;
-                let a = match act {
-                    TopAction::Back => Action::HistoryBack,
-                    TopAction::Forward => Action::HistoryForward,
-                    _ => Action::Back,
-                };
-                if a == Action::Back {
-                    self.pane_mut().go_up(&cfg);
-                } else {
-                    self.handle(Input::Press(a));
-                }
-            }
-            TopAction::Search => self.run(Cmd::FindOrFilter),
+            TopAction::Tool(t) => self.run_tool(t),
             TopAction::Edit(i) => {
                 self.focus = Focus::Panes;
                 self.set_side(i);
@@ -665,7 +651,6 @@ impl App {
             }
             TopAction::SubSearch => self.bar_toggle_search(),
             TopAction::EndTyping => self.osk_cancel(),
-            TopAction::Dual => self.run(Cmd::ToggleDual),
             TopAction::Menu => {
                 self.focus = Focus::Panes;
                 self.handle(Input::Press(Action::Menu));
@@ -722,12 +707,18 @@ impl App {
         let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
+        // The places for buttons at its ends (drawn after the tabs).
+        use crate::toolbar::Zone;
+        let editing = matches!(self.overlay, Some(Overlay::Toolbars));
+        let lw = crate::toolbar::width(&self.cfg, Zone::TabsLeft, TAB_H, editing);
+        let rw = crate::toolbar::width(&self.cfg, Zone::TabsRight, TAB_H, editing);
+        let (lo, hi) = (row.min.x + if lw > 0.0 { lw + 10.0 } else { 0.0 }, row.max.x - if rw > 0.0 { rw + 10.0 } else { 0.0 });
         let mut x = match self.cfg.tabs_align {
-            0 => row.min.x,
-            2 => row.max.x - total,
-            _ => row.center().x - total / 2.0,
+            0 => lo,
+            2 => hi - total,
+            _ => (lo + hi) / 2.0 - total / 2.0,
         }
-        .max(row.min.x);
+        .max(lo);
         let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
         let dragging = self.drag.is_some();
@@ -866,7 +857,16 @@ impl App {
             self.spring_rest(crate::app::SpringAt::Tab(i));
         }
 
-        if let Some((from, to)) = moved {
+        let cfg = self.cfg.clone();
+        let (tl, pl, kl) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsLeft, row.min.x, row, TAB_H, editing);
+        let (tr_, pr, kr) = crate::toolbar::draw_place(ui, &mut self.icons, &cfg, Zone::TabsRight, row.max.x - rw, row, TAB_H, editing);
+        self.tool_targets.extend([tl, tr_]);
+        if let Some(t) = kl.or(kr) {
+            self.tool_drag = Some(crate::toolbar::Drag { tool: t, from_bar: true });
+        }
+        if let Some(t) = pl.or(pr) {
+            Some(TabAct::Tool(t))
+        } else if let Some((from, to)) = moved {
             Some(TabAct::Move(from, to))
         } else if let Some(i) = close {
             Some(TabAct::Close(i))
@@ -1498,19 +1498,6 @@ impl App {
                 }
             }
         });
-        if let Some(a) = viewer_act {
-            use crate::viewer::draw::HeaderAct;
-            match a {
-                HeaderAct::Close => self.request_close_viewer(),
-                HeaderAct::Settings => self.run(Cmd::ViewerSettings),
-                HeaderAct::External => self.run(Cmd::OpenExternal),
-                HeaderAct::Save => self.run(Cmd::ViewerSave),
-                HeaderAct::ToggleMd => self.run(Cmd::ViewerToggleMd),
-                HeaderAct::Link(l) => self.viewer_link(l),
-                HeaderAct::Run(c) => self.run(c),
-                HeaderAct::Volume(v) => self.audio_set_volume(v),
-            }
-        }
         if let Some(a) = usage_act {
             self.usage_act(a);
         }
@@ -1609,10 +1596,26 @@ impl App {
                 }
             }
         }
+        // (Last: closing the viewer may close its tab, and the code above
+        // still looks at it by its number.)
+        if let Some(a) = viewer_act {
+            use crate::viewer::draw::HeaderAct;
+            match a {
+                HeaderAct::Close => self.request_close_viewer(),
+                HeaderAct::Settings => self.run(Cmd::ViewerSettings),
+                HeaderAct::External => self.run(Cmd::OpenExternal),
+                HeaderAct::Save => self.run(Cmd::ViewerSave),
+                HeaderAct::ToggleMd => self.run(Cmd::ViewerToggleMd),
+                HeaderAct::Link(l) => self.viewer_link(l),
+                HeaderAct::Run(c) => self.run(c),
+                HeaderAct::Volume(v) => self.audio_set_volume(v),
+            }
+        }
         match tab_act {
             Some(TabAct::Switch(i)) => self.pick_tab(i),
             Some(TabAct::Close(i)) => self.run(Cmd::CloseTabAt(i)),
             Some(TabAct::Move(from, to)) => self.run(Cmd::MoveTab(from, to)),
+            Some(TabAct::Tool(t)) => self.run_tool(t),
             Some(TabAct::New) => self.run(Cmd::NewTab),
             None => {}
         }
@@ -1680,10 +1683,12 @@ impl App {
         }
         // Viewer settings sit beside the file so changes show live.
         let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live() || k.in_bar());
-        let side = live || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
-        let bottom = live || matches!(self.overlay, Some(Overlay::TermKeys(_)));
+        // (The panel items: nothing dims, the panels above stay in sight.)
+        let toolbars = matches!(self.overlay, Some(Overlay::Toolbars));
+        let side = live || toolbars || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
+        let bottom = live || toolbars || matches!(self.overlay, Some(Overlay::TermKeys(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
-            if in_bar {
+            if in_bar || toolbars {
                 return;
             }
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
@@ -1708,6 +1713,7 @@ impl App {
         let mut conv_ev = None;
         let mut ow_ev = None;
         let mut ver_ev = None;
+        let mut pal_ev = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1748,6 +1754,7 @@ impl App {
                     Some(Overlay::Convert(d)) => conv_ev = crate::convert_ui::draw(ui, d, icons),
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
+                    Some(Overlay::Toolbars) => pal_ev = crate::toolbar::draw_palette(ui, icons, cfg),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0 - if hints.is_empty() { 0.0 } else { 44.0 }).max(240.0);
@@ -1767,6 +1774,15 @@ impl App {
         self.keys_rect = in_bar.then_some(shown.response.rect);
         if dismiss {
             self.overlay = None;
+        }
+        match pal_ev {
+            Some(crate::toolbar::PaletteEv::Pick(tool)) => self.tool_drag = Some(crate::toolbar::Drag { tool, from_bar: false }),
+            Some(crate::toolbar::PaletteEv::Reset) => {
+                self.cfg.toolbars = Default::default();
+                self.cfg.save();
+            }
+            Some(crate::toolbar::PaletteEv::Done) => self.overlay = None,
+            None => {}
         }
         if let Some(c) = run {
             self.overlay = None;
@@ -3143,17 +3159,15 @@ enum TabAct {
     Switch(usize),
     /// Dragged from one place in the row to another.
     Move(usize, usize),
+    /// A button beside the tabs pressed.
+    Tool(crate::toolbar::Tool),
     Close(usize),
     New,
 }
 
 enum TopAction {
-    Sidebar,
-    Back,
-    Forward,
-    Up,
-    Search,
-    Dual,
+    /// A panel button pressed.
+    Tool(crate::toolbar::Tool),
     Menu,
     /// Double click on an address field: type a path there (the whole of it chosen, to copy).
     Edit(usize),
@@ -4062,6 +4076,14 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TABS_ALIGN));
+                                    }
+                                }
+                                SItem::Row(row::TOOLBARS) => {
+                                    // The buttons on the panels: a window of them to drag.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TOOLBARS, "toolbars");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Panel items…"), label_font.clone(), v.text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TOOLBARS));
                                     }
                                 }
                             SItem::Row(_) | SItem::Viewer(_) | SItem::Term(_) => {}

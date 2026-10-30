@@ -466,9 +466,9 @@ pub struct Tab {
     pub usage: Option<Box<crate::usage::Usage>>,
     /// The terminal page (its shells keep running while hidden).
     pub term: Option<Box<crate::terminal::Terminal>>,
-    /// Opened for a document, beside the tab it was opened from: closing
-    /// the document closes it.
-    pub doc: bool,
+    /// Opened for a file to show (a picture, a document…), beside the tab
+    /// it was opened from: closing the file closes it.
+    pub for_file: bool,
 }
 
 /// Where a drag rests to open something: a crumb of a side's address
@@ -488,7 +488,7 @@ pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
-        Tab { pane, for_right: false, viewer: None, usage: None, term: None, doc: false }
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None, for_file: false }
     }
 }
 
@@ -966,6 +966,8 @@ pub enum Overlay {
     Convert(Box<crate::convert_ui::ConvertDlg>),
     OpenWith(Box<crate::openwith::OpenWithDlg>),
     Versions(Box<crate::updates::VersionsDlg>),
+    /// The panel items, to drag onto the top bar and beside the tabs.
+    Toolbars,
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1152,7 +1154,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     let rows = |r: &[usize]| r.iter().map(|r| SItem::Row(*r)).collect::<Vec<_>>();
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
-        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN]),
+        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
         2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
         3 => rows(&[row::OPEN_IN, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
@@ -1241,6 +1243,7 @@ pub mod row {
     pub const WIN_ORDER: usize = 21;
     pub const CLOSE: usize = 22;
     pub const TABS_ALIGN: usize = 23;
+    pub const TOOLBARS: usize = 24;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1496,6 +1499,10 @@ pub struct App {
     pub addr_rects: Vec<(usize, egui::Rect)>,
     /// A tab being dragged along the row: which, and where the mouse took it.
     pub tab_drag: Option<(usize, f32)>,
+    /// A panel button being dragged (Panel items open), and where buttons
+    /// can go this frame.
+    pub tool_drag: Option<crate::toolbar::Drag>,
+    pub tool_targets: Vec<crate::toolbar::Target>,
     /// What can be undone (the last last), and redone.
     pub undo_steps: Vec<crate::ops::Undo>,
     pub redo_steps: Vec<crate::ops::Undo>,
@@ -1683,6 +1690,8 @@ impl App {
             crumb_rects: Vec::new(),
             addr_rects: Vec::new(),
             tab_drag: None,
+            tool_drag: None,
+            tool_targets: Vec::new(),
             undo_steps: Vec::new(),
             redo_steps: Vec::new(),
             side_rects: Vec::new(),
@@ -1998,7 +2007,7 @@ impl App {
                 Msg::Show(what, token) => self.show_from_dbus(what, &token),
                 Msg::View { tab, path, name, origin, source } => {
                     if tab < self.tabs.len() {
-                        self.show_viewer(tab, path, name, origin, Vec::new());
+                        let tab = self.show_viewer(tab, path, name, origin, Vec::new());
                         // Saving goes back into the archive, if it can be written.
                         let writable = self.tabs[tab].pane.loc.dest().is_some();
                         if let Some(v) = self.tabs[tab].viewer.as_mut() {
@@ -2706,6 +2715,11 @@ impl App {
             Overlay::Convert(_) => self.convert_input(a),
             Overlay::OpenWith(_) => self.open_with_input(a),
             Overlay::Versions(_) => self.versions_input(a),
+            Overlay::Toolbars => {
+                if matches!(a, Action::Back | Action::Accept | Action::Menu) {
+                    self.overlay = None;
+                }
+            }
             Overlay::ViewerSettings(_) => self.viewer_settings_input(a),
             Overlay::TermKeys(_) => self.term_keys_input(a),
             Overlay::TermSettings(_) => self.term_settings_input(a),
@@ -3256,13 +3270,14 @@ impl App {
         self.show_viewer(tab, path, e.name, origin, siblings);
     }
 
-    pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
+    /// Show a file in a tab of its own beside `tab`; that tab.
+    pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) -> usize {
         let k = crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).or_else(|| crate::viewer::kind(&path, &name));
-        // A document gets a tab of its own, beside this one.
-        let tab = if k == Some(crate::viewer::Kind::Doc) && !self.tabs[tab].doc {
+        // A file shown gets a tab of its own, beside this one.
+        let tab = if !self.tabs[tab].for_file {
             let loc = self.tabs[tab].pane.loc.clone();
             let mut t = Tab::new(Pane::new(loc, &self.cfg));
-            t.doc = true;
+            t.for_file = true;
             self.tabs.insert(tab + 1, t);
             if self.other_tab > tab {
                 self.other_tab += 1;
@@ -3280,13 +3295,14 @@ impl App {
         v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
         self.range = None;
+        tab
     }
 
     pub fn close_viewer(&mut self) {
-        // A document's own tab goes with it, back to the one it came from.
+        // A shown file's own tab goes with it, back to the one it came from.
         let i = self.tab;
-        if self.tabs[i].doc && self.tabs[i].viewer.is_some() && self.tabs.len() > 1 {
-            self.tabs.remove(i);
+        if self.tabs[i].for_file && self.tabs[i].viewer.is_some() && self.tabs.len() > 1 {
+            let shown = self.tabs.remove(i).viewer.map(|v| v.path);
             if self.other_tab > i {
                 self.other_tab -= 1;
             }
@@ -3296,6 +3312,11 @@ impl App {
             }
             self.keep_sides_apart();
             self.range = None;
+            // Back on the file shown last (the last track played, say).
+            let p = &mut self.tabs[self.tab].pane;
+            if let Some(i) = shown.and_then(|f| p.entries.iter().position(|e| p.loc.entry_path(&e.name).as_deref() == Some(f.as_path()))) {
+                p.set_cursor(i);
+            }
             return;
         }
         let t = &mut self.tabs[self.tab];
@@ -3309,6 +3330,10 @@ impl App {
     }
 
     fn viewer_input(&mut self, a: Action) {
+        // The mouse's back button (Alt+←): the file's tab goes.
+        if a == Action::HistoryBack {
+            return self.request_close_viewer();
+        }
         if self.viewer_text_input(a) || self.viewer_audio_input(a) || self.viewer_video_input(a) {
             return;
         }
@@ -3512,7 +3537,7 @@ impl App {
     }
 
     /// Template folders, the top one first (for the submenus).
-    fn scan_templates(&mut self) {
+    pub(crate) fn scan_templates(&mut self) {
         fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             out.push(dir.to_path_buf());
             if depth >= 3 {
@@ -3536,7 +3561,7 @@ impl App {
         }
     }
 
-    fn templates_menu(&self, i: usize) -> Vec<MenuItem> {
+    pub(crate) fn templates_menu(&self, i: usize) -> Vec<MenuItem> {
         let mut items = Vec::new();
         if i == 0 {
             items.push(item(tr("Empty file"), Cmd::NewFile(None)));
@@ -3610,7 +3635,7 @@ impl App {
         self.overlay = Some(Overlay::Menu(Menu::new("Polka", items)));
     }
 
-    fn build_submenu(&self, kind: SubMenu) -> Menu {
+    pub(crate) fn build_submenu(&self, kind: SubMenu) -> Menu {
         let c = &self.cfg;
         let (title, items) = match kind {
             SubMenu::TermHistory | SubMenu::TermSaved | SubMenu::TermLaunch | SubMenu::TermTabs | SubMenu::TermEntry(..) => return self.term_submenu(kind),
@@ -3751,6 +3776,7 @@ impl App {
                         self.settings_toggle_open(chip);
                     }
                     row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN => self.settings_step(row, 0.0),
+                    row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -3980,6 +4006,10 @@ impl App {
                 self.cfg.win_style = STYLES[(at + if d == 0.0 { 1 } else { d as isize }).rem_euclid(STYLES.len() as isize) as usize];
             }
             row::WIN_SIDE => self.cfg.win_left = !self.cfg.win_left,
+            row::TOOLBARS => {
+                self.overlay = Some(Overlay::Toolbars);
+                return;
+            }
             row::TABS_ALIGN => self.cfg.tabs_align = (self.cfg.tabs_align as isize + if d == 0.0 { 1 } else { d as isize }).rem_euclid(3) as u8,
             row::WIN_ORDER => {
                 let n = crate::titlebar::ORDERS.len() as isize;

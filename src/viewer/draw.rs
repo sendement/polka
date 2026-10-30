@@ -35,6 +35,7 @@ pub fn md_rendered(t: &TextState, prefs: &ViewerPrefs) -> bool {
 fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool {
     let vis = ui.visuals().clone();
     let resp = ui.interact(r, ui.id().with(("viewer-btn", label, r.min.x as i32, r.min.y as i32)), Sense::click()).on_hover_text(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     if on {
         ui.painter().rect_filled(r, 6.0, crate::view::tint(&vis, 0.45));
     } else if resp.hovered() {
