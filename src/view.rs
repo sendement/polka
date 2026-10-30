@@ -181,9 +181,9 @@ impl App {
             self.range = None;
         }
         let mut events = ctx.input(|i| i.events.clone());
-        // Typing in the address bar: its text field takes the keys, only
-        // Enter and Esc are Polka's.
-        if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar()) {
+        // Typing in a text field (the address bar's, a dialog's): it takes
+        // the keys, only Enter and Esc are Polka's.
+        if matches!(&self.overlay, Some(Overlay::Osk(k)) if !k.live()) {
             for ev in events {
                 match ev {
                     egui::Event::Key { key: Key::Enter, pressed: true, .. } => self.osk_submit(),
@@ -194,7 +194,6 @@ impl App {
             }
             return;
         }
-        let osk = matches!(self.overlay, Some(Overlay::Osk(_)));
         // The terminal's own keyboard: real keys go to the shell too.
         if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live()) {
             let _ = self.terminal_keyboard(events);
@@ -232,25 +231,12 @@ impl App {
         for ev in events {
             match ev {
                 egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) if doc => {}
-                egui::Event::Text(t) if osk => {
-                    if let Some(Overlay::Osk(k)) = self.overlay.as_mut() {
-                        k.insert(&t);
-                    }
-                }
-                // Ctrl+V on a real keyboard.
-                egui::Event::Paste(t) if osk => self.osk_paste(Some(t)),
                 // Ctrl+C / X / V come as clipboard events, not keys: the
                 // files' copy, cut and paste.
                 egui::Event::Copy if self.overlay.is_none() => self.run(Cmd::Copy),
                 egui::Event::Cut if self.overlay.is_none() => self.run(Cmd::Cut),
                 egui::Event::Paste(_) if self.overlay.is_none() => self.run(Cmd::Paste),
-                egui::Event::Key { key, pressed: true, modifiers: m, .. } => {
-                    if osk {
-                        self.osk_keyboard(key);
-                    } else {
-                        self.key(key, m);
-                    }
-                }
+                egui::Event::Key { key, pressed: true, modifiers: m, .. } => self.key(key, m),
                 _ => {}
             }
         }
@@ -313,21 +299,6 @@ impl App {
             pos + vec2(a.cos(), a.sin()) * r
         }).collect();
         p.add(egui::Shape::line(pts, Stroke::new(4.0, v.selection.bg_fill)));
-    }
-
-    fn osk_keyboard(&mut self, key: Key) {
-        let Some(Overlay::Osk(k)) = self.overlay.as_mut() else { return };
-        match key {
-            Key::Backspace => k.backspace(),
-            Key::Delete => k.delete(),
-            Key::ArrowLeft => k.caret_by(-1),
-            Key::ArrowRight => k.caret_by(1),
-            Key::Home => k.caret = 0,
-            Key::End => k.caret = k.text.len(),
-            Key::Enter => self.osk_submit(),
-            Key::Escape => self.osk_cancel(),
-            _ => {}
-        }
     }
 
     fn key(&mut self, key: Key, m: egui::Modifiers) {
@@ -1083,6 +1054,8 @@ impl App {
                 (Action::PrevTab, "← →"),
                 (Action::Back, tr("Close")),
             ],
+            // (No keys shown: only OK and Cancel.)
+            Some(Overlay::Osk(k)) if !(self.pad_active || self.touch.active || k.keys_open) => vec![(Action::Menu, tr("OK")), (Action::Back, tr("Cancel"))],
             Some(Overlay::Osk(_)) => vec![
                 (Action::Accept, "⌨"),
                 (Action::Select, tr("Backspace")),
@@ -1691,6 +1664,7 @@ impl App {
         }
         let pad = self.pad;
         let show_pad = self.show_pad();
+        let auto_keys = self.pad_active || self.touch.active;
         let mut run: Option<Cmd> = None;
         let mut menu_click: Option<(usize, usize)> = None;
         let mut osk_key: Option<OskKey> = None;
@@ -1733,7 +1707,7 @@ impl App {
                 egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| {
                     match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
-                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live() || k.in_bar())),
+                    Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live() || k.in_bar()), auto_keys),
                     Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad, self.help_scroll.take()),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
@@ -2661,54 +2635,57 @@ fn keyboard_keys_height(s: f32) -> f32 {
     crate::keyboard::ROWS as f32 * (40.0 + 4.0) * s - 4.0 * s
 }
 
-fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32) -> Option<OskKey> {
+/// `auto_keys`: the pad or the touch screen is in use, the keys show
+/// by themselves; else (the mouse) a button beside the field brings them.
+fn draw_osk(ui: &mut Ui, k: &mut Osk, hidden: bool, scale: f32, auto_keys: bool) -> Option<OskKey> {
     use crate::keyboard::{self, Slot};
     let mut pressed = None;
     let unit = 46.0 * scale;
     let gap = (4.0 * scale).max(2.0);
     let key_h = 40.0 * scale;
-    let width = 15.0 * unit;
+    let keys = auto_keys || k.keys_open || k.live() || k.in_bar();
+    let width = if keys { 15.0 * unit } else { 480.0 };
     ui.set_width(width);
     // Typing into a terminal: no title, the terminal shows where it goes
     // (the address bar the same).
     if !k.live() && !k.in_bar() {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&k.title).strong().size(16.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(keyboard::LAYOUTS[k.layout].name).strong().color(ui.visuals().selection.bg_fill));
-            });
+            if keys {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(keyboard::LAYOUTS[k.layout].name).strong().color(ui.visuals().selection.bg_fill));
+                });
+            }
         });
         ui.add_space(6.0);
     }
 
-    // Text field with caret (none when typing straight into the terminal).
+    // The text field (none when typing straight into the terminal), and
+    // for the mouse a button that brings up the keys.
     if !k.live() && !k.in_bar() {
         let (rect, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
         ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
         ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
-        let font = FontId::proportional(17.0);
-        // Passwords: an asterisk a character, or nothing at all.
-    let shown = |cs: &[char]| -> String {
-        match (k.secret, hidden) {
-            (true, true) => String::new(),
-            (true, false) => "*".repeat(cs.len()),
-            _ => cs.iter().collect(),
+        let mut right = rect.max.x - 6.0;
+        if !auto_keys {
+            let b = Rect::from_center_size(pos2(right - 14.0, rect.center().y), vec2(28.0, 26.0));
+            let r = ui.interact(b, ui.id().with("osk-keys"), Sense::click()).on_hover_text(tr("Keyboard"));
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("Keyboard")));
+            let v = ui.visuals();
+            let fill = if k.keys_open { v.selection.bg_fill.gamma_multiply(0.6) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT };
+            ui.painter().rect_filled(b, 5.0, fill);
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, "⌨", FontId::proportional(17.0), v.strong_text_color());
+            if r.clicked() {
+                k.keys_open = !k.keys_open;
+            }
+            right = b.min.x - 4.0;
         }
-    };
-        let text = shown(&k.text);
-        let before = shown(&k.text[..k.caret]);
-        let pre_w = ui.painter().layout_no_wrap(before, font.clone(), Color32::WHITE).size().x;
-        // Scroll the text so the caret stays visible.
-        let shift = (pre_w - (width - 30.0)).max(0.0);
-        let clip = ui.painter().with_clip_rect(rect.shrink(4.0));
-        clip.text(pos2(rect.min.x + 10.0 - shift, rect.center().y), Align2::LEFT_CENTER, text, font, ui.visuals().strong_text_color());
-        let cx = rect.min.x + 10.0 - shift + pre_w;
-        let blink = (ui.input(|i| i.time) * 2.0) as i64 % 2 == 0;
-        if blink {
-            clip.line_segment([pos2(cx, rect.min.y + 8.0), pos2(cx, rect.max.y - 8.0)], Stroke::new(2.0, ui.visuals().strong_text_color()));
-        }
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        let field = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.min.y + 2.0), pos2(right, rect.max.y - 2.0));
+        osk_field(ui, field, k, ui.id().with("osk-text"), FontId::proportional(17.0), "", hidden);
         ui.add_space(10.0);
+    }
+    if !keys {
+        return pressed;
     }
 
     let (area, _) = ui.allocate_exact_size(vec2(width, keyboard::ROWS as f32 * (key_h + gap) - gap), Sense::hover());
@@ -3146,10 +3123,9 @@ enum TopAction {
     Search,
     Dual,
     Menu,
-    /// Click on an address field's background: make that pane active
-    /// and type a path there (the whole of it chosen, to copy).
+    /// Double click on an address field: type a path there (the whole of it chosen, to copy).
     Edit(usize),
-    /// A folded address field clicked: that pane active.
+    /// An address field (or the folded square) clicked: that pane active.
     Side(usize),
     /// The address, to the clipboard.
     Copy(String),
@@ -3220,8 +3196,12 @@ fn address_field(
     let v = ui.visuals().clone();
     let stroke = if highlight { Stroke::new(1.5, v.selection.bg_fill) } else { v.widgets.noninteractive.bg_stroke };
     ui.painter().rect(rect, 8.0, v.extreme_bg_color, stroke, StrokeKind::Inside);
-    if bg.clicked() {
+    // A double click types the path (all of it chosen); one makes the
+    // pane active.
+    if bg.double_clicked() {
         act = Some(TopAction::Edit(idx));
+    } else if bg.clicked() {
+        act = Some(TopAction::Side(idx));
     } else if moved(&bg) {
         act = Some(TopAction::MoveWindow);
     }
@@ -3327,10 +3307,12 @@ fn address_field(
             rest = Some((idx, crumbs[i].1.clone()));
         }
         painter.galley(pos2(r.min.x + pad / 2.0, r.center().y - g.size().y / 2.0), g, v.text_color());
-        // The last one is where it is: a click there types the path, as
-        // on the field's empty end.
-        if resp.clicked() {
-            act = Some(if i + 1 == n { TopAction::Edit(idx) } else { TopAction::Go(idx, crumbs[i].1.clone()) });
+        // The last one is where it is: a double click there types the
+        // path, as on the field's empty end.
+        if i + 1 == n && resp.double_clicked() {
+            act = Some(TopAction::Edit(idx));
+        } else if resp.clicked() {
+            act = Some(if i + 1 == n { TopAction::Side(idx) } else { TopAction::Go(idx, crumbs[i].1.clone()) });
         }
         x += w;
         if i + 1 < n {
@@ -3390,9 +3372,20 @@ fn bar_field(ui: &mut Ui, rect: Rect, k: &mut Osk, local: bool) -> Option<TopAct
         }
         right = chip.min.x - 6.0;
     }
-    // What's typed: Polka's keyboard (the pad's, the screen's) and the
-    // field share it.
-    let id = ui.id().with("bar-text");
+    let hint = match k.purpose {
+        OskPurpose::Filter { .. } => tr("Filter"),
+        OskPurpose::Search { .. } => tr("Search in subfolders"),
+        _ => tr("Path"),
+    };
+    let field = Rect::from_min_max(inner.min, pos2(right, inner.max.y));
+    osk_field(ui, field, k, ui.id().with("bar-text"), FontId::proportional(16.0), hint, false);
+    act
+}
+
+/// What's being typed, as a text field (the mouse chooses, copies,
+/// pastes in it; the real keyboard types in it); Polka's own keyboard (the
+/// pad's, the screen's) types in the same text.
+fn osk_field(ui: &mut Ui, field: Rect, k: &mut Osk, id: egui::Id, font: FontId, hint: &str, hidden: bool) -> egui::Response {
     let mut s = k.string();
     let outside = k.bar_seen.as_ref().is_none_or(|(t, c)| *t != s || *c != k.caret);
     // (Until the field has the focus, egui keeps no more than a caret: all
@@ -3412,21 +3405,20 @@ fn bar_field(ui: &mut Ui, rect: Rect, k: &mut Osk, local: bool) -> Option<TopAct
         st.store(ui.ctx(), id);
         k.select_all &= !focused;
     }
-    let hint = match k.purpose {
-        OskPurpose::Filter { .. } => tr("Filter"),
-        OskPurpose::Search { .. } => tr("Search in subfolders"),
-        _ => tr("Path"),
-    };
-    let field = Rect::from_min_max(inner.min, pos2(right, inner.max.y));
-    let out = egui::TextEdit::singleline(&mut s)
+    let mut edit = egui::TextEdit::singleline(&mut s)
         .id(id)
         .frame(egui::Frame::NONE)
-        .font(FontId::proportional(16.0))
+        .font(font)
         .hint_text(hint)
+        .password(k.secret)
         .vertical_align(egui::Align::Center)
         .desired_width(field.width())
-        .min_size(field.size())
-        .show(&mut ui.new_child(egui::UiBuilder::new().max_rect(field)));
+        .min_size(field.size());
+    // A password shown as nothing at all.
+    if k.secret && hidden {
+        edit = edit.text_color(Color32::TRANSPARENT);
+    }
+    let out = edit.show(&mut ui.new_child(egui::UiBuilder::new().max_rect(field)));
     let caret = out.cursor_range.map_or(s.chars().count(), |r| r.primary.index.into());
     if out.response.changed() || outside || caret != k.caret {
         k.text = s.chars().collect();
@@ -3434,7 +3426,7 @@ fn bar_field(ui: &mut Ui, rect: Rect, k: &mut Osk, local: bool) -> Option<TopAct
         k.prev = None;
     }
     k.bar_seen = Some((k.string(), k.caret));
-    act
+    out.response.response
 }
 
 /// How far a drag resting on `at` is from opening it (None: it isn't).

@@ -6560,6 +6560,7 @@ fn docs_screens() {
 fn address_screens() {
     use crate::app::{Cmd, Overlay, OskPurpose};
     use egui::{Event, PointerButton, Pos2, pos2};
+    use egui_kittest::kittest::Queryable;
     let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
     let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
     let mut h = harness(dir.clone());
@@ -6592,8 +6593,23 @@ fn address_screens() {
     click(&mut h, pos2(f.max.x - 19.0, f.center().y));
     assert_eq!(h.state().toast.as_ref().map(|t| t.0.as_str()), Some(crate::i18n::tr("Copied")));
     assert!(h.state().overlay.is_none());
-    // A click on its empty part: the path, all of it chosen.
+    // One click on it: nothing typed; a double click: the path, all of it
+    // chosen.
     click(&mut h, pos2(f.max.x - 80.0, f.center().y));
+    assert_eq!(purpose(&h), None, "a single click edits");
+    let at = pos2(f.max.x - 80.0, f.center().y);
+    // (Not so soon that it'd be a triple click.)
+    for _ in 0..60 {
+        h.step();
+    }
+    // (Close together: the harness's frames are a quarter second.)
+    for pressed in [true, false, true] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.step();
+    settle(&mut h);
     assert_eq!(purpose(&h), Some("path"));
     shot(&mut h, "ad2-path-chosen");
     // Typed over: somewhere else, Enter goes there.
@@ -6657,6 +6673,39 @@ fn address_screens() {
     assert!(h.state().overlay.is_none());
     h.state_mut().run(Cmd::ToggleDual);
     h.state_mut().cfg.search_subfolders = true;
+    // Renaming with the mouse: a text field, the keys behind a button.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "note.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Rename);
+    settle(&mut h);
+    // (The keys are painted: the window's width tells.)
+    let keys_shown = |h: &Harness<'static, App>| {
+        let kind = h.state().overlay.as_ref().map(std::mem::discriminant);
+        h.ctx.memory(|m| m.area_rect(egui::Id::new(("overlay", kind, None::<(String, usize)>)))).is_some_and(|r| r.width() > 560.0)
+    };
+    assert!(!keys_shown(&h), "keys for the mouse");
+    shot(&mut h, "ad7-rename-mouse");
+    // Typed on the real keyboard before the extension (the caret's there).
+    type_text(&mut h, "-x");
+    settle(&mut h);
+    match &h.state().overlay {
+        Some(Overlay::Osk(k)) => assert_eq!(k.string(), "note-x.txt"),
+        _ => panic!("no rename"),
+    }
+    let c = h.get_by_label(crate::i18n::tr("Keyboard")).rect().center();
+    click(&mut h, c);
+    assert!(keys_shown(&h), "the button brought no keys");
+    shot(&mut h, "ad8-rename-keys");
+    key(&mut h, egui::Key::Escape, Default::default());
+    assert!(h.state().overlay.is_none());
+    // The pad: the keys straight away.
+    h.state_mut().pad_active = true;
+    h.state_mut().run(Cmd::Rename);
+    settle(&mut h);
+    assert!(keys_shown(&h), "no keys for the pad");
+    h.state_mut().osk_cancel();
+    h.state_mut().pad_active = false;
+    settle(&mut h);
 }
 
 /// Tabs: dragged along the row to another place (the active one stays

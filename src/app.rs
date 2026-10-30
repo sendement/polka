@@ -835,6 +835,9 @@ pub struct Osk {
     pub bar_seen: Option<(String, usize)>,
     /// The bar's field starts with all of it chosen (a path to copy).
     pub select_all: bool,
+    /// The keys asked for with the mouse (the pad and the touch screen
+    /// get them anyway).
+    pub keys_open: bool,
 }
 
 pub use crate::keyboard::OskKey;
@@ -871,6 +874,7 @@ impl Osk {
             prev: None,
             bar_seen: None,
             select_all: false,
+            keys_open: false,
         }
     }
 
@@ -921,12 +925,6 @@ impl Osk {
     pub fn backspace(&mut self) {
         if self.caret > 0 {
             self.caret -= 1;
-            self.text.remove(self.caret);
-        }
-    }
-
-    pub fn delete(&mut self) {
-        if self.caret < self.text.len() {
             self.text.remove(self.caret);
         }
     }

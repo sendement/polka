@@ -195,9 +195,12 @@ Both are typed in the address bar; the search button opens it as last left, its 
 box switches between them. The on-screen keyboard comes up below only for the gamepad or the touch
 screen.
 
-Address bar: a click on the current folder (or the bar's empty end) turns it into a text field with
+Address bar: a double click on the current folder (or the bar's empty end) turns it into a text field with
 the whole path chosen, to copy or to type another one (Ctrl+L too); the mouse over it shows a copy
 button at its end.
+
+Names, passwords and the like are typed in a text field; the on-screen keyboard comes with it for the
+gamepad or the touch screen, for the mouse the ⌨ button beside the field brings it.
 
 On-screen keyboard: ✕/A types the key, □/X erases, △/Y inserts a space, L1/R1 move
 the caret, L2 toggles shift, Create/View switches layout (EN/RU), Options/Menu confirms.
