@@ -968,6 +968,8 @@ pub enum Overlay {
     Versions(Box<crate::updates::VersionsDlg>),
     /// The panel items, to drag onto the top bar and beside the tabs.
     Toolbars,
+    /// The sidebar's places: shown or not, in which order.
+    Places(crate::sidebar::PlacesDlg),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1156,7 +1158,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
         1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
         2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
-        3 => rows(&[row::OPEN_IN, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
+        3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
             v.push(SItem::Row(row::WEB_IMAGES));
@@ -1244,6 +1246,7 @@ pub mod row {
     pub const CLOSE: usize = 22;
     pub const TABS_ALIGN: usize = 23;
     pub const TOOLBARS: usize = 24;
+    pub const PLACES: usize = 25;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1376,6 +1379,29 @@ pub struct SideItem {
 }
 
 impl SideItem {
+    /// What it's known by in the settings (shown or not, its place in the
+    /// order): its path, or what it is.
+    pub fn key(&self) -> String {
+        if self.term {
+            "polka:terminal".into()
+        } else if self.usage {
+            "polka:usage".into()
+        } else if let Location::Steam(_) = self.loc {
+            "polka:steam".into()
+        } else if let Some(d) = &self.drive {
+            d.key()
+        } else if let Some((id, _)) = &self.net {
+            format!("net:{id}")
+        } else if let Some((k, _)) = &self.phone {
+            k.clone()
+        } else {
+            match &self.loc {
+                Location::Local(p) => p.to_string_lossy().into_owned(),
+                l => l.display(),
+            }
+        }
+    }
+
     /// A drive not mounted or a network place not connected: nothing to
     /// open or drop onto yet.
     pub fn offline(&self) -> bool {
@@ -1445,6 +1471,11 @@ pub struct App {
     pub focus: Focus,
     pub side_cursor: usize,
     pub side_items: Vec<SideItem>,
+    /// Every place, the ones not shown too (for the settings).
+    pub side_all: Vec<SideItem>,
+    /// A sidebar place being dragged to another position: which (its key),
+    /// and where the mouse took it.
+    pub side_drag: Option<(String, f32)>,
     side_refreshed: Instant,
     /// Folders on screen (and the trash) with their stamps, for the thread
     /// that wakes the window when one changes; when they were last checked.
@@ -1633,6 +1664,8 @@ impl App {
             focus: Focus::Panes,
             side_cursor: 0,
             side_items: Vec::new(),
+            side_all: Vec::new(),
+            side_drag: None,
             side_refreshed: Instant::now(),
             watched: Default::default(),
             watch_checked: Instant::now(),
@@ -2299,8 +2332,45 @@ impl App {
             net: None,
             phone: None,
         });
+        // In the order chosen, each within its section; then all of them
+        // for the settings, and the ones shown.
+        let rank = |it: &SideItem| self.cfg.side_order.iter().position(|k| *k == it.key()).unwrap_or(usize::MAX);
+        let mut start = 0;
+        while start < v.len() {
+            let end = (start..v.len()).find(|&i| v[i].section != v[start].section).unwrap_or(v.len());
+            v[start..end].sort_by_key(|it| rank(it));
+            start = end;
+        }
+        self.side_all = v.clone();
+        v.retain(|it| !self.cfg.side_hidden.contains(&it.key()));
         self.side_items = v;
         self.side_cursor = self.side_cursor.min(self.side_items.len().saturating_sub(1));
+    }
+
+    /// A sidebar place to another position in its section (`to` counts
+    /// all of the section's, shown or not).
+    pub fn side_move(&mut self, key: &str, to: usize) {
+        let Some(it) = self.side_all.iter().find(|i| i.key() == key) else { return };
+        let section = it.section;
+        let mut keys: Vec<String> = self.side_all.iter().filter(|i| i.section == section).map(|i| i.key()).collect();
+        let Some(from) = keys.iter().position(|k| k == key) else { return };
+        let k = keys.remove(from);
+        keys.insert(to.min(keys.len()), k);
+        self.cfg.side_order.retain(|o| !keys.contains(o));
+        self.cfg.side_order.extend(keys);
+        self.cfg.save();
+        self.refresh_sidebar();
+    }
+
+    /// A sidebar place shown or not.
+    pub fn side_toggle(&mut self, key: &str) {
+        if let Some(i) = self.cfg.side_hidden.iter().position(|k| k == key) {
+            self.cfg.side_hidden.remove(i);
+        } else {
+            self.cfg.side_hidden.push(key.to_string());
+        }
+        self.cfg.save();
+        self.refresh_sidebar();
     }
 
     // ------------------------------------------------------------ input
@@ -2715,6 +2785,7 @@ impl App {
             Overlay::Convert(_) => self.convert_input(a),
             Overlay::OpenWith(_) => self.open_with_input(a),
             Overlay::Versions(_) => self.versions_input(a),
+            Overlay::Places(_) => self.places_input(a),
             Overlay::Toolbars => {
                 if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
@@ -3777,6 +3848,7 @@ impl App {
                     }
                     row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
+                    row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
                         let i = match &self.overlay {
                             Some(Overlay::Settings(st)) => st.layout_chip,
@@ -4008,6 +4080,10 @@ impl App {
             row::WIN_SIDE => self.cfg.win_left = !self.cfg.win_left,
             row::TOOLBARS => {
                 self.overlay = Some(Overlay::Toolbars);
+                return;
+            }
+            row::PLACES => {
+                self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None }));
                 return;
             }
             row::TABS_ALIGN => self.cfg.tabs_align = (self.cfg.tabs_align as isize + if d == 0.0 { 1 } else { d as isize }).rem_euclid(3) as u8,

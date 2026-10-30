@@ -110,6 +110,10 @@ pub struct Config {
     pub tabs_align: u8,
     /// The buttons on the top bar and beside the tabs.
     pub toolbars: crate::toolbar::Toolbars,
+    /// Sidebar places not shown, and the order chosen for them (each kept
+    /// within its section), by their keys.
+    pub side_hidden: Vec<String>,
+    pub side_order: Vec<String>,
     /// The status bar's figures.
     pub status: crate::status::Shown,
     /// The gamepad's button hints: shown while it's in use, always, never.
@@ -284,6 +288,8 @@ impl Default for Config {
             win_left: false,
             tabs_align: 1,
             toolbars: Default::default(),
+            side_hidden: Vec::new(),
+            side_order: Vec::new(),
             pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),
         }

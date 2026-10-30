@@ -1112,7 +1112,8 @@ fn folding_and_locks(h: &mut Harness<'static, App>) {
     assert!(!h.state().cfg.open_videos);
     press(h, &[Action::Accept]); // and on again
     assert!(h.state().cfg.open_videos);
-    press(h, &[Action::Down]);
+    // (Past Sidebar places.)
+    press(h, &[Action::Down, Action::Down]);
     if h.state().cfg.collapse_volumes {
         press(h, &[Action::Accept]);
     }
@@ -7070,4 +7071,92 @@ fn toolbar_screens() {
     assert_eq!(h.state().tabs.len(), 1);
     assert!(h.state().cur_tab().viewer.is_none());
     h.state_mut().cfg.toolbars = Default::default();
+}
+
+/// Sidebar places: hidden from the settings' list, put in another order
+/// there (the mouse, L1 / R1) and in the sidebar itself (the mouse).
+#[test]
+#[ignore]
+fn places_screens() {
+    use crate::app::{Cmd, Overlay};
+    use egui::{Event, PointerButton, Pos2, pos2};
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir);
+    h.state_mut().cfg.side_hidden.clear();
+    h.state_mut().cfg.side_order.clear();
+    h.state_mut().refresh_sidebar();
+    settle(&mut h);
+    let drag = |h: &mut Harness<'static, App>, from: Pos2, to: Pos2| {
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        for k in 1..=8 {
+            h.event(Event::PointerMoved(from + (to - from) * k as f32 / 8.0));
+            h.step();
+        }
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        settle(h);
+    };
+    let places = |h: &Harness<'static, App>| h.state().side_items.iter().filter(|i| i.section == "Places").map(|i| i.key()).collect::<Vec<_>>();
+    let before = places(&h);
+    assert!(before.contains(&"polka:terminal".to_string()));
+    // In the sidebar: Terminal dragged to the top of its section.
+    let at = |h: &Harness<'static, App>, key: &str| {
+        let i = h.state().side_items.iter().position(|it| it.key() == key).unwrap();
+        h.state().side_rects[i]
+    };
+    let first = at(&h, &before[0]);
+    let term = at(&h, "polka:terminal");
+    drag(&mut h, term.center(), pos2(first.center().x, first.min.y + 3.0));
+    assert_eq!(places(&h)[0], "polka:terminal", "{:?}", places(&h));
+    shot(&mut h, "pl1-sidebar-dragged");
+    // The settings' list: Terminal hidden.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::PLACES);
+    }
+    settle(&mut h);
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Places(_))));
+    settle(&mut h);
+    let term_label = crate::i18n::tr("Terminal");
+    let row = h.get_all_by_label(term_label).map(|n| n.rect()).find(|r| r.min.x > 300.0).expect("no Terminal row").center();
+    h.event(Event::PointerMoved(row));
+    h.step();
+    h.event(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert!(h.state().cfg.side_hidden.contains(&"polka:terminal".to_string()));
+    assert!(!places(&h).contains(&"polka:terminal".to_string()));
+    shot(&mut h, "pl2-list");
+    // The mouse in the list: the last place of the section to its top.
+    let rows: Vec<egui::Rect> = h.get_all_by_role(egui::accesskit::Role::CheckBox).map(|n| n.rect()).collect();
+    let in_places = h.state().side_all.iter().filter(|i| i.section == "Places").count();
+    let last = h.state().side_all[in_places - 1].key();
+    drag(&mut h, rows[in_places - 1].center(), pos2(rows[0].center().x, rows[0].min.y + 3.0));
+    assert_eq!(h.state().side_all[0].key(), last, "the list's drag didn't move it");
+    shot(&mut h, "pl3-list-dragged");
+    // The pad: R1 moves the place under the cursor down.
+    if let Some(Overlay::Places(d)) = h.state_mut().overlay.as_mut() {
+        d.cursor = 0;
+    }
+    let top = h.state().side_all[0].key();
+    press(&mut h, &[Action::NextTab]);
+    assert_eq!(h.state().side_all[1].key(), top, "R1 didn't move it");
+    // ✕ on it (the cursor followed it) flips it, and back.
+    let was = h.state().cfg.side_hidden.contains(&top);
+    press(&mut h, &[Action::Accept]);
+    assert_eq!(h.state().cfg.side_hidden.contains(&top), !was);
+    press(&mut h, &[Action::Accept]);
+    assert_eq!(h.state().cfg.side_hidden.contains(&top), was);
+    press(&mut h, &[Action::Back]);
+    assert!(h.state().overlay.is_none());
+    h.state_mut().cfg.side_hidden.clear();
+    h.state_mut().cfg.side_order.clear();
+    h.state_mut().cfg.save();
+    h.state_mut().refresh_sidebar();
 }

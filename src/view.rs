@@ -1126,6 +1126,7 @@ impl App {
             ],
             Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
             Some(Overlay::Versions(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Install")), (Action::Back, tr("Close"))],
+            Some(Overlay::Places(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Show or hide")), (Action::PrevTab, tr("Reorder")), (Action::Back, tr("Close"))],
             Some(Overlay::OpenWith(_)) => vec![
                 (Action::Up, tr("Move")),
                 (Action::Accept, tr("Open")),
@@ -1268,6 +1269,7 @@ impl App {
         let mut clicked = None;
         let mut actions = None;
         let mut resting = None;
+        let mut picked = None;
         let mut rows = Vec::new();
         let side_font = side_font(side_icon);
         let panel = egui::Panel::left("sidebar")
@@ -1287,8 +1289,15 @@ impl App {
                                 ui.label(egui::RichText::new(tr(section)).size(side_section_font(side_icon)).weak());
                             }
                         }
-                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click());
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), (side_icon + 12.0).max(side_font + 18.0)), Sense::click_and_drag());
                         rows.push(rect);
+                        // Dragged along its section: to another position.
+                        if r.drag_started_by(egui::PointerButton::Primary) && !dragging {
+                            picked = Some(it.key());
+                        }
+                        if self.side_drag.as_ref().is_some_and(|(k, _)| *k == it.key()) {
+                            ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.5, ui.visuals().selection.bg_fill), StrokeKind::Inside);
+                        }
                         let is_cursor = focused && i == self.side_cursor;
                         let here = if it.usage {
                             usage_here
@@ -1352,6 +1361,40 @@ impl App {
                     }
                 });
             });
+        if let Some(k) = picked {
+            self.side_drag = Some((k, 0.0));
+        }
+        // A place dragged along its section: where it'd go, and there it
+        // goes when let go.
+        if let Some((key, _)) = self.side_drag.clone().filter(|_| !matches!(self.overlay, Some(Overlay::Places(_)))) {
+            let y = ui.input(|i| i.pointer.latest_pos()).map_or(0.0, |p| p.y);
+            let section = self.side_items.iter().find(|i| i.key() == key).map(|i| i.section);
+            let shown: Vec<(String, Rect)> = self.side_items.iter().zip(&rows).filter(|(i, _)| Some(i.section) == section && i.key() != key).map(|(i, r)| (i.key(), *r)).collect();
+            let slot = shown.iter().filter(|(_, r)| r.center().y < y).count();
+            let line_y = match (shown.get(slot), shown.last()) {
+                (Some((_, r)), _) => r.min.y - 1.0,
+                (None, Some((_, r))) => r.max.y + 1.0,
+                _ => y,
+            };
+            if let Some(r) = rows.first() {
+                ui.ctx().layer_painter(egui::LayerId::new(Order::Foreground, egui::Id::new("side-move"))).line_segment([pos2(r.min.x + 4.0, line_y), pos2(r.max.x - 4.0, line_y)], Stroke::new(3.0, ui.visuals().selection.bg_fill));
+            }
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.side_drag = None;
+                // Its position among all of the section's (shown or not).
+                let all: Vec<String> = self.side_all.iter().filter(|i| Some(i.section) == section && i.key() != key).map(|i| i.key()).collect();
+                let to = match (shown.get(slot), shown.last()) {
+                    (Some((k, _)), _) => all.iter().position(|a| a == k),
+                    (None, Some((k, _))) => all.iter().position(|a| a == k).map(|p| p + 1),
+                    _ => None,
+                };
+                if let Some(to) = to {
+                    self.side_move(&key, to);
+                }
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
         self.side_rects = rows;
         if self.overlay.is_none() {
             self.side_grip(ui.ctx(), panel.response.rect, (thin, wide));
@@ -1683,10 +1726,11 @@ impl App {
         }
         // Viewer settings sit beside the file so changes show live.
         let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live() || k.in_bar());
-        // (The panel items: nothing dims, the panels above stay in sight.)
+        // (The panel items, in the middle: nothing dims, the panels stay in
+        // sight.)
         let toolbars = matches!(self.overlay, Some(Overlay::Toolbars));
-        let side = live || toolbars || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
-        let bottom = live || toolbars || matches!(self.overlay, Some(Overlay::TermKeys(_)));
+        let side = live || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
+        let bottom = live || matches!(self.overlay, Some(Overlay::TermKeys(_)));
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             if in_bar || toolbars {
                 return;
@@ -1714,6 +1758,7 @@ impl App {
         let mut ow_ev = None;
         let mut ver_ev = None;
         let mut pal_ev = None;
+        let mut places = None;
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1755,6 +1800,7 @@ impl App {
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
                     Some(Overlay::Toolbars) => pal_ev = crate::toolbar::draw_palette(ui, icons, cfg),
+                    Some(Overlay::Places(d)) => places = Some(crate::sidebar::draw_places(ui, d, &self.side_all, &cfg.side_hidden, self.side_drag.as_ref().map(|(k, _)| k.as_str()), icons)),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
                         let max_h = (screen.height() - 120.0 - if hints.is_empty() { 0.0 } else { 44.0 }).max(240.0);
@@ -1774,6 +1820,21 @@ impl App {
         self.keys_rect = in_bar.then_some(shown.response.rect);
         if dismiss {
             self.overlay = None;
+        }
+        if let Some((rows, ev)) = places {
+            match ev {
+                Some(crate::sidebar::PlacesEv::Toggle(k)) => self.side_toggle(&k),
+                Some(crate::sidebar::PlacesEv::Pick(k)) => self.side_drag = Some((k, 0.0)),
+                Some(crate::sidebar::PlacesEv::Close) => self.overlay = None,
+                None => {}
+            }
+            if self.side_drag.is_some() {
+                if ctx.input(|i| i.pointer.primary_down()) {
+                    ctx.request_repaint();
+                } else {
+                    self.places_drop(&rows);
+                }
+            }
         }
         match pal_ev {
             Some(crate::toolbar::PaletteEv::Pick(tool)) => self.tool_drag = Some(crate::toolbar::Drag { tool, from_bar: false }),
@@ -2068,7 +2129,11 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     (Some(p), Some(t)) if cfg.thumbnails && !e.is_dir => icons.thumb(p, t),
                     _ => None,
                 };
-                let icon = if thumb.is_some() { None } else { icons.for_entry(e, path.as_deref(), lookup_px(ui, icon_size)) };
+                let icon = match (&pane.loc, &path) {
+                    _ if thumb.is_some() => None,
+                    (crate::vfs::Location::Steam(v), None) if e.is_dir => icons.for_steam(*v, &e.name, lookup_px(ui, icon_size)).or_else(|| icons.for_entry(e, None, lookup_px(ui, icon_size))),
+                    _ => icons.for_entry(e, path.as_deref(), lookup_px(ui, icon_size)),
+                };
                 let text_c = if e.hidden() { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
                 // While dragging: the items picked up fade where they lie, and
                 // the icon under the pointer grows a little.
@@ -4076,6 +4141,14 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TABS_ALIGN));
+                                    }
+                                }
+                                SItem::Row(row::PLACES) => {
+                                    // The sidebar's places: a list to tick and order.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::PLACES, "places");
+                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Sidebar places…"), label_font.clone(), v.text_color());
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::PLACES));
                                     }
                                 }
                                 SItem::Row(row::TOOLBARS) => {

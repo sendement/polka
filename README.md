@@ -32,6 +32,9 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
   and edits inside archives can't be undone. A text file's own edits have their own history
 - Files shown in the viewer (pictures, music, video, text, documents) open in a tab of their own
   beside the folder's; closing one (✕, back or up) goes back there
+- Sidebar places to taste: drag one along its section in the sidebar, or Settings → Files → Sidebar
+  places… to hide any of them (Documents, Music, Steam, Trash…) and put them in another order
+  (the mouse, or L1 / R1 on the gamepad)
 - Panel buttons to taste: Settings → Window → Panel items… shows all of them (copy, paste, cut,
   list or grid, sorting, new folder, create…, terminal, hidden files, undo, redo and more), to drag
   onto the top bar on either side of the address or beside the tabs on either side; drag one off

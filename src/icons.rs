@@ -213,6 +213,13 @@ impl Icons {
         }
     }
 
+    /// A game's icon in a Steam view, by its name there (its recordings
+    /// have no folder to go by).
+    pub fn for_steam(&mut self, v: crate::steam::View, name: &str, size: u16) -> Option<String> {
+        let (exe, img) = crate::steam::view_icon(v, name)?;
+        exe.and_then(|e| self.file_icon(&e, size)).or_else(|| img.map(|i| uri(&i)))
+    }
+
     /// Icon for a directory entry. `path` is the real file when local, which
     /// enables per-file icons.
     pub fn for_entry(&mut self, e: &Entry, path: Option<&Path>, size: u16) -> Option<String> {

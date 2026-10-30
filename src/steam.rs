@@ -298,12 +298,74 @@ struct Cache {
     /// Game folder or prefix → the game's exe (its icon is the sharpest)
     /// and Steam's small icon.
     icons: HashMap<PathBuf, (Option<PathBuf>, Option<PathBuf>)>,
+    /// The same by app id (for what has no folder of its own: a game's
+    /// recordings).
+    by_id: HashMap<u32, (Option<PathBuf>, Option<PathBuf>)>,
     built: bool,
 }
 
 fn cache() -> &'static Mutex<Cache> {
     static C: OnceLock<Mutex<Cache>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(Cache::default()))
+}
+
+/// A picture for an app: Steam's small icon, else a grid icon set for it
+/// (shortcuts), else a square cut from its library art (made once, kept).
+fn icon_or_art(roots: &[PathBuf], users: &[PathBuf], appid: u32) -> Option<PathBuf> {
+    icon_or_art_in(roots, users, appid, &dirs::cache_dir()?.join("polka/steam-icons"))
+}
+
+/// …the squares kept in `kept`.
+fn icon_or_art_in(roots: &[PathBuf], users: &[PathBuf], appid: u32, kept: &Path) -> Option<PathBuf> {
+    if let Some(i) = icon_file(roots, appid) {
+        return Some(i);
+    }
+    let grids: Vec<PathBuf> = users.iter().map(|u| u.join("config/grid")).collect();
+    for g in &grids {
+        for ext in ["png", "jpg"] {
+            let p = g.join(format!("{appid}_icon.{ext}"));
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let made = kept.join(format!("{appid}.png"));
+    if made.is_file() {
+        return Some(made);
+    }
+    // The art, the tall capsule first (its middle is the picture).
+    let mut art: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        let lc = r.join("appcache/librarycache");
+        let dir = lc.join(appid.to_string());
+        for name in ["library_600x900.jpg", "header.jpg", "library_header.jpg"] {
+            // A folder per app (pictures in its hashed folders), or the old
+            // flat names.
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                art.extend(rd.flatten().map(|e| e.path().join(name)).filter(|p| p.is_file()));
+                if dir.join(name).is_file() {
+                    art.push(dir.join(name));
+                }
+            }
+            let flat = lc.join(format!("{appid}_{name}"));
+            if flat.is_file() {
+                art.push(flat);
+            }
+        }
+    }
+    for g in &grids {
+        for name in [format!("{appid}p.png"), format!("{appid}p.jpg"), format!("{appid}.png"), format!("{appid}.jpg")] {
+            if g.join(&name).is_file() {
+                art.push(g.join(name));
+            }
+        }
+    }
+    let img = art.iter().find_map(|p| image::open(p).ok())?;
+    let side = img.width().min(img.height());
+    let square = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side).thumbnail(96, 96);
+    std::fs::create_dir_all(made.parent()?).ok()?;
+    square.save(&made).ok()?;
+    Some(made)
 }
 
 /// The small icon Steam keeps for an app.
@@ -640,10 +702,26 @@ fn build() -> Cache {
         for i in list {
             c.by_path.insert(i.path.clone(), (view, i.name.clone()));
             let exe = i.appid.and_then(|a| exe_of.get(&a).cloned());
-            let img = i.appid.and_then(|a| icon_file(&roots, a));
+            // (The exe's icon is the sharp one: the picture only without it.)
+            let img = if exe.is_some() { i.appid.and_then(|a| icon_file(&roots, a)) } else { i.appid.and_then(|a| icon_or_art(&roots, &users, a)) };
             if exe.is_some() || img.is_some() {
-                c.icons.insert(i.path.clone(), (exe, img));
+                c.icons.insert(i.path.clone(), (exe.clone(), img.clone()));
+                if let Some(a) = i.appid {
+                    c.by_id.insert(a, (exe, img));
+                }
             }
+        }
+    }
+    // A game's recordings: its icon by its id.
+    for i in &recorded {
+        let Some(a) = i.appid else { continue };
+        if c.by_id.contains_key(&a) {
+            continue;
+        }
+        let exe = exe_of.get(&a).cloned();
+        let img = icon_or_art(&roots, &users, a);
+        if exe.is_some() || img.is_some() {
+            c.by_id.insert(a, (exe, img));
         }
     }
     c.lists.insert(View::Games, games);
@@ -774,6 +852,14 @@ pub fn icon(p: &Path) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
     c.icons.get(p).cloned()
 }
 
+/// The same for an entry of a Steam view by its name (a game in
+/// Recordings has no folder to go by).
+pub fn view_icon(v: View, name: &str) -> Option<(Option<PathBuf>, Option<PathBuf>)> {
+    let c = cache().lock().ok()?;
+    let id = c.lists.get(&v)?.iter().find(|i| i.name == name)?.appid?;
+    c.by_id.get(&id).cloned()
+}
+
 /// A recording's name for a file of its own: the game's and its own
 /// ("Portal 2026-10-25 17-30-07").
 pub fn recording_title(mpd: &Path) -> Option<String> {
@@ -837,5 +923,24 @@ mod tests {
     fn text_kv() {
         assert_eq!(kv_line("\t\t\"path\"\t\t\"/run/media/x/SteamLibrary\""), Some(("path".into(), "/run/media/x/SteamLibrary".into())));
         assert_eq!(kv_line("\t{"), None);
+    }
+
+    #[test]
+    fn art_for_an_icon() {
+        // No small icon: a square from the tall capsule, made once.
+        let t = std::env::temp_dir().join(format!("polka-steam-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let root = t.join("steam");
+        let hashed = root.join("appcache/librarycache/4242/0123abcd");
+        std::fs::create_dir_all(&hashed).unwrap();
+        image::RgbImage::from_pixel(60, 90, image::Rgb([10, 200, 30])).save(hashed.join("library_600x900.jpg")).unwrap();
+        let kept = t.join("kept");
+        let made = icon_or_art_in(std::slice::from_ref(&root), &[], 4242, &kept).expect("no art");
+        assert_eq!(made, kept.join("4242.png"));
+        let img = image::open(&made).unwrap();
+        assert_eq!(img.width(), img.height());
+        // Nothing at all: nothing.
+        assert_eq!(icon_or_art_in(std::slice::from_ref(&root), &[], 4343, &kept), None);
+        let _ = std::fs::remove_dir_all(&t);
     }
 }
