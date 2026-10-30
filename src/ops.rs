@@ -162,6 +162,40 @@ pub struct Job {
     pub started: Instant,
     /// Where it goes, for the progress panel ("→ Music").
     pub target: String,
+    /// What it did, to be undone: filled as it goes; `no_undo` once it
+    /// did something that can't be (replaced files, things out of archives).
+    pub did: Mutex<Undo>,
+    pub no_undo: AtomicBool,
+    /// Done: the step for the history, and which way it went.
+    pub history: Mutex<Option<(Undo, History)>>,
+}
+
+/// A step that can be undone (and then redone): what was moved (from,
+/// to), made, and put in the trash. Undoing moves things back, puts what
+/// was made in the trash and takes what was trashed out of it; redoing the
+/// other way round.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Undo {
+    /// What it was ("Moving", "Renaming"…), for the menu.
+    pub label: String,
+    pub moved: Vec<(PathBuf, PathBuf)>,
+    pub created: Vec<PathBuf>,
+    pub trashed: Vec<PathBuf>,
+}
+
+impl Undo {
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_empty() && self.created.is_empty() && self.trashed.is_empty()
+    }
+}
+
+/// Where a finished step goes in the history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum History {
+    /// Something new was done (what was undone can't be redone now).
+    New,
+    Undone,
+    Redone,
 }
 
 impl Job {
@@ -182,6 +216,9 @@ impl Job {
             current: Default::default(),
             started: Instant::now(),
             target: String::new(),
+            did: Default::default(),
+            no_undo: AtomicBool::new(false),
+            history: Mutex::new(None),
         }
     }
 
@@ -269,6 +306,8 @@ pub enum Op {
     Extract { archive: PathBuf, dest: PathBuf },
     /// Delete / rename / mkdir inside an archive.
     ArchiveEdit { archive: PathBuf, plan: Plan, label: &'static str },
+    /// A step of the history undone (`back`) or redone.
+    History { step: Undo, back: bool },
 }
 
 pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
@@ -297,6 +336,19 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             (*label, vec![Location::Archive { archive: archive.clone(), inner: String::new() }])
         }
         Op::Elevated { label, touches, .. } => (*label, touches.clone()),
+        Op::History { step, back } => {
+            let mut t: Vec<Location> = step
+                .moved
+                .iter()
+                .flat_map(|(a, b)| [a, b])
+                .chain(&step.created)
+                .chain(&step.trashed)
+                .filter_map(|p| p.parent())
+                .map(|d| Location::Local(d.to_path_buf()))
+                .collect();
+            t.dedup();
+            (if *back { tr("Undoing") } else { tr("Redoing") }, t)
+        }
     };
     // Editing an archive changes its folder too (size, and the number of
     // volumes for a split one).
@@ -329,6 +381,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             _ => String::new(),
         },
         Op::Delete { .. } | Op::Elevated { .. } => String::new(),
+        Op::History { step, .. } => step.label.clone(),
     };
     let job = Arc::new(Job {
         label: label.to_string(),
@@ -345,9 +398,15 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         op: Some(op.clone()),
         need_password: Mutex::new(None),
         denied: AtomicBool::new(false),
+        did: Default::default(),
+        no_undo: AtomicBool::new(false),
+        history: Mutex::new(None),
     });
     let j = job.clone();
     std::thread::spawn(move || {
+        // Undoing and redoing are their own steps; what can't be undone
+        // (deleting for good, sudo, inside archives) has none.
+        let undoable = !matches!(op, Op::Delete { .. } | Op::Elevated { .. } | Op::ArchiveEdit { .. } | Op::Restore { .. } | Op::History { .. });
         let r = run(op, &j).map_err(|e| {
             if let Some(np) = vfs::need_password(&e) {
                 *j.need_password.lock().unwrap() = Some((np.archive.clone(), np.wrong));
@@ -357,6 +416,13 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             }
             e.to_string()
         });
+        if undoable && r.is_ok() && !j.no_undo.load(Ordering::Relaxed) {
+            let mut step = std::mem::take(&mut *j.did.lock().unwrap());
+            if !step.is_empty() {
+                step.label = j.label.clone();
+                *j.history.lock().unwrap() = Some((step, History::New));
+            }
+        }
         *j.result.lock().unwrap() = Some(r);
         *j.finished_at.lock().unwrap() = Some(Instant::now());
         wake();
@@ -382,9 +448,29 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             job.total.store(paths.len() as u64, Ordering::Relaxed);
             trash::delete_all(&paths).map_err(|e| io::Error::other(e.to_string()))?;
             job.done.store(paths.len() as u64, Ordering::Relaxed);
+            job.did.lock().unwrap().trashed = paths;
             Ok(())
         }
-        Op::Convert { items, trash, archive, tables } => crate::convert::run(&items, trash, &archive, &tables, job),
+        Op::Convert { items, trash, archive, tables } => {
+            // What's new beside the originals (and in Videos/Steam) was
+            // made; originals gone were trashed.
+            let mut dirs: Vec<PathBuf> = items.iter().filter_map(|i| i.src.parent()).map(Path::to_path_buf).collect();
+            if items.iter().any(|i| crate::steam::is_recording(&i.src)) {
+                if let Some(v) = dirs::video_dir().or_else(|| dirs::home_dir().map(|h| h.join("Videos"))) {
+                    dirs.push(v.join("Steam"));
+                }
+            }
+            dirs.sort();
+            dirs.dedup();
+            let before = listing(&dirs);
+            let r = crate::convert::run(&items, trash, &archive, &tables, job);
+            let mut did = job.did.lock().unwrap();
+            did.created = listing(&dirs).difference(&before).cloned().collect();
+            if trash {
+                did.trashed = items.iter().map(|i| i.src.clone()).filter(|p| !p.exists()).collect();
+            }
+            r
+        }
         Op::Restore { items, policy } => {
             job.total.store(items.iter().map(|(from, _)| tree_size(from)).sum(), Ordering::Relaxed);
             for (from, to) in items {
@@ -413,8 +499,26 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             }
             Ok(())
         }
-        Op::Compress { sources, out, opts } => compress(&sources, &out, &opts, job),
-        Op::Extract { archive, dest } => extract_all(&archive, &dest, job),
+        Op::Compress { sources, out, opts } => {
+            let dir = vec![out.parent().unwrap_or(Path::new("/")).to_path_buf()];
+            let before = listing(&dir);
+            let r = compress(&sources, &out, &opts, job);
+            job.did.lock().unwrap().created = listing(&dir).difference(&before).cloned().collect();
+            r
+        }
+        Op::Extract { archive, dest } => {
+            // A new folder for it, or what's new in the one there was.
+            let fresh = dest.symlink_metadata().is_err();
+            let before = if fresh { HashSet::new() } else { listing(std::slice::from_ref(&dest)) };
+            let r = extract_all(&archive, &dest, job);
+            job.did.lock().unwrap().created = if fresh {
+                if dest.exists() { vec![dest.clone()] } else { Vec::new() }
+            } else {
+                listing(std::slice::from_ref(&dest)).difference(&before).cloned().collect()
+            };
+            r
+        }
+        Op::History { step, back } => undo_step(&step, back, job),
         Op::Elevated { steps, pw, .. } => run_elevated(&steps, &pw, job),
         Op::ArchiveEdit { archive, plan, .. } => {
             job.total.store(archive_rw::estimate(&archive, &plan), Ordering::Relaxed);
@@ -615,7 +719,9 @@ fn transfer_to_dir(sources: &[Location], dest: &Path, mv: bool, policy: Conflict
                 }
                 if same_dir {
                     if !mv {
-                        copy_tree(src, &unique_path(dest, &name), job)?;
+                        let to = unique_path(dest, &name);
+                        copy_tree(src, &to, job)?;
+                        job.did.lock().unwrap().created.push(to);
                     }
                     continue;
                 }
@@ -623,7 +729,17 @@ fn transfer_to_dir(sources: &[Location], dest: &Path, mv: bool, policy: Conflict
                     job.tick(tree_size(src))?;
                     continue;
                 };
+                // Replacing (or merging into) what was there can't be undone.
+                if target.symlink_metadata().is_ok() {
+                    job.no_undo.store(true, Ordering::Relaxed);
+                }
                 if mv { move_path(src, &target, job)? } else { copy_tree(src, &target, job)? }
+                let mut did = job.did.lock().unwrap();
+                if mv {
+                    did.moved.push((src.clone(), target));
+                } else {
+                    did.created.push(target);
+                }
             }
             Location::Archive { archive, inner } => {
                 // Stage first so name clashes get resolved like local copies.
@@ -636,7 +752,9 @@ fn transfer_to_dir(sources: &[Location], dest: &Path, mv: bool, policy: Conflict
                 let r = r.and_then(|_| place_from_stage(&stage, dest, policy, job));
                 let _ = std::fs::remove_dir_all(&stage);
                 r?;
+                // (Taken out of an archive: it doesn't go back in.)
                 if mv {
+                    job.no_undo.store(true, Ordering::Relaxed);
                     moved_out.entry(archive.clone()).or_default().push(inner.clone());
                 }
             }
@@ -751,11 +869,82 @@ fn staging_dir(dest: &Path) -> io::Result<PathBuf> {
 fn place_from_stage(stage: &Path, dest: &Path, policy: Conflict, job: &Job) -> io::Result<()> {
     for e in std::fs::read_dir(stage)?.flatten() {
         if let Some(target) = resolve(dest, &e.file_name().to_string_lossy(), policy) {
+            if target.symlink_metadata().is_ok() {
+                job.no_undo.store(true, Ordering::Relaxed);
+            }
             // Progress was already counted while extracting.
             move_path(&e.path(), &target, &Job::detached())?;
+            job.did.lock().unwrap().created.push(target);
         }
     }
-    let _ = job;
+    Ok(())
+}
+
+/// What's in these folders (the paths of their items).
+fn listing(dirs: &[PathBuf]) -> HashSet<PathBuf> {
+    dirs.iter().filter_map(|d| std::fs::read_dir(d).ok()).flat_map(|rd| rd.flatten().map(|e| e.path())).collect()
+}
+
+/// Undo a step (`back`) or redo it. Nothing is put over what's there now.
+fn undo_step(step: &Undo, back: bool, job: &Job) -> io::Result<()> {
+    job.items.store(true, Ordering::Relaxed);
+    job.total.store((step.moved.len() + step.created.len() + step.trashed.len()) as u64, Ordering::Relaxed);
+    let free = |p: &Path| -> io::Result<()> {
+        if p.symlink_metadata().is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} {}", p.display(), tr("already exists"))));
+        }
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        Ok(())
+    };
+    // Out of the trash: the one last trashed from there.
+    let restore = |p: &Path| -> io::Result<()> {
+        let item = crate::trashbin::find(p).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{}: {}", tr("Not in the trash"), p.display())))?;
+        free(p)?;
+        move_path(&item, p, &Job::detached())?;
+        if let Some(info) = crate::trashbin::info_of(&item) {
+            let _ = std::fs::remove_file(info);
+        }
+        Ok(())
+    };
+    let to_trash = |ps: &[PathBuf]| -> io::Result<()> {
+        let there: Vec<&PathBuf> = ps.iter().filter(|p| p.symlink_metadata().is_ok()).collect();
+        if there.is_empty() {
+            return Ok(());
+        }
+        trash::delete_all(there).map_err(|e| io::Error::other(e.to_string()))
+    };
+    if back {
+        for (from, to) in step.moved.iter().rev() {
+            job.now_on(to);
+            free(from)?;
+            move_path(to, from, &Job::detached())?;
+            job.tick(1)?;
+        }
+        to_trash(&step.created)?;
+        job.tick(step.created.len() as u64)?;
+        for p in &step.trashed {
+            job.now_on(p);
+            restore(p)?;
+            job.tick(1)?;
+        }
+    } else {
+        for (from, to) in &step.moved {
+            job.now_on(from);
+            free(to)?;
+            move_path(from, to, &Job::detached())?;
+            job.tick(1)?;
+        }
+        for p in &step.created {
+            job.now_on(p);
+            restore(p)?;
+            job.tick(1)?;
+        }
+        to_trash(&step.trashed)?;
+        job.tick(step.trashed.len() as u64)?;
+    }
+    *job.history.lock().unwrap() = Some((step.clone(), if back { History::Undone } else { History::Redone }));
     Ok(())
 }
 

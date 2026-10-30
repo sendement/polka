@@ -6458,7 +6458,17 @@ fn docs_screens() {
             settle(h);
         }
     };
-    // The PDF: two pages; ← → page, the triggers zoom.
+    // The PDF: two pages; ← → page, the triggers zoom. It has a tab of
+    // its own beside the folder's; closing it goes back there.
+    let tabs = h.state().tabs.len();
+    open(&mut h, "a-report.pdf");
+    assert_eq!(h.state().tabs.len(), tabs + 1, "no tab of its own");
+    assert!(h.state().cur_tab().doc && h.state().tab == 1);
+    h.state_mut().close_viewer();
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), tabs);
+    assert_eq!(h.state().tab, 0);
+    assert_eq!(h.state().pane().current().map(|e| e.name.as_str()), Some("a-report.pdf"));
     open(&mut h, "a-report.pdf");
     assert!(matches!(doc(&h).body, Body::Pdf(_)), "{}", match &doc(&h).body {
         Body::Failed(e) => e.clone(),
@@ -6839,4 +6849,114 @@ fn tab_order_screens() {
     shot(&mut h, "to4-settings");
     h.state_mut().overlay = None;
     h.state_mut().cfg.tabs_align = 1;
+}
+
+/// Undo and redo: renaming, the trash, copying, moving, a new folder,
+/// packing; Ctrl+Z / Ctrl+Shift+Z and the app menu (for the pad); a text
+/// file's own edits.
+#[test]
+#[ignore]
+fn history_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::ops::Op;
+    use crate::vfs::Location;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("history");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("box")).unwrap();
+    std::fs::write(dir.join("a.txt"), "first").unwrap();
+    std::fs::write(dir.join("b.txt"), "second").unwrap();
+    let mut h = harness(dir.clone());
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    let ctrl_shift = egui::Modifiers { shift: true, ..ctrl };
+    let at = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("{name} not listed"));
+        h.state_mut().pane_mut().set_cursor(i);
+    };
+    let undo = |h: &mut Harness<'static, App>, redo: bool| {
+        key(h, egui::Key::Z, if redo { ctrl_shift } else { ctrl });
+        wait_jobs(h);
+        settle(h);
+    };
+    // Renaming.
+    at(&mut h, "a.txt");
+    h.state_mut().run(Cmd::Rename);
+    osk_type(&mut h, "renamed.txt");
+    h.state_mut().osk_submit();
+    settle(&mut h);
+    assert!(dir.join("renamed.txt").exists());
+    undo(&mut h, false);
+    assert!(dir.join("a.txt").exists() && !dir.join("renamed.txt").exists(), "rename not undone");
+    undo(&mut h, true);
+    assert!(dir.join("renamed.txt").exists() && !dir.join("a.txt").exists(), "rename not redone");
+    // The trash: back out of it, and in again.
+    h.state_mut().start(Op::Trash { paths: vec![dir.join("b.txt")] });
+    wait_jobs(&mut h);
+    assert!(!dir.join("b.txt").exists());
+    undo(&mut h, false);
+    assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "second", "not out of the trash");
+    undo(&mut h, true);
+    assert!(!dir.join("b.txt").exists(), "not trashed again");
+    undo(&mut h, false);
+    assert!(dir.join("b.txt").exists());
+    // Copying into the folder: the copy goes; moving: it comes back.
+    h.state_mut().start(Op::Copy { sources: vec![Location::Local(dir.join("b.txt"))], dest: crate::vfs::Dest::Dir(dir.join("box")), policy: crate::ops::Conflict::Rename });
+    wait_jobs(&mut h);
+    assert!(dir.join("box/b.txt").exists());
+    undo(&mut h, false);
+    assert!(!dir.join("box/b.txt").exists() && dir.join("b.txt").exists(), "copy not undone");
+    h.state_mut().start(Op::Move { sources: vec![Location::Local(dir.join("renamed.txt"))], dest: crate::vfs::Dest::Dir(dir.join("box")), policy: crate::ops::Conflict::Rename });
+    wait_jobs(&mut h);
+    assert!(dir.join("box/renamed.txt").exists());
+    undo(&mut h, false);
+    assert!(dir.join("renamed.txt").exists() && !dir.join("box/renamed.txt").exists(), "move not undone");
+    // A new folder, and packing.
+    h.state_mut().run(Cmd::NewFolder);
+    osk_type(&mut h, "fresh");
+    h.state_mut().osk_submit();
+    settle(&mut h);
+    assert!(dir.join("fresh").is_dir());
+    let opts = crate::ops::CompressOpts::new(crate::ops::ArchiveFormat::Zip);
+    h.state_mut().start(Op::Compress { sources: vec![dir.join("b.txt")], out: dir.join("packed.zip"), opts });
+    wait_jobs(&mut h);
+    assert!(dir.join("packed.zip").exists());
+    // The menu says what comes next (and does it, for the pad).
+    h.state_mut().open_app_menu();
+    settle(&mut h);
+    let undo_label = format!("{}: {}", crate::i18n::tr("Undo"), crate::i18n::tr("Compressing"));
+    shot(&mut h, "hi1-menu");
+    menu_pick(&mut h, &undo_label);
+    wait_jobs(&mut h);
+    assert!(!dir.join("packed.zip").exists(), "packing not undone");
+    undo(&mut h, false);
+    assert!(!dir.join("fresh").exists(), "new folder not undone");
+    undo(&mut h, true);
+    assert!(dir.join("fresh").is_dir(), "new folder not redone");
+    // Something new: nothing to redo after it.
+    h.state_mut().start(Op::Trash { paths: vec![dir.join("fresh")] });
+    wait_jobs(&mut h);
+    assert!(h.state().redo_steps.is_empty());
+    // A text file shown: Ctrl+Z is its own.
+    at(&mut h, "b.txt");
+    h.state_mut().run(Cmd::OpenInViewer);
+    settle(&mut h);
+    type_text(&mut h, "x");
+    settle(&mut h);
+    let text = |h: &Harness<'static, App>| match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(crate::viewer::Content::Text(t)) => t.doc.text.clone(),
+        _ => panic!("no text"),
+    };
+    assert!(text(&h).contains('x'));
+    let steps = h.state().undo_steps.len();
+    h.state_mut().run(Cmd::Undo);
+    settle(&mut h);
+    assert_eq!(text(&h), "second");
+    assert_eq!(h.state().undo_steps.len(), steps, "the files' history was used");
+    h.state_mut().close_viewer();
+    assert!(matches!(h.state().overlay, None | Some(Overlay::Menu(_))));
 }

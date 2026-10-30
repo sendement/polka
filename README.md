@@ -26,6 +26,11 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Password-protected archives: zip (ZipCrypto/AES) via libarchive, 7z and rar via the `7z` tool;
   Polka asks for the password (hidden input) and retries. Passwords are kept in memory only
 - Name clashes ask: keep both, replace (folders merge), skip
+- Undo and redo (Ctrl+Z / Ctrl+Shift+Z, or the app menu on the gamepad): renaming, the trash,
+  copying, moving, new folders and files, packing, extracting, converting; what's undone goes to
+  the trash rather than away, and comes back from it on redo. Replacing files, deleting for good
+  and edits inside archives can't be undone. A text file's own edits have their own history
+- Documents open in a tab of their own beside the folder's; closing one goes back there
 - Quick filter (live, as you type) and recursive search
 - Settings (≡ → Settings…): highlight colour from presets or your own saved mixes, icon sizes for
   the sidebar, list and grid, interface scale, icon theme with live preview

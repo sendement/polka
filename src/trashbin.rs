@@ -79,6 +79,26 @@ pub fn origin(item: &Path) -> Option<PathBuf> {
     Some(top.join(p))
 }
 
+/// The item in a trash that came from `original` (the last trashed, when
+/// there are several).
+pub fn find(original: &Path) -> Option<PathBuf> {
+    let when = |item: &Path| -> String {
+        info_of(item)
+            .and_then(|i| std::fs::read_to_string(i).ok())
+            .and_then(|t| t.lines().map(str::trim).find_map(|l| l.strip_prefix("DeletionDate=")).map(str::to_string))
+            .unwrap_or_default()
+    };
+    // Its name in the trash is its own, or that with a number added.
+    let name = original.file_name()?.to_string_lossy().into_owned();
+    roots()
+        .into_iter()
+        .filter_map(|r| std::fs::read_dir(r.join("files")).ok())
+        .flat_map(|rd| rd.flatten().map(|e| e.path()))
+        .filter(|item| item.file_name().is_some_and(|n| n.to_string_lossy().starts_with(name.split('.').next().unwrap_or(&name))))
+        .filter(|item| origin(item).as_deref() == Some(original))
+        .max_by_key(|item| when(item))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

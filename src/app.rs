@@ -466,6 +466,9 @@ pub struct Tab {
     pub usage: Option<Box<crate::usage::Usage>>,
     /// The terminal page (its shells keep running while hidden).
     pub term: Option<Box<crate::terminal::Terminal>>,
+    /// Opened for a document, beside the tab it was opened from: closing
+    /// the document closes it.
+    pub doc: bool,
 }
 
 /// Where a drag rests to open something: a crumb of a side's address
@@ -485,7 +488,7 @@ pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
-        Tab { pane, for_right: false, viewer: None, usage: None, term: None }
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None, doc: false }
     }
 }
 
@@ -620,6 +623,9 @@ pub enum Cmd {
     CloseTabAt(usize),
     /// A tab to another place in the row.
     MoveTab(usize, usize),
+    /// The last change undone (a text file's, in its editor), or redone.
+    Undo,
+    Redo,
     /// Browse for a picture to use as a pinned folder's icon.
     PickIconFile(PathBuf),
     NewFolder,
@@ -1490,6 +1496,9 @@ pub struct App {
     pub addr_rects: Vec<(usize, egui::Rect)>,
     /// A tab being dragged along the row: which, and where the mouse took it.
     pub tab_drag: Option<(usize, f32)>,
+    /// What can be undone (the last last), and redone.
+    pub undo_steps: Vec<crate::ops::Undo>,
+    pub redo_steps: Vec<crate::ops::Undo>,
     pub side_rects: Vec<egui::Rect>,
     pub tab_rects: Vec<egui::Rect>,
     pub addr_mid: Option<f32>,
@@ -1674,6 +1683,8 @@ impl App {
             crumb_rects: Vec::new(),
             addr_rects: Vec::new(),
             tab_drag: None,
+            undo_steps: Vec::new(),
+            redo_steps: Vec::new(),
             side_rects: Vec::new(),
             tab_rects: Vec::new(),
             addr_mid: None,
@@ -2020,6 +2031,7 @@ impl App {
         let mut report = Vec::new();
         let mut ask = Vec::new();
         let mut ended = Vec::new();
+        let mut steps = Vec::new();
         self.jobs.retain(|j| {
             let fin = *j.finished_at.lock().unwrap();
             match fin {
@@ -2031,10 +2043,20 @@ impl App {
                     } else if let (Some(r), Some(op)) = (j.result.lock().unwrap().clone(), j.op.clone()) {
                         ended.push((op, r, j.denied.load(std::sync::atomic::Ordering::Relaxed), j.label.clone()));
                     }
+                    if let Some(h) = j.history.lock().unwrap().take() {
+                        steps.push(h);
+                    }
                     false
                 }
             }
         });
+        for (step, how) in steps {
+            match how {
+                crate::ops::History::New => self.remember(step),
+                crate::ops::History::Undone => self.redo_steps.push(step),
+                crate::ops::History::Redone => self.undo_steps.push(step),
+            }
+        }
         // Not allowed: again as administrator; else errors are reported.
         for (op, r, denied, label) in ended {
             if !self.elevated_done(&op, &r, denied) {
@@ -2969,6 +2991,7 @@ impl App {
                 }
                 match std::fs::rename(&old, &new) {
                     Ok(()) => {
+                        self.remember(crate::ops::Undo { label: tr("Rename").into(), moved: vec![(old.clone(), new.clone())], ..Default::default() });
                         let p = self.pane_mut();
                         p.selected.clear();
                         p.reload(&cfg);
@@ -3052,6 +3075,7 @@ impl App {
                 match dest {
                     Dest::Dir(dir) => match write(&dir.join(&text)) {
                         Ok(()) => {
+                            self.remember(crate::ops::Undo { label: tr("New document").into(), created: vec![dir.join(&text)], ..Default::default() });
                             let p = self.pane_mut();
                             p.reload(&cfg);
                             if let Some(i) = p.entries.iter().position(|e| e.name == text) {
@@ -3089,6 +3113,7 @@ impl App {
                 }
                 match std::fs::create_dir(dir.join(&text)) {
                     Ok(()) => {
+                        self.remember(crate::ops::Undo { label: tr("New folder").into(), created: vec![dir.join(&text)], ..Default::default() });
                         let p = self.pane_mut();
                         p.reload(&cfg);
                         if let Some(i) = p.entries.iter().position(|e| e.name == text) {
@@ -3233,6 +3258,24 @@ impl App {
 
     pub fn show_viewer(&mut self, tab: usize, path: PathBuf, name: String, origin: usize, siblings: Vec<PathBuf>) {
         let k = crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).or_else(|| crate::viewer::kind(&path, &name));
+        // A document gets a tab of its own, beside this one.
+        let tab = if k == Some(crate::viewer::Kind::Doc) && !self.tabs[tab].doc {
+            let loc = self.tabs[tab].pane.loc.clone();
+            let mut t = Tab::new(Pane::new(loc, &self.cfg));
+            t.doc = true;
+            self.tabs.insert(tab + 1, t);
+            if self.other_tab > tab {
+                self.other_tab += 1;
+            }
+            if tab == self.tab {
+                self.tab = tab + 1;
+            } else if self.tab > tab {
+                self.tab += 1;
+            }
+            tab + 1
+        } else {
+            tab
+        };
         let mut v = Viewer::open_as(k, path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
         v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
@@ -3240,6 +3283,21 @@ impl App {
     }
 
     pub fn close_viewer(&mut self) {
+        // A document's own tab goes with it, back to the one it came from.
+        let i = self.tab;
+        if self.tabs[i].doc && self.tabs[i].viewer.is_some() && self.tabs.len() > 1 {
+            self.tabs.remove(i);
+            if self.other_tab > i {
+                self.other_tab -= 1;
+            }
+            self.tab = i.saturating_sub(1).min(self.tabs.len() - 1);
+            if self.cfg.dual && self.tab == self.other_tab {
+                self.tab = (0..self.tabs.len()).find(|&k| k != self.other_tab).unwrap_or(0);
+            }
+            self.keep_sides_apart();
+            self.range = None;
+            return;
+        }
         let t = &mut self.tabs[self.tab];
         if let Some(v) = t.viewer.take() {
             // Back on the file that was shown last.
@@ -3522,6 +3580,13 @@ impl App {
         // Running copies and the like can be stopped from the pad too.
         if self.jobs.iter().any(|j| j.result.lock().map(|r| r.is_none()).unwrap_or(false)) {
             items.push(item(tr("Cancel operations"), Cmd::CancelJobs));
+        }
+        // Undo / redo, saying what (when there's something).
+        if let Some(u) = self.undo_steps.last() {
+            items.push(item(&format!("{}: {}", tr("Undo"), u.label), Cmd::Undo));
+        }
+        if let Some(u) = self.redo_steps.last() {
+            items.push(item(&format!("{}: {}", tr("Redo"), u.label), Cmd::Redo));
         }
         items.extend([
             item(tr("New tab"), Cmd::NewTab),
@@ -4090,6 +4155,15 @@ impl App {
         self.pane_mut().pending_focus = Some(name);
     }
 
+    /// A new step for the history (what was undone can't be redone after it).
+    pub(crate) fn remember(&mut self, step: crate::ops::Undo) {
+        self.undo_steps.push(step);
+        if self.undo_steps.len() > 100 {
+            self.undo_steps.remove(0);
+        }
+        self.redo_steps.clear();
+    }
+
     pub(crate) fn start(&mut self, op: Op) {
         let j = ops::spawn(op, self.wake());
         self.jobs.push(j);
@@ -4466,6 +4540,25 @@ impl App {
                     }
                     self.keep_sides_apart();
                     self.range = None;
+                }
+            }
+            Cmd::Undo | Cmd::Redo => {
+                let back = matches!(cmd, Cmd::Undo);
+                // A text file shown: its own edits.
+                if let Some(crate::viewer::Content::Text(t)) = self.tabs[self.tab].viewer.as_mut().map(|v| &mut v.content) {
+                    if !(if back { t.undo() } else { t.redo() }) {
+                        self.toast(tr(if back { "Nothing to undo" } else { "Nothing to redo" }), false);
+                    }
+                    return;
+                }
+                let step = if back { self.undo_steps.pop() } else { self.redo_steps.pop() };
+                match step {
+                    Some(step) => {
+                        let what = format!("{}: {}", tr(if back { "Undone" } else { "Redone" }), step.label);
+                        self.start(Op::History { step, back });
+                        self.toast(what, false);
+                    }
+                    None => self.toast(tr(if back { "Nothing to undo" } else { "Nothing to redo" }), false),
                 }
             }
             Cmd::MoveTab(from, to) => {
