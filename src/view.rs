@@ -415,6 +415,8 @@ impl App {
             Key::F2 => return if self.overlay.is_none() { self.run(Cmd::Rename) },
             Key::F3 => Action::View,
             Key::F4 => return if self.overlay.is_none() { self.run(Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
+            // A presentation shown: its slide show; else the folders again.
+            Key::F5 if self.cur_tab().viewer.as_ref().is_some_and(|v| matches!(&v.content, crate::viewer::Content::Doc(d) if d.is_slides())) => return self.run(Cmd::SlideShow),
             Key::F5 => return self.reload_all(),
             Key::F9 => return if self.overlay.is_none() { self.run(Cmd::ToggleSidebar) },
             Key::Delete => {

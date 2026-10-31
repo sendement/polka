@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Matn yozish"),
     ("Type text…", "Matn yozish…"),
     ("Undo", "Bekor qilish"),
+    ("Slide show", "Slayd-shou"),
+    ("End the slide show", "Namoyishni tugatish"),
     ("Filter by typing", "Yozish orqali saralash"),
     ("Sidebar places", "Yon paneldagi joylar"),
     ("Sidebar places…", "Yon paneldagi joylar…"),

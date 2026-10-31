@@ -87,6 +87,11 @@ pub struct DocState {
     pub page_tops: Vec<f32>,
     /// The sheet shown.
     pub sheet: usize,
+    /// Slides shown one at a time, the whole screen theirs.
+    pub show: bool,
+    /// The sideways scroll gathered towards the next slide (the wheel,
+    /// a finger).
+    swipe: f32,
     /// Its scroll's own (not the document's before it).
     salt: egui::Id,
 }
@@ -110,7 +115,7 @@ impl DocState {
             let _ = tx.send(r);
             c.request_repaint();
         });
-        DocState { body: Body::Loading(rx), zoom: 1.0, scroll_to: None, offset: Vec2::ZERO, view: Vec2::ZERO, content: Vec2::ZERO, page: 0, page_tops: Vec::new(), sheet: 0, salt: egui::Id::new(("doc-scroll", OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) }
+        DocState { body: Body::Loading(rx), zoom: 1.0, scroll_to: None, offset: Vec2::ZERO, view: Vec2::ZERO, content: Vec2::ZERO, page: 0, page_tops: Vec::new(), sheet: 0, show: false, swipe: 0.0, salt: egui::Id::new(("doc-scroll", OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed))) }
     }
 
     fn poll(&mut self) {
@@ -133,6 +138,23 @@ impl DocState {
     /// The gamepad: ↑ ↓ scroll, ← → a page (a slide, a sheet's columns),
     /// the triggers zoom (a spreadsheet's: its sheets), ✕ back to the
     /// width, Home / End.
+    pub fn is_slides(&self) -> bool {
+        matches!(self.body, Body::Slides(_))
+    }
+
+    /// In the slide show: on, back, out.
+    pub fn show_input(&mut self, a: Action) {
+        let n = self.pages().max(1);
+        match a {
+            Action::Right | Action::Down | Action::Accept | Action::Select | Action::RightTrigger | Action::NextTab => self.page = (self.page + 1).min(n - 1),
+            Action::Left | Action::Up | Action::LeftTrigger | Action::PrevTab => self.page = self.page.saturating_sub(1),
+            Action::Home => self.page = 0,
+            Action::End => self.page = n - 1,
+            Action::Back | Action::Menu | Action::View => self.show = false,
+            _ => {}
+        }
+    }
+
     pub fn input(&mut self, a: Action) {
         let line = 60.0;
         let page = (self.view.y - 40.0).max(line);
@@ -1412,12 +1434,30 @@ pub struct SPara {
     /// "• " or "1. ", and how deep.
     pub bullet: Option<String>,
     pub level: u8,
+    /// Its line spacing, a fraction of the usual (90 %: 0.9).
+    pub spacing: Option<f32>,
+}
+
+/// How a text box sets its text: its insets (points: left, top, right,
+/// bottom), and what PowerPoint's fitting did to it (font sizes, line
+/// spacing, as fractions).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextLook {
+    pub inset: [f32; 4],
+    pub scale: f32,
+    pub lines: f32,
+}
+
+impl Default for TextLook {
+    fn default() -> Self {
+        TextLook { inset: [7.2, 3.6, 7.2, 3.6], scale: 1.0, lines: 1.0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShapeKind {
     /// Its paragraphs, centred up and down (a title) or from the top.
-    Text { paras: Vec<SPara>, middle: bool },
+    Text { paras: Vec<SPara>, middle: bool, look: TextLook },
     Image(usize),
     Table(Vec<Vec<String>>),
     Box,
@@ -1469,8 +1509,15 @@ impl Slides {
             if !ui.is_rect_visible(card) {
                 continue;
             }
-            let slide = self.slides[i].clone();
             ui.painter().rect_filled(card.translate(vec2(0.0, 2.0)), 3.0, Color32::from_black_alpha(60));
+            self.draw_one(ui, i, card, k);
+        }
+    }
+
+    /// Slide `i` into `card` (`k`: pixels a point).
+    fn draw_one(&mut self, ui: &mut Ui, i: usize, card: Rect, k: f32) {
+        {
+            let slide = self.slides[i].clone();
             ui.painter().rect_filled(card, 3.0, slide.bg.unwrap_or(PAPER));
             let clip = ui.clip_rect().intersect(card);
             // (Boxes put on a child of the card: the slides' layout stays.)
@@ -1487,7 +1534,7 @@ impl Slides {
                             egui::Image::new(egui::load::SizedTexture::new(t.id(), r.size())).paint_at(&mut ui.new_child(egui::UiBuilder::new().max_rect(clip)), r);
                         }
                     }
-                    ShapeKind::Text { paras, middle } => slide_text(ui, r, paras, *middle, k, clip),
+                    ShapeKind::Text { paras, middle, look } => slide_text(ui, r, paras, *middle, look, k, clip),
                     ShapeKind::Table(rows) => {
                         let n = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
                         let rh = r.height() / rows.len().max(1) as f32;
@@ -1510,25 +1557,80 @@ impl Slides {
     }
 }
 
+/// The slide show: the slide as big as the screen lets it be, on black.
+/// A click goes on (on its left third, back), the wheel or a finger
+/// sideways too; its ✕ (and Esc, ○) ends it. True: it ended.
+pub fn draw_show(ui: &mut Ui, d: &mut DocState) -> bool {
+    let Body::Slides(s) = &mut d.body else { return true };
+    let n = s.slides.len().max(1);
+    d.page = d.page.min(n - 1);
+    let (whole, r) = ui.allocate_exact_size(ui.available_size(), Sense::click());
+    ui.painter().rect_filled(whole, 0.0, Color32::BLACK);
+    let k = (whole.width() / s.size.x.max(1.0)).min(whole.height() / s.size.y.max(1.0));
+    let card = Rect::from_center_size(whole.center(), s.size * k);
+    s.draw_one(ui, d.page, card, k);
+    let mut end = false;
+    if let Some(p) = r.interact_pointer_pos().filter(|_| r.clicked()) {
+        if p.x < whole.min.x + whole.width() / 3.0 {
+            d.page = d.page.saturating_sub(1);
+        } else {
+            d.page = (d.page + 1).min(n - 1);
+        }
+    }
+    if r.secondary_clicked() {
+        d.page = d.page.saturating_sub(1);
+    }
+    // Sideways (or down) by the wheel or a finger: a slide a good push.
+    if r.hovered() {
+        let w = ui.input(|i| i.smooth_scroll_delta);
+        d.swipe += if w.x.abs() > w.y.abs() { -w.x } else { -w.y };
+        if d.swipe.abs() > 80.0 {
+            d.page = if d.swipe > 0.0 { (d.page + 1).min(n - 1) } else { d.page.saturating_sub(1) };
+            d.swipe = 0.0;
+        }
+    }
+    // Where it is, and the way out, faint in the corners.
+    let faint = Color32::from_white_alpha(if r.hovered() { 150 } else { 60 });
+    ui.painter().text(whole.right_bottom() - vec2(16.0, 12.0), Align2::RIGHT_BOTTOM, format!("{} / {n}", d.page + 1), FontId::proportional(15.0), faint);
+    let x = Rect::from_min_size(pos2(whole.max.x - 44.0, whole.min.y + 8.0), Vec2::splat(36.0));
+    let xr = ui.interact(x, ui.id().with("show-close"), Sense::click()).on_hover_text(tr("End the slide show"));
+    xr.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("End the slide show")));
+    ui.painter().text(x.center(), Align2::CENTER_CENTER, "✕", FontId::proportional(20.0), if xr.hovered() { Color32::WHITE } else { faint });
+    if xr.clicked() {
+        end = true;
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    end
+}
+
 /// A box's paragraphs inside it (k: pixels a point).
-fn slide_text(ui: &mut Ui, r: Rect, paras: &[SPara], middle: bool, k: f32, clip: Rect) {
-    let inset = 7.2 * k;
-    let w = (r.width() - 2.0 * inset).max(4.0);
+fn slide_text(ui: &mut Ui, r: Rect, paras: &[SPara], middle: bool, look: &TextLook, k: f32, clip: Rect) {
+    let [il, it, ir, ib] = look.inset.map(|v| v * k);
+    let inset = il;
+    let w = (r.width() - il - ir).max(4.0);
+    // (Shrunk to fit, as PowerPoint did.)
+    let k_text = k * look.scale;
     let mut jobs = Vec::new();
     for p in paras {
         let indent = p.level as f32 * 24.0 * k;
         let mut job = LayoutJob::default();
         let first = p.runs.first().map(|r| r.size.unwrap_or(18.0)).unwrap_or(18.0);
         if let Some(b) = &p.bullet {
-            job.append(b, 0.0, TextFormat { font_id: FontId::proportional((first * k * 4.0 / 3.0).max(4.0)), color: p.runs.first().and_then(|r| r.color).unwrap_or(INK), ..Default::default() });
+            job.append(b, 0.0, TextFormat { font_id: FontId::proportional((first * k_text).max(4.0)), color: p.runs.first().and_then(|r| r.color).unwrap_or(INK), ..Default::default() });
         }
         for run in &p.runs {
-            let mut f = run_format(run, (18.0 * k * 4.0 / 3.0).max(4.0), false, k);
-            f.font_id.size = (run.size.unwrap_or(18.0) * k * 4.0 / 3.0).max(4.0);
+            // (The slide is in points, so are its sizes: k makes both pixels.)
+            let mut f = run_format(run, (18.0 * k_text).max(4.0), false, k);
+            f.font_id.size = (run.size.unwrap_or(18.0) * k_text).max(4.0);
+            // Line spacing set, or cut by the fitting: a height of its own.
+            let lines = p.spacing.unwrap_or(1.0) * look.lines;
+            if (lines - 1.0).abs() > 0.01 {
+                f.line_height = Some(f.font_id.size * 1.2 * lines);
+            }
             job.append(&run.text, 0.0, f);
         }
         if job.text.is_empty() {
-            job.append(" ", 0.0, TextFormat { font_id: FontId::proportional((first * k * 4.0 / 3.0).max(4.0)), color: Color32::TRANSPARENT, ..Default::default() });
+            job.append(" ", 0.0, TextFormat { font_id: FontId::proportional((first * k_text).max(4.0)), color: Color32::TRANSPARENT, ..Default::default() });
         }
         job.wrap.max_width = (w - indent).max(4.0);
         job.halign = match p.align {
@@ -1536,20 +1638,28 @@ fn slide_text(ui: &mut Ui, r: Rect, paras: &[SPara], middle: bool, k: f32, clip:
             Align::Right => egui::Align::RIGHT,
             _ => egui::Align::LEFT,
         };
-        let g = ui.painter().layout_job(job.clone());
-        jobs.push((job, g.size(), indent, p.align));
+        let g = ui.painter().layout_job(job);
+        jobs.push((g, indent, p.align));
     }
-    let total: f32 = jobs.iter().map(|j| j.1.y).sum();
-    let mut y = if middle { r.center().y - total / 2.0 } else { r.min.y + inset };
-    for (job, size, indent, align) in jobs {
+    let total: f32 = jobs.iter().map(|j| j.0.size().y).sum();
+    let mut y = if middle { (r.min.y + it + r.max.y - ib) / 2.0 - total / 2.0 } else { r.min.y + it };
+    for (g, indent, align) in jobs {
+        let size = g.size();
+        // Painted as laid out (a label put in a rect would be centred and
+        // justified there: letters spread, lines centred). A centred or
+        // right-aligned galley's lines hang off its anchor.
         let x = match align {
-            Align::Center => r.center().x - size.x / 2.0,
-            Align::Right => r.max.x - inset - size.x,
+            Align::Center => r.min.x + inset + indent + (w - indent) / 2.0,
+            Align::Right => r.max.x - ir,
             _ => r.min.x + inset + indent,
         };
-        let at = Rect::from_min_size(pos2(x, y), vec2(size.x.max(1.0), size.y));
+        let at = g.rect.translate(vec2(x, y));
         if at.intersects(clip) {
-            ui.put(at, egui::Label::new(job).wrap());
+            // (Its words for screen readers, as a label's would be.)
+            let text = g.text().to_string();
+            let r = ui.interact(at.intersect(clip), ui.id().with(("slide-text", at.min.x as i32, at.min.y as i32)), Sense::hover());
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+            ui.painter().with_clip_rect(clip).galley(pos2(x, y), g, INK);
         }
         y += size.y;
     }
@@ -1656,8 +1766,9 @@ fn pptx_shapes(z: &mut Zip, tree: &roxmltree::Node, srels: &HashMap<String, Stri
                             _ => 18.0,
                         };
                         let bullets = matches!(t, "body" | "obj") && ph.as_ref().is_some_and(|p| p.0 != "body" || !p.1.is_empty() || true);
-                        let middle = matches!(t, "title" | "ctrTitle") || child(&tb, "bodyPr").and_then(|b| attr(&b, "anchor")) == Some("ctr");
-                        ShapeKind::Text { paras: a_paras(&tb, default, bullets), middle }
+                        let body = child(&tb, "bodyPr");
+                        let middle = matches!(t, "title" | "ctrTitle") || body.and_then(|b| attr(&b, "anchor")) == Some("ctr");
+                        ShapeKind::Text { paras: a_paras(&tb, default, bullets), middle, look: body.map(|b| text_look(&b)).unwrap_or_default() }
                     }
                     None => ShapeKind::Box,
                 };
@@ -1696,12 +1807,26 @@ fn pptx_shapes(z: &mut Zip, tree: &roxmltree::Node, srels: &HashMap<String, Stri
     }
 }
 
+/// A text box's insets and fitting (a:bodyPr).
+fn text_look(b: &roxmltree::Node) -> TextLook {
+    let d = TextLook::default();
+    let ins = |a: &str, def: f32| attr(b, a).and_then(|v| v.parse::<f32>().ok()).map_or(def, |v| v / EMU);
+    let fit = child(b, "normAutofit");
+    let frac = |a: &str| fit.and_then(|f| attr(&f, a)).and_then(|v| v.parse::<f32>().ok()).map(|v| v / 100000.0);
+    TextLook {
+        inset: [ins("lIns", d.inset[0]), ins("tIns", d.inset[1]), ins("rIns", d.inset[2]), ins("bIns", d.inset[3])],
+        scale: frac("fontScale").unwrap_or(1.0).clamp(0.1, 1.0),
+        lines: 1.0 - frac("lnSpcReduction").unwrap_or(0.0).clamp(0.0, 0.8),
+    }
+}
+
 /// DrawingML paragraphs (a:p): runs, alignment, bullets.
 fn a_paras(tb: &roxmltree::Node, default: f32, bullets: bool) -> Vec<SPara> {
     let mut v = Vec::new();
     let mut numbers: HashMap<u8, usize> = HashMap::new();
     for p in kids(tb, "p") {
         let ppr = child(&p, "pPr");
+        let spacing = ppr.and_then(|x| child(&x, "lnSpc")).and_then(|l| child(&l, "spcPct")).and_then(|c| attr(&c, "val")).and_then(|v| v.parse::<f32>().ok()).map(|v| v / 100000.0);
         let level = ppr.and_then(|x| attr(&x, "lvl")).and_then(|l| l.parse().ok()).unwrap_or(0);
         let align = match ppr.and_then(|x| attr(&x, "algn")) {
             Some("ctr") => Align::Center,
@@ -1741,7 +1866,7 @@ fn a_paras(tb: &roxmltree::Node, default: f32, bullets: bool) -> Vec<SPara> {
         } else {
             chr.or(bullets.then(|| "• ".to_string()))
         };
-        v.push(SPara { runs, align, bullet, level });
+        v.push(SPara { runs, align, bullet, level, spacing });
     }
     v
 }
@@ -1797,12 +1922,12 @@ fn odp(z: &mut Zip) -> Result<Deck, String> {
                             r.size = Some(r.size.unwrap_or(default));
                         }
                         let bullet = list.map(|(_, n)| n.map_or("• ".to_string(), |n| format!("{n}. ")));
-                        Some(SPara { runs, align, bullet, level: list.map_or(0, |l| l.0) })
+                        Some(SPara { runs, align, bullet, level: list.map_or(0, |l| l.0), spacing: None })
                     }
                     _ => None,
                 })
                 .collect();
-            let kind = if paras.iter().any(|p| p.runs.iter().any(|r| !r.text.trim().is_empty())) { ShapeKind::Text { paras, middle: class == "title" } } else { ShapeKind::Box };
+            let kind = if paras.iter().any(|p| p.runs.iter().any(|r| !r.text.trim().is_empty())) { ShapeKind::Text { paras, middle: class == "title", look: TextLook::default() } } else { ShapeKind::Box };
             if kind != ShapeKind::Box || fill.is_some() {
                 shapes.push(Shape { rect, fill, kind });
             }
@@ -2159,7 +2284,7 @@ mod parse_tests {
         let s = Slides::open(&p).unwrap();
         assert_eq!(s.slides.len(), 2);
         assert!((s.size.x - 720.0).abs() < 0.1 && (s.size.y - 405.0).abs() < 0.1);
-        let ShapeKind::Text { paras, middle } = &s.slides[0].shapes[0].kind else { panic!() };
+        let ShapeKind::Text { paras, middle, .. } = &s.slides[0].shapes[0].kind else { panic!() };
         assert!(*middle && paras[0].runs[0].text == "Polka roadmap" && paras[0].runs[0].size == Some(40.0) && paras[0].runs[0].bold);
         let ShapeKind::Text { paras, .. } = &s.slides[0].shapes[1].kind else { panic!() };
         assert_eq!((paras[1].level, paras[1].bullet.as_deref()), (1, Some("• ")));
@@ -2170,7 +2295,7 @@ mod parse_tests {
         let s = Slides::open(&p).unwrap();
         assert_eq!(s.slides.len(), 1);
         assert!((s.size.x - 28.0 * 72.0 / 2.54).abs() < 0.1);
-        let ShapeKind::Text { paras, middle } = &s.slides[0].shapes[0].kind else { panic!() };
+        let ShapeKind::Text { paras, middle, .. } = &s.slides[0].shapes[0].kind else { panic!() };
         assert!(*middle && paras[0].runs[0].text == "Open slides" && paras[0].runs[0].size == Some(36.0));
         let ShapeKind::Text { paras, .. } = &s.slides[0].shapes[1].kind else { panic!() };
         assert_eq!(paras[0].bullet.as_deref(), Some("• "));

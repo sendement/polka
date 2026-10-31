@@ -72,6 +72,11 @@ instead: Settings → "Open in Polka"):
 - Documents: PDF (through poppler), Word and OpenDocument text, presentations, spreadsheets and
   CSV/TSV as a table; doc, ppt, rtf and the like through LibreOffice (the system's or its
   Flatpak). PDF, documents, spreadsheets and presentations each have their own switch.
+  A presentation has a slide show (▶ in its header, F5, or △ → Slide show): a slide at a time on
+  the whole screen, on by a click, → , Space, the wheel or a finger, back by ← or a click on its
+  left third; Esc or ○ ends it.
+- Pictures and videos: the mouse over them shows arrows to the folder's previous and next; a finger
+  (or the wheel) pushed sideways goes there too.
 
 | Player | Gamepad | Keyboard |
 |---|---|---|

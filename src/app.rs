@@ -623,6 +623,10 @@ pub enum Cmd {
     CloseTabAt(usize),
     /// A tab to another place in the row.
     MoveTab(usize, usize),
+    /// A presentation's slides, one at a time on the whole screen (or no more).
+    SlideShow,
+    /// The viewer's next (or previous) picture or video of the folder.
+    ViewerStep(bool),
     /// The last change undone (a text file's, in its editor), or redone.
     Undo,
     Redo,
@@ -3533,6 +3537,9 @@ impl App {
         }
         if let Some(v) = &self.cur_tab().viewer {
             let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
+            if matches!(&v.content, crate::viewer::Content::Doc(d) if d.is_slides()) {
+                items.insert(0, item(tr("Slide show"), Cmd::SlideShow));
+            }
             if v.is_text() {
                 items.push(toggle(tr("Wrap lines"), Cmd::ViewerWrap, self.cfg.viewer.wrap));
                 items.push(toggle(tr("Line numbers"), Cmd::ViewerNumbers, self.cfg.viewer.line_numbers));
@@ -4686,6 +4693,24 @@ impl App {
                     }
                     self.keep_sides_apart();
                     self.range = None;
+                }
+            }
+            Cmd::ViewerStep(next) => {
+                // A video goes by its triggers (← → seek in it).
+                let a = match (self.video_shown(), next) {
+                    (true, true) => Action::RightTrigger,
+                    (true, false) => Action::LeftTrigger,
+                    (false, true) => Action::Right,
+                    (false, false) => Action::Left,
+                };
+                self.viewer_input(a);
+            }
+            Cmd::SlideShow => {
+                if let Some(crate::viewer::Content::Doc(d)) = self.tabs[self.tab].viewer.as_mut().map(|v| &mut v.content) {
+                    if d.is_slides() {
+                        d.show = !d.show;
+                        self.focus = Focus::Panes;
+                    }
                 }
             }
             Cmd::Undo | Cmd::Redo => {

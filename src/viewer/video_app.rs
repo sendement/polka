@@ -25,8 +25,10 @@ impl App {
     }
 
     /// The current tab shows a video full screen (the app's chrome hides).
+    /// A video full screen, or a slide show: the screen is theirs.
     pub fn video_full(&self) -> bool {
         matches!(self.tabs.get(self.tab).and_then(|t| t.viewer.as_ref()).map(|v| &v.content), Some(Content::Video(m)) if m.full)
+            || matches!(self.tabs.get(self.tab).and_then(|t| t.viewer.as_ref()).map(|v| &v.content), Some(Content::Doc(d)) if d.show)
     }
 
     /// Gamepad in the video player. False: not the player (or not its button).

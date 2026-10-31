@@ -6529,6 +6529,28 @@ fn docs_screens() {
     assert_eq!(doc(&h).pages(), 2);
     assert!(h.query_by_label_contains("Polka roadmap").is_some());
     shot(&mut h, "dc5-pptx");
+    // The slide show: the whole screen, a slide at a time; → and a click
+    // go on, ← back, Esc ends it (not the viewer).
+    h.state_mut().run(crate::app::Cmd::SlideShow);
+    settle(&mut h);
+    assert!(doc(&h).show && h.state().video_full(), "no slide show");
+    assert_eq!(doc(&h).page, 0);
+    shot(&mut h, "dc5s-show");
+    press(&mut h, &[Action::Right]);
+    assert_eq!(doc(&h).page, 1);
+    press(&mut h, &[Action::Left]);
+    assert_eq!(doc(&h).page, 0);
+    let mid = h.ctx.content_rect().center();
+    h.event(egui::Event::PointerMoved(mid + egui::vec2(200.0, 0.0)));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: mid + egui::vec2(200.0, 0.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(egui::Event::PointerButton { pos: mid + egui::vec2(200.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert_eq!(doc(&h).page, 1, "a click didn't go on");
+    key(&mut h, egui::Key::Escape, Default::default());
+    settle(&mut h);
+    assert!(!doc(&h).show && h.state().cur_tab().viewer.is_some(), "Esc closed more than the show");
     press(&mut h, &[Action::Right]);
     settle(&mut h);
     assert_eq!(doc(&h).page, 1);
@@ -7000,6 +7022,7 @@ fn toolbar_screens() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), "text").unwrap();
     image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40])).save(dir.join("b.png")).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([40, 40, 200])).save(dir.join("b2.png")).unwrap();
     crate::viewer::docs::fixtures::pdf(&dir.join("c.pdf"));
     let mut h = harness(dir.clone());
     let mut cfg = h.state().cfg.clone();
@@ -7093,6 +7116,16 @@ fn toolbar_screens() {
         assert!(h.state().cur_tab().own);
     };
     open(&mut h, "b.png");
+    // The mouse over it: arrows at its sides, the next picture.
+    let next = h.get_by_label(crate::i18n::tr("Next")).rect().center();
+    h.event(Event::PointerMoved(next));
+    h.step();
+    h.event(Event::PointerButton { pos: next, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(Event::PointerButton { pos: next, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert_eq!(h.state().cur_tab().viewer.as_ref().map(|v| v.name.as_str()), Some("b2.png"), "the arrow didn't go on");
+    shot(&mut h, "tb4-image-arrows");
     h.state_mut().run_tool(Tool::Back);
     settle(&mut h);
     assert_eq!(h.state().tabs.len(), 1);

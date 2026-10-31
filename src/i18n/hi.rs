@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "टेक्स्ट लिखें"),
     ("Type text…", "टेक्स्ट लिखें…"),
     ("Undo", "पूर्ववत करें"),
+    ("Slide show", "स्लाइड शो"),
+    ("End the slide show", "स्लाइड शो बंद करें"),
     ("Filter by typing", "टाइप करके फ़िल्टर"),
     ("Sidebar places", "साइडबार की जगहें"),
     ("Sidebar places…", "साइडबार की जगहें…"),

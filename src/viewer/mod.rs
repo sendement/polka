@@ -233,6 +233,13 @@ impl Viewer {
     }
 
     pub fn input(&mut self, a: Action, ctx: &egui::Context) -> Out {
+        // The slide show takes everything (○ ends it, not the viewer).
+        if let Content::Doc(d) = &mut self.content {
+            if d.show {
+                d.show_input(a);
+                return Out::Nothing;
+            }
+        }
         match a {
             Action::Back => return Out::Close,
             Action::Actions => return Out::Actions,

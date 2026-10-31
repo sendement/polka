@@ -49,10 +49,15 @@ fn header_button(ui: &mut Ui, r: Rect, label: &str, tip: &str, on: bool) -> bool
 pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> Option<HeaderAct> {
     let mut act = None;
     let vis = ui.visuals().clone();
-    // Full screen video: nothing but the picture.
+    // Full screen video: nothing but the picture. The slide show the same.
     if let Content::Video(m) = &mut v.content {
         if m.full {
             return draw_video(ui, m, prefs, true);
+        }
+    }
+    if let Content::Doc(d) = &mut v.content {
+        if d.show {
+            return crate::viewer::docs::draw_show(ui, d).then_some(HeaderAct::Run(crate::app::Cmd::SlideShow));
         }
     }
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
@@ -71,6 +76,12 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
     bx -= 32.0;
     if header_button(ui, btn(bx, 28.0), "↗", tr("Open in another app"), false) {
         act = Some(HeaderAct::External);
+    }
+    if matches!(&v.content, Content::Doc(d) if d.is_slides()) {
+        bx -= 32.0;
+        if header_button(ui, btn(bx, 28.0), "▶", tr("Slide show"), false) {
+            act = Some(HeaderAct::Run(crate::app::Cmd::SlideShow));
+        }
     }
     if let Content::Text(t) = &v.content {
         bx -= 32.0;
@@ -112,7 +123,11 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
                 draw_text(ui, t, prefs, theme);
             }
         }
-        Content::Image(im) => draw_image(ui, im),
+        Content::Image(im) => {
+            if let Some(d) = draw_image(ui, im) {
+                act = Some(HeaderAct::Run(crate::app::Cmd::ViewerStep(d > 0)));
+            }
+        }
         Content::Doc(d) => crate::viewer::docs::draw(ui, d),
         Content::Audio(a) => {
             if let Some(x) = draw_audio(ui, a, prefs) {
@@ -614,7 +629,9 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
     ui.advance_cursor_after_rect(area);
 }
 
-fn draw_image(ui: &mut Ui, im: &mut ImageState) {
+/// The picture; a step to another of the folder's (its arrows, a finger
+/// or the wheel sideways), if asked for.
+fn draw_image(ui: &mut Ui, im: &mut ImageState) -> Option<isize> {
     let ctx = ui.ctx().clone();
     im.pic.poll(&ctx);
     let area = ui.available_rect_before_wrap();
@@ -623,7 +640,7 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
     let resp = ui.interact(area, ui.id().with("image-view"), Sense::click_and_drag());
     if let Some(e) = &im.pic.error {
         ui.painter().text(area.center(), Align2::CENTER_CENTER, e, FontId::proportional(15.0), ui.visuals().error_fg_color);
-        return;
+        return None;
     }
     // The texture and its size in texture pixels.
     let (tex, tex_size) = match &im.pic.pixels {
@@ -633,7 +650,7 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
             Ok(_) => (None, Vec2::ZERO),
             Err(e) => {
                 ui.painter().text(area.center(), Align2::CENTER_CENTER, e.to_string(), FontId::proportional(15.0), ui.visuals().error_fg_color);
-                return;
+                return None;
             }
         },
         None => (None, Vec2::ZERO),
@@ -644,7 +661,7 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
     }
     let Some(tex) = tex.filter(|_| tex_size.x > 0.0) else {
         ui.put(Rect::from_center_size(area.center(), Vec2::splat(32.0)), egui::Spinner::new());
-        return;
+        return None;
     };
     let ppp = ctx.pixels_per_point();
     let full_w = im.pic.full.map_or(tex_size.x, |f| f[0] as f32);
@@ -715,6 +732,50 @@ fn draw_image(ui: &mut Ui, im: &mut ImageState) {
         painter.line_segment([p - vec2(8.0, 0.0), p + vec2(8.0, 0.0)], Stroke::new(1.5, c));
         painter.line_segment([p - vec2(0.0, 8.0), p + vec2(0.0, 8.0)], Stroke::new(1.5, c));
     }
+    // Not zoomed in, and others to go to: arrows at the sides, and a
+    // sideways push.
+    let zoomed = im.zoom.is_some_and(|z| z > im.fit + 1e-3);
+    if zoomed || im.siblings.len() < 2 {
+        return None;
+    }
+    side_arrows(ui, area, resp.hovered()).or_else(|| swipe(ui, area, resp.hovered()))
+
+}
+
+/// Round arrows at the middle of `area`'s sides while the mouse is over it
+/// (for the mouse and the touch screen): -1 or 1 when one is pressed.
+fn side_arrows(ui: &mut Ui, area: Rect, over: bool) -> Option<isize> {
+    let mut step = None;
+    for (d, glyph, x) in [(-1isize, "‹", area.min.x + 30.0), (1, "›", area.max.x - 30.0)] {
+        let b = Rect::from_center_size(pos2(x, area.center().y), Vec2::splat(44.0));
+        let r = ui.interact(b, ui.id().with(("side-arrow", d)), Sense::click());
+        let label = if d < 0 { tr("Previous") } else { tr("Next") };
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if over || r.hovered() {
+            let fill = Color32::from_black_alpha(if r.hovered() { 170 } else { 110 });
+            ui.painter().circle_filled(b.center(), 22.0, fill);
+            ui.painter().text(b.center() - vec2(0.0, 2.0), Align2::CENTER_CENTER, glyph, FontId::proportional(30.0), Color32::from_gray(235));
+        }
+        if r.clicked() {
+            step = Some(d);
+        }
+    }
+    step
+}
+
+/// A good push sideways over `area` (a finger, the wheel): -1 or 1.
+fn swipe(ui: &Ui, area: Rect, over: bool) -> Option<isize> {
+    let id = ui.id().with(("swipe", area.min.x as i32));
+    let mut gathered: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+    let dx = if over { ui.input(|i| i.smooth_scroll_delta.x) } else { 0.0 };
+    // (Let go a moment, it starts over.)
+    gathered = if dx == 0.0 { gathered * 0.8 } else { gathered + dx };
+    let step = if gathered.abs() > 90.0 { Some(if gathered < 0.0 { 1 } else { -1 }) } else { None };
+    if step.is_some() {
+        gathered = 0.0;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(id, gathered));
+    step
 }
 
 /// A Rust sample for the settings preview.
@@ -1118,7 +1179,11 @@ fn draw_video(ui: &mut Ui, m: &mut super::video::VideoState, prefs: &ViewerPrefs
     } else {
         ui.put(Rect::from_center_size(area.center(), Vec2::splat(32.0)), egui::Spinner::new().color(white));
     }
-    if resp.double_clicked() {
+    // The folder's other videos: arrows at the sides, a sideways push.
+    let step = if m.tracks.len() > 1 { side_arrows(ui, area, resp.hovered()).or_else(|| swipe(ui, area, resp.hovered())) } else { None };
+    if let Some(d) = step {
+        act = Some(HeaderAct::Run(Cmd::ViewerStep(d > 0)));
+    } else if resp.double_clicked() {
         act = Some(HeaderAct::Run(Cmd::VideoFullscreen));
     } else if resp.clicked() {
         act = Some(HeaderAct::Run(Cmd::AudioToggle));

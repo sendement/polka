@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "输入文本"),
     ("Type text…", "输入文本…"),
     ("Undo", "撤销"),
+    ("Slide show", "幻灯片放映"),
+    ("End the slide show", "结束放映"),
     ("Filter by typing", "输入即筛选"),
     ("Sidebar places", "侧栏位置"),
     ("Sidebar places…", "侧栏位置…"),

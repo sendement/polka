@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Saisir du texte"),
     ("Type text…", "Saisir du texte…"),
     ("Undo", "Annuler"),
+    ("Slide show", "Diaporama"),
+    ("End the slide show", "Quitter le diaporama"),
     ("Filter by typing", "Filtrer en tapant"),
     ("Sidebar places", "Emplacements du panneau latéral"),
     ("Sidebar places…", "Emplacements du panneau latéral…"),

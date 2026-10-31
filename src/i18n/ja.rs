@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "テキスト入力"),
     ("Type text…", "テキストを入力…"),
     ("Undo", "元に戻す"),
+    ("Slide show", "スライドショー"),
+    ("End the slide show", "スライドショーを終了"),
     ("Filter by typing", "入力で絞り込み"),
     ("Sidebar places", "サイドバーの場所"),
     ("Sidebar places…", "サイドバーの場所…"),

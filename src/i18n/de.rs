@@ -588,6 +588,8 @@ pub const T: &[(&str, &str)] = &[
     ("Type text", "Text eingeben"),
     ("Type text…", "Text eingeben…"),
     ("Undo", "Rückgängig"),
+    ("Slide show", "Bildschirmpräsentation"),
+    ("End the slide show", "Präsentation beenden"),
     ("Filter by typing", "Filtern beim Tippen"),
     ("Sidebar places", "Orte in der Seitenleiste"),
     ("Sidebar places…", "Orte in der Seitenleiste…"),
