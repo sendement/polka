@@ -209,10 +209,14 @@ pub fn draw(ui: &mut Ui, ed: &mut TagEditor) -> Option<TagEv> {
         }
     });
     ui.add_space(6.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.button(tr("Done")).clicked() {
-            ev = Some(TagEv::Close);
-        }
+    // (In a row: laid out right to left in the window itself, it would
+    // take all the height there is.)
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(tr("Done")).clicked() {
+                ev = Some(TagEv::Close);
+            }
+        });
     });
     ev
 }

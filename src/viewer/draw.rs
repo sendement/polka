@@ -751,10 +751,14 @@ pub fn draw_settings(ui: &mut Ui, row: usize, prefs: &ViewerPrefs, w: f32, stand
         if r.clicked() {
             ev = Some((r_i, 0));
         }
-        ui.painter().text(pos2(rect.min.x + 12.0, rect.center().y), Align2::LEFT_CENTER, label, FontId::proportional(15.0), vis.text_color());
+        // (Narrow, the value takes less and the name wraps.)
+        let span = 212.0_f32.min(rect.width() * 0.55);
+        let name_right = if arrows { rect.max.x - span - 18.0 } else { rect.max.x - 40.0 };
+        let name = crate::view::elided(ui, label, FontId::proportional(15.0), vis.text_color(), (name_right - rect.min.x - 12.0).max(40.0), 2);
+        ui.painter().galley(pos2(rect.min.x + 12.0, rect.center().y - name.size().y / 2.0), name, vis.text_color());
         if arrows {
             let right = Rect::from_center_size(pos2(rect.max.x - 22.0, rect.center().y), Vec2::splat(28.0));
-            let left = Rect::from_center_size(pos2(rect.max.x - 212.0, rect.center().y), Vec2::splat(28.0));
+            let left = Rect::from_center_size(pos2(rect.max.x - span, rect.center().y), Vec2::splat(28.0));
             for (b, g, d) in [(left, "◀", -1), (right, "▶", 1)] {
                 let br = ui.interact(b, ui.id().with(("vstep", r_i, d)), Sense::click());
                 ui.painter().rect_filled(b, 6.0, if br.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.bg_fill });

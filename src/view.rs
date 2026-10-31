@@ -104,6 +104,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
             self.full_sent = full;
         }
+        SCREEN_W.store(ctx.content_rect().width().to_bits(), std::sync::atomic::Ordering::Relaxed);
         // (Last frame's places tell where a dragged button would land.)
         self.tool_targets_prev = std::mem::take(&mut self.tool_targets);
         if !full {
@@ -704,26 +705,28 @@ impl App {
         let pad = self.show_pad();
         let shoulder_w = if pad { TAB_H * 1.4 } else { 0.0 };
 
-        let titles: Vec<_> = self
+        let names: Vec<String> = self
             .tabs
             .iter()
             .map(|t| {
                 let p = &t.pane;
                 let usage = t.usage.as_ref().is_some_and(|u| u.shown);
                 let term = t.term.as_ref().is_some_and(|u| u.shown);
-                let title = t.viewer.as_ref().map_or_else(
+                t.viewer.as_ref().map_or_else(
                     || if term { tr("Terminal").to_string() } else if usage { tr("Disk usage").to_string() } else { p.loc.title() },
                     |v| v.name.clone(),
-                );
-                elided(ui, &title, FontId::proportional(14.0), v.text_color(), 180.0, 1)
+                )
             })
             .collect();
+        let font = FontId::proportional(14.0);
         let close_w = if many { 20.0 } else { 0.0 };
         // Dual mode: the tab each side shows wears its L or R.
         let side_of = |i: usize| if !dual { None } else if i == self.tab_of(0) { Some(0) } else if i == self.tab_of(1) { Some(1) } else { None };
         const BADGE: f32 = 18.0;
-        let widths: Vec<f32> = titles.iter().enumerate().map(|(i, g)| (g.size().x + 28.0 + close_w + if side_of(i).is_some() { BADGE + 6.0 } else { 0.0 }).max(96.0)).collect();
-        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
+        // Narrower than this a tab isn't made: the row scrolls instead.
+        const MIN_TAB: f32 = 64.0;
+        let extra = |i: usize| 28.0 + close_w + if side_of(i).is_some() { BADGE + 6.0 } else { 0.0 };
+        let natural: Vec<f32> = names.iter().enumerate().map(|(i, n)| (elided(ui, n, font.clone(), v.text_color(), 180.0, 1).size().x + extra(i)).max(96.0)).collect();
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
         // The places for buttons at its ends (drawn after the tabs).
@@ -733,22 +736,74 @@ impl App {
         let lw = crate::toolbar::width(&self.cfg, Zone::TabsLeft, TAB_H, editing, &lift);
         let rw = crate::toolbar::width(&self.cfg, Zone::TabsRight, TAB_H, editing, &lift);
         let (lo, hi) = (row.min.x + if lw > 0.0 { lw + 10.0 } else { 0.0 }, row.max.x - if rw > 0.0 { rw + 10.0 } else { 0.0 });
-        let mut x = match self.cfg.tabs_align {
-            0 => lo,
-            2 => hi - total,
-            _ => (lo + hi) / 2.0 - total / 2.0,
-        }
-        .max(lo);
+        // The tabs' room between them, less LB / RB and "+": tabs too wide
+        // for it narrow down alike (their names cut short); too many even
+        // so, they scroll, the current one in sight.
+        let n = natural.len();
+        let gaps = gap * n as f32;
+        let room = (hi - lo - shoulder_w * 2.0 - TAB_H - gap * if pad { 2.0 } else { 0.0 }).max(MIN_TAB + gap);
+        let fits = |m: f32| natural.iter().map(|w| w.min(m)).sum::<f32>() + gaps <= room;
+        let cap = if fits(f32::MAX) {
+            f32::MAX
+        } else {
+            let (mut a, mut b) = (MIN_TAB, natural.iter().cloned().fold(MIN_TAB, f32::max));
+            for _ in 0..24 {
+                let m = (a + b) / 2.0;
+                if fits(m) { a = m } else { b = m }
+            }
+            a
+        };
+        let widths: Vec<f32> = natural.iter().map(|w| w.min(cap)).collect();
+        let over = widths.iter().sum::<f32>() + gaps > room + 0.5;
+        let titles: Vec<_> = names.iter().enumerate().map(|(i, nm)| elided(ui, nm, font.clone(), v.text_color(), (widths[i] - extra(i)).clamp(8.0, 180.0), 1)).collect();
+        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
+        let strip_lo = lo + if pad { shoulder_w + gap } else { 0.0 };
+        let strip = Rect::from_min_max(pos2(strip_lo, row.min.y - 2.0), pos2(strip_lo + room, row.max.y + 2.0));
+        let mut x = if over {
+            // Scrolled: by the wheel over it, and so the current tab shows.
+            let id = ui.id().with("tabs-scroll");
+            let len: f32 = widths.iter().sum::<f32>() + gaps;
+            let mut off: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+            if ui.rect_contains_pointer(strip) {
+                let wheel = ui.input(|i| i.smooth_scroll_delta);
+                off -= wheel.x + wheel.y;
+            }
+            if self.tab < n && self.tab_drag.is_none() && ui.ctx().data(|d| d.get_temp::<usize>(id.with("shown"))) != Some(self.tab) {
+                let left: f32 = widths[..self.tab].iter().map(|w| w + gap).sum();
+                if left < off {
+                    off = left;
+                } else if left + widths[self.tab] > off + room {
+                    off = left + widths[self.tab] - room;
+                }
+                ui.ctx().data_mut(|d| d.insert_temp(id.with("shown"), self.tab));
+            }
+            off = off.clamp(0.0, (len - room).max(0.0));
+            ui.ctx().data_mut(|d| d.insert_temp(id, off));
+            lo - off
+        } else {
+            match self.cfg.tabs_align {
+                0 => lo,
+                2 => hi - total,
+                _ => (lo + hi) / 2.0 - total / 2.0,
+            }
+            .max(lo)
+        };
         let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
+        // (Scrolled, the tabs stay in their strip.)
+        let tabs_clip = if over { strip } else { row.expand(2.0) };
+        let tab_painter = ui.painter().with_clip_rect(tabs_clip);
         let dragging = self.drag.is_some();
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let mut resting = None;
         let mut rects = Vec::new();
 
         if pad {
-            shoulder_glyph(&painter, at(x, shoulder_w), Action::PrevTab, self.pad);
-            x += shoulder_w + gap;
+            let at_x = if over { lo } else { x };
+            shoulder_glyph(&painter, at(at_x, shoulder_w), Action::PrevTab, self.pad);
+            if !over {
+                x += shoulder_w + gap;
+            }
         }
         // A tab dragged along the row follows the mouse, the others make
         // room where it would go.
@@ -786,10 +841,14 @@ impl App {
             let hit = at(x, w);
             x += w + gap;
             let rect = hit.translate(vec2(offsets[i], 0.0));
-            let painter = if moving.is_some_and(|(d, _)| d == i) { lifted.clone() } else { painter.clone() };
+            let painter = if moving.is_some_and(|(d, _)| d == i) { lifted.clone().with_clip_rect(tabs_clip) } else { tab_painter.clone() };
             rects.push(hit);
+            // Scrolled out of sight: nothing to press.
+            if over && !strip.intersects(hit) {
+                continue;
+            }
             let is_active = i == self.tab;
-            let r = ui.interact(hit, ui.id().with(("tab", i)), Sense::click_and_drag());
+            let r = ui.interact(if over { hit.intersect(strip) } else { hit }, ui.id().with(("tab", i)), Sense::click_and_drag());
             if r.drag_started_by(egui::PointerButton::Primary) && !dragging {
                 if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                     picked = Some((i, p.x));
@@ -824,8 +883,9 @@ impl App {
             if under && let Some(t) = spring_progress(&self.spring, &crate::app::SpringAt::Tab(i)) {
                 spring_bar(ui, rect, t);
             }
-            if many {
-                let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
+            let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
+            // (Its ×, when it's in sight.)
+            if many && (!over || strip.contains_rect(cr)) {
                 let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
                 if is_active || r.hovered() || cresp.hovered() {
                     if cresp.hovered() {
@@ -844,6 +904,9 @@ impl App {
             if r.middle_clicked() {
                 close = Some(i);
             }
+        }
+        if over {
+            x = strip.max.x + gap;
         }
         let plus = at(x, TAB_H);
         x += TAB_H + gap;
@@ -2932,15 +2995,21 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
     let mut run = None;
     ui.label(egui::RichText::new(tr("Icon theme")).strong().size(18.0));
     ui.add_space(8.0);
+    // (In a small window: a narrower list, fewer samples a line, both
+    // scrolling.)
+    let dw = dialog_w();
+    let list_w = (dw * 0.42).clamp(160.0, 250.0);
+    let per = (((dw - list_w - 9.0 + 6.0) / 84.0).floor() as usize).clamp(2, 4);
+    let tall = (ui.ctx().content_rect().height() - 200.0).clamp(200.0, 380.0 + THEME_CHIPS_H);
     ui.horizontal_top(|ui| {
         // Theme list.
         ui.vertical(|ui| {
-            ui.set_width(250.0);
+            ui.set_width(list_w);
             let scroll_to = t.take_scroll();
-            egui::ScrollArea::vertical().id_salt("themes").max_height(380.0 + THEME_CHIPS_H).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("themes").max_height(tall).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (i, (id, label)) in t.items.iter().enumerate() {
-                    let (rect, r) = ui.allocate_exact_size(vec2(240.0, 34.0), Sense::click());
+                    let (rect, r) = ui.allocate_exact_size(vec2(list_w - 10.0, 34.0), Sense::click());
                     let cur = i == t.cursor;
                     let v = ui.visuals();
                     if cur && t.in_colors {
@@ -2972,9 +3041,10 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
         });
         // A plain ui.separator() here would stretch to the window's height
         // from the last frame, and the window would grow every frame.
-        let (line, _) = ui.allocate_exact_size(vec2(9.0, 380.0 + THEME_CHIPS_H), Sense::hover());
+        let (line, _) = ui.allocate_exact_size(vec2(9.0, tall), Sense::hover());
         ui.painter().vline(line.center().x, line.y_range(), ui.visuals().widgets.noninteractive.bg_stroke);
         // Preview of the highlighted theme.
+        egui::ScrollArea::vertical().id_salt("theme-preview-scroll").max_height(tall).show(ui, |ui| {
         ui.vertical(|ui| {
             let theme = t.preview[t.cursor].clone();
             ui.label(egui::RichText::new(&t.items[t.cursor].1).weak());
@@ -2984,7 +3054,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
             let colors = icons.folder_colors(&theme);
             t.colors = colors.clone();
             if !colors.is_empty() {
-                let (room, _) = ui.allocate_exact_size(vec2(crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0, THEME_CHIPS_H), Sense::hover());
+                let (room, _) = ui.allocate_exact_size(vec2((crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0).min(per as f32 * 84.0), THEME_CHIPS_H), Sense::hover());
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(Align::Min).with_main_wrap(true)));
                 let ui = &mut ui;
                 {
@@ -3021,11 +3091,12 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
                     let c = ui.visuals().weak_text_color();
                     let g = elided_centered(ui, tr(caption), FontId::proportional(11.0), c, 76.0, 1);
                     ui.painter().galley(pos2(rect.center().x, ir.max.y + 4.0), g, c);
-                    if i % 4 == 3 {
+                    if i % per == per - 1 {
                         ui.end_row();
                     }
                 }
             });
+        });
         });
     });
     ui.add_space(6.0);
@@ -3044,7 +3115,7 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
 }
 
 fn draw_props(ui: &mut Ui, p: &Props) -> bool {
-    ui.set_min_width(420.0);
+    ui.set_min_width(dialog_w().min(420.0));
     ui.horizontal(|ui| {
         if let Some(u) = &p.icon {
             ui.add(egui::Image::new(u.clone()).fit_to_exact_size(Vec2::splat(64.0)));
@@ -3668,7 +3739,19 @@ impl App {
     }
 }
 
-pub(crate) const SETTINGS_W: f32 = 560.0;
+/// The window's width, this frame (dialogs fit in it).
+static SCREEN_W: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1100.0f32.to_bits());
+
+/// How wide a dialog's content is: as it was made for, or as the window
+/// lets it be.
+pub(crate) fn dialog_w() -> f32 {
+    (f32::from_bits(SCREEN_W.load(std::sync::atomic::Ordering::Relaxed)) - 56.0).clamp(260.0, 560.0)
+}
+
+/// …the settings' right side (beside their categories).
+pub(crate) fn settings_w() -> f32 {
+    (f32::from_bits(SCREEN_W.load(std::sync::atomic::Ordering::Relaxed)) - 56.0 - CATS_W - 9.0).clamp(220.0, 560.0)
+}
 
 fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
@@ -3676,7 +3759,9 @@ fn rgb(c: [u8; 3]) -> Color32 {
 
 /// Row background; the focused row gets the highlight.
 pub(crate) fn settings_row(ui: &mut Ui, h: f32, focused: bool, id: impl std::hash::Hash) -> (Rect, egui::Response) {
-    let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W, h), Sense::click());
+    // (As wide as its column in the settings; in a dialog of its own, as
+    // a dialog may be.)
+    let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width().min(dialog_w()), h), Sense::click());
     let _ = id;
     // Up/Down in long settings scroll the focused row into view.
     if focused && ui.ctx().data_mut(|d| d.remove_temp::<bool>(egui::Id::new("settings-reveal"))).unwrap_or(false) {
@@ -3744,7 +3829,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                 .min_scrolled_height(h)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.set_width(SETTINGS_W);
+                    ui.set_width(settings_w());
                     ui.spacing_mut().item_spacing.y = 4.0;
                     let label_font = FontId::proportional(15.0);
                     let items = settings_items(st.cat);
@@ -3754,14 +3839,14 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                     // over the terminal, without their own title.
                     if items.iter().any(|i| matches!(i, SItem::Viewer(_))) {
                         let r = if let Some(SItem::Viewer(r)) = cur { r } else { NO_ROW };
-                        if let Some((r, d)) = crate::viewer::draw::draw_settings(ui, r, &cfg.viewer, SETTINGS_W, false) {
+                        if let Some((r, d)) = crate::viewer::draw::draw_settings(ui, r, &cfg.viewer, settings_w(), false) {
                             ev = Some(SettingsEvent::Item(SItem::Viewer(r), d));
                         }
                         ui.add_space(4.0);
                     }
                     if items.iter().any(|i| matches!(i, SItem::Term(_))) {
                         let r = if let Some(SItem::Term(r)) = cur { r } else { NO_ROW };
-                        if let Some((r, d)) = crate::terminal::draw::draw_settings(ui, r, &cfg.terminal, cfg.viewer.font.as_deref(), dark, SETTINGS_W, false) {
+                        if let Some((r, d)) = crate::terminal::draw::draw_settings(ui, r, &cfg.terminal, cfg.viewer.font.as_deref(), dark, settings_w(), false) {
                             ev = Some(SettingsEvent::Item(SItem::Term(r), d));
                         }
                     }
@@ -3770,7 +3855,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::ACCENT) => {
                                     // Highlight colour: swatches, wrapped.
                                     let sw = crate::app::swatches(cfg);
-                                    let per_line = 14;
+                                    let per_line = (((settings_w() - 30.0) / 36.0).floor() as usize).clamp(4, 14);
                                     let lines = (sw.len() + 1).div_ceil(per_line);
                                     // Label sits ~10pt below the top; the last swatch line (with its cursor
                                     // ring) ends 19pt below its centre. Same 10pt below it.
@@ -3813,15 +3898,17 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 }
                                 SItem::Row(row::APPEARANCE) => {
                                     // Light or dark: three segments.
-                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::APPEARANCE, "appearance");
+                                    let two = settings_w() < 480.0;
+                                    let (rect, r) = settings_row(ui, if two { 80.0 } else { 44.0 }, st.row == row::APPEARANCE, "appearance");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::APPEARANCE));
                                     }
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Appearance"), label_font.clone(), v.text_color());
+                                    let (line, ctl) = split_row(rect, two, 3.0 * 96.0);
+                                    row_label(ui, line, tr("Appearance"), &label_font, v.text_color(), if two { line.max.x } else { ctl.min.x - 8.0 });
                                     let names = [tr("System"), tr("Dark"), tr("Light")];
-                                    let seg_w = 96.0;
-                                    let x0 = rect.max.x - 10.0 - seg_w * 3.0;
-                                    let whole = Rect::from_min_size(pos2(x0, rect.center().y - 15.0), vec2(seg_w * 3.0, 30.0));
+                                    let seg_w = ctl.width() / 3.0;
+                                    let x0 = ctl.min.x;
+                                    let whole = Rect::from_min_size(pos2(x0, ctl.center().y - 15.0), vec2(seg_w * 3.0, 30.0));
                                     ui.painter().rect_filled(whole, 8.0, v.extreme_bg_color);
                                     for (i, name) in names.iter().enumerate() {
                                         let seg = Rect::from_min_size(pos2(x0 + i as f32 * seg_w, whole.min.y), vec2(seg_w, 30.0)).shrink(2.0);
@@ -3843,13 +3930,15 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 }
                                 SItem::Row(row::SCHEME) => {
                                     // Colour scheme: ‹ name ›, its colours beside it.
-                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::SCHEME, "scheme");
+                                    let two = settings_w() < 480.0;
+                                    let (rect, r) = settings_row(ui, if two { 80.0 } else { 44.0 }, st.row == row::SCHEME, "scheme");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::SCHEME));
                                     }
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Color scheme"), label_font.clone(), v.text_color());
+                                    let (line, ctl) = split_row(rect, two, 340.0);
+                                    row_label(ui, line, tr("Color scheme"), &label_font, v.text_color(), if two { line.max.x } else { ctl.min.x - 8.0 });
                                     // One's own schemes: their folder (△ on the pad).
-                                    let fb = Rect::from_center_size(pos2(rect.max.x - 340.0, rect.center().y), Vec2::splat(28.0));
+                                    let fb = Rect::from_center_size(pos2(ctl.min.x + 14.0, ctl.center().y), Vec2::splat(28.0));
                                     let fresp = ui.interact(fb, ui.id().with("scheme-folder"), Sense::click());
                                     if fresp.hovered() {
                                         ui.painter().rect_filled(fb, 6.0, v.widgets.hovered.weak_bg_fill);
@@ -3863,8 +3952,8 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     let scheme = cfg.scheme.as_ref().and_then(|id| schemes.iter().find(|s| s.id == *id));
                                     let name = scheme.map_or_else(|| tr("Standard").to_string(), |s| s.label());
                                     let (minus, plus) = (
-                                        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
-                                        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(fb.max.x + 26.0, ctl.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(ctl.max.x - 16.0, ctl.center().y), Vec2::splat(28.0)),
                                     );
                                     for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
                                         let resp = ui.interact(b, ui.id().with(("scheme", label)), Sense::click());
@@ -3875,29 +3964,32 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                         }
                                     }
                                     let mid = (minus.max.x + plus.min.x) / 2.0;
-                                    ui.painter().text(pos2(mid, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
+                                    let g = elided(ui, &name, label_font.clone(), v.strong_text_color(), plus.min.x - minus.max.x - 8.0, 1);
+                                    ui.painter().galley(pos2(mid - g.size().x / 2.0, ctl.center().y - g.size().y / 2.0), g, v.strong_text_color());
                                     if let Some(s) = scheme {
                                         // Background, controls, text, highlight: a strip under the name.
                                         for (i, c) in [s.background, s.surface, s.text, s.accent].into_iter().enumerate() {
-                                            let at = Rect::from_center_size(pos2(mid - 27.0 + i as f32 * 18.0, rect.max.y - 6.0), vec2(16.0, 5.0));
+                                            let at = Rect::from_center_size(pos2(mid - 27.0 + i as f32 * 18.0, ctl.max.y - 4.0), vec2(16.0, 5.0));
                                             ui.painter().rect(at, 2.0, c, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color), StrokeKind::Outside);
                                         }
                                     }
                                 }
                                 SItem::Row(row::LANGUAGE) => {
                                     // Language: ‹ name ›.
-                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::LANGUAGE, "language");
+                                    let two = settings_w() < 480.0;
+                                    let (rect, r) = settings_row(ui, if two { 80.0 } else { 44.0 }, st.row == row::LANGUAGE, "language");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::LANGUAGE));
                                     }
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Language"), label_font.clone(), v.text_color());
+                                    let (line, ctl) = split_row(rect, two, 300.0);
+                                    row_label(ui, line, tr("Language"), &label_font, v.text_color(), if two { line.max.x } else { ctl.min.x - 8.0 });
                                     let name = match cfg.language.as_deref().and_then(|c| crate::i18n::LANGUAGES.iter().find(|(l, _, _)| *l == c)) {
                                         Some((_, own, _)) => own.to_string(),
                                         None => format!("{} ({})", tr("As the system"), crate::i18n::LANGUAGES[crate::i18n::detect()].1),
                                     };
                                     let (minus, plus) = (
-                                        Rect::from_center_size(pos2(rect.max.x - 300.0, rect.center().y), Vec2::splat(28.0)),
-                                        Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(ctl.min.x + 14.0, ctl.center().y), Vec2::splat(28.0)),
+                                        Rect::from_center_size(pos2(ctl.max.x - 16.0, ctl.center().y), Vec2::splat(28.0)),
                                     );
                                     for (b, label, d) in [(minus, "‹", -1.0), (plus, "›", 1.0)] {
                                         let resp = ui.interact(b, ui.id().with(("lang", label)), Sense::click());
@@ -3907,7 +3999,8 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                             ev = Some(SettingsEvent::Step(row::LANGUAGE, d));
                                         }
                                     }
-                                    ui.painter().text(pos2((minus.max.x + plus.min.x) / 2.0, rect.center().y), Align2::CENTER_CENTER, name, label_font.clone(), v.strong_text_color());
+                                    let g = elided(ui, &name, label_font.clone(), v.strong_text_color(), plus.min.x - minus.max.x - 8.0, 1);
+                                    ui.painter().galley(pos2((minus.max.x + plus.min.x) / 2.0 - g.size().x / 2.0, ctl.center().y - g.size().y / 2.0), g, v.strong_text_color());
                                 }
                                 SItem::Row(r @ (row::SIDE_ICON | row::LIST_ICON | row::GRID_ICON | row::ZOOM)) => {
                                     // Steppers.
@@ -3922,9 +4015,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                         if r.clicked() {
                                             ev = Some(SettingsEvent::Row(r_i));
                                         }
-                                        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, label_font.clone(), v.text_color());
                                         let plus = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(30.0));
                                         let minus = Rect::from_center_size(pos2(rect.max.x - 136.0, rect.center().y), Vec2::splat(30.0));
+                                        row_label(ui, rect, label, &label_font, v.text_color(), minus.min.x - 4.0);
                                         for (b, t, d) in [(minus, "−", -1.0), (plus, "+", 1.0)] {
                                             let br = ui.interact(b, ui.id().with(("step", r_i, t)), Sense::click());
                                             ui.painter().rect(b, 6.0, if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill }, Stroke::NONE, StrokeKind::Inside);
@@ -3939,19 +4032,22 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::THEME) => {
                                     // Icon theme.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::THEME, "theme");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Icon theme…"), label_font.clone(), v.text_color());
                                     let ir = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(24.0));
                                     if let Some(u) = icons.named(&["folder"], lookup_px(ui, 24.0)) {
                                         egui::Image::new(u).paint_at(ui, ir);
                                     }
-                                    ui.painter().text(pos2(ir.min.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color());
+                                    let name = elided(ui, cfg.icon_theme.as_deref().unwrap_or(tr("System")), label_font.clone(), v.weak_text_color(), (rect.width() * 0.4).max(60.0), 1);
+                                    let left = ir.min.x - 10.0 - name.size().x;
+                                    ui.painter().galley(pos2(left, rect.center().y - name.size().y / 2.0), name, v.weak_text_color());
+                                    row_label(ui, rect, tr("Icon theme…"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Theme);
                                     }
                                 }
                                 SItem::Row(row::OPEN_IN) => {
                                     // Open in Polka: a chip per kind.
-                                    let (rect, r) = settings_row(ui, 128.0, st.row == row::OPEN_IN, "open-in");
+                                    let per = (((settings_w() - 20.0) / 118.0).floor() as usize).clamp(2, 4);
+                                    let (rect, r) = settings_row(ui, 44.0 + 42.0 * crate::app::OPEN_KINDS.div_ceil(per) as f32, st.row == row::OPEN_IN, "open-in");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::OPEN_IN));
                                     }
@@ -3959,9 +4055,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     // Four a line.
                                     let kinds = [tr("Text"), tr("Pictures"), tr("Music"), tr("Video"), "PDF", tr("Documents"), tr("Spreadsheets"), tr("Presentations")];
                                     let flags = [cfg.open_text, cfg.open_images, cfg.open_music, cfg.open_videos, cfg.open_pdf, cfg.open_docs, cfg.open_sheets, cfg.open_slides];
-                                    let chip_w = (SETTINGS_W - 28.0 - 3.0 * 8.0) / 4.0;
+                                    let chip_w = (settings_w() - 28.0 - (per - 1) as f32 * 8.0) / per as f32;
                                     for (i, label) in kinds.iter().enumerate() {
-                                        let (line, col) = (i / 4, i % 4);
+                                        let (line, col) = (i / per, i % per);
                                         let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 8.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
                                         let resp = ui.interact(chip, ui.id().with(("open-chip", i)), Sense::click());
                                         let on = flags[i];
@@ -3980,7 +4076,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::VOLUMES) => {
                                     // Folding multi-volume archives.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::VOLUMES, "volumes");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Fold multi-volume archives"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Fold multi-volume archives"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.collapse_volumes {
@@ -3993,7 +4089,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::WEB_IMAGES) => {
                                     // Pictures from the internet in Markdown.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::WEB_IMAGES, "web-images");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Load Markdown pictures from the internet"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Load Markdown pictures from the internet"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.viewer.web_images {
@@ -4006,18 +4102,18 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::LAYOUTS) => {
                                     // Keyboard layouts for ⇄.
                                     // Up to eight a line.
-                                    const PER_LINE: usize = 8;
-                                    let lines = crate::keyboard::CODES.len().div_ceil(PER_LINE);
+                                    let per_line = (((settings_w() - 22.0) / 44.0).floor() as usize).clamp(4, 8);
+                                    let lines = crate::keyboard::CODES.len().div_ceil(per_line);
                                     let (rect, r) = settings_row(ui, 44.0 + 42.0 * lines as f32, st.row == row::LAYOUTS, "layouts");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::LAYOUTS));
                                     }
                                     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Keyboard layouts"), label_font.clone(), v.text_color());
                                     let on_layouts = cfg.layouts();
-                                    let n = crate::keyboard::CODES.len().min(PER_LINE);
-                                    let chip_w = (SETTINGS_W - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
+                                    let n = crate::keyboard::CODES.len().min(per_line);
+                                    let chip_w = (settings_w() - 28.0 - (n as f32 - 1.0) * 6.0) / n as f32;
                                     for (i, code) in crate::keyboard::CODES.iter().enumerate() {
-                                        let (line, col) = (i / PER_LINE, i % PER_LINE);
+                                        let (line, col) = (i / per_line, i % per_line);
                                         let chip = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (chip_w + 6.0), rect.min.y + 38.0 + line as f32 * 42.0), vec2(chip_w, 36.0));
                                         let resp = ui.interact(chip, ui.id().with(("layout-chip", i)), Sense::click());
                                         let on = on_layouts.iter().any(|c| c == code);
@@ -4035,7 +4131,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::INSTALL) => {
                                     // Packages install on ✕.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::INSTALL, "install");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Install packages on open"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Install packages on open"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.install_on_open {
@@ -4048,9 +4144,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::PASSWORDS) => {
                                     // How typed passwords show.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::PASSWORDS, "passwords");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Passwords as you type"), label_font.clone(), v.text_color());
                                     let shown = if cfg.password_hidden { tr("Hidden") } else { "* * * *" };
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Passwords as you type"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::PASSWORDS));
                                     }
@@ -4058,7 +4154,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::REMEMBER_RIGHT) => {
                                     // Dual mode: the right pane where it was.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::REMEMBER_RIGHT, "remember-right");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Right pane opens where it was"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Right pane opens where it was"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.remember_right {
@@ -4071,8 +4167,8 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::PAD_HINTS) => {
                                     // The gamepad's hints: while it's in use, always or never.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::PAD_HINTS, "pad-hints");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Gamepad hints"), label_font.clone(), v.text_color());
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {} ▶", cfg.pad_hints.label()), FontId::proportional(15.0), v.strong_text_color());
+                                    let left = row_value(ui, rect, &format!("◀ {} ▶", cfg.pad_hints.label()), v.strong_text_color());
+                                    row_label(ui, rect, tr("Gamepad hints"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::PAD_HINTS));
                                     }
@@ -4080,9 +4176,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::TOUCH_OPEN) => {
                                     // A finger opens on one tap or two.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::TOUCH_OPEN, "touch-open");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Open by touch"), label_font.clone(), v.text_color());
                                     let shown = if cfg.touch_double { tr("Double tap") } else { tr("One tap") };
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Open by touch"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TOUCH_OPEN));
                                     }
@@ -4090,7 +4186,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::TITLEBAR) => {
                                     // The desktop's title bar, or Polka's top bar as one.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::TITLEBAR, "titlebar");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("System title bar"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("System title bar"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.system_titlebar {
@@ -4105,16 +4201,16 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     // tile a preview…
                                     use crate::titlebar::{ORDERS, STYLES, preview};
                                     let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
-                                    const PER: usize = 4;
-                                    let lines = STYLES.len().div_ceil(PER);
+                                    let per = (((settings_w() - 20.0) / 118.0).floor() as usize).clamp(2, 4);
+                                    let lines = STYLES.len().div_ceil(per);
                                     let (rect, r) = settings_row(ui, 44.0 + 66.0 * lines as f32, st.row == row::WIN_STYLE, "win-style");
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Row(row::WIN_STYLE));
                                     }
                                     ui.painter().text(rect.min + vec2(14.0, 18.0), Align2::LEFT_CENTER, tr("Window buttons"), label_font.clone(), v.text_color());
-                                    let tile_w = (SETTINGS_W - 28.0 - (PER as f32 - 1.0) * 8.0) / PER as f32;
+                                    let tile_w = (settings_w() - 28.0 - (per as f32 - 1.0) * 8.0) / per as f32;
                                     for (i, style) in STYLES.iter().enumerate() {
-                                        let (line, col) = (i / PER, i % PER);
+                                        let (line, col) = (i / per, i % per);
                                         let tile = Rect::from_min_size(pos2(rect.min.x + 14.0 + col as f32 * (tile_w + 8.0), rect.min.y + 38.0 + line as f32 * 66.0), vec2(tile_w, 60.0));
                                         let resp = ui.interact(tile, ui.id().with(("win-style", i)), Sense::click());
                                         let on = cfg.win_style == *style;
@@ -4122,7 +4218,8 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                         let stroke = if on && st.row == row::WIN_STYLE { Stroke::new(2.0, v.strong_text_color()) } else { Stroke::NONE };
                                         ui.painter().rect(tile, 8.0, fill, stroke, StrokeKind::Inside);
                                         preview(ui, icons, *style, &order, Rect::from_min_size(tile.min, vec2(tile.width(), 36.0)), 0.75);
-                                        ui.painter().text(pos2(tile.center().x, tile.max.y - 13.0), Align2::CENTER_CENTER, style.name(), FontId::proportional(13.0), v.text_color());
+                                        let g = elided(ui, style.name(), FontId::proportional(13.0), v.text_color(), tile.width() - 8.0, 1);
+                                        ui.painter().galley(pos2(tile.center().x - g.size().x / 2.0, tile.max.y - 13.0 - g.size().y / 2.0), g, v.text_color());
                                         if resp.clicked() {
                                             ev = Some(SettingsEvent::WinStyle(i));
                                         }
@@ -4131,9 +4228,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::WIN_SIDE) => {
                                     // …their side…
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::WIN_SIDE, "win-side");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Window buttons side"), label_font.clone(), v.text_color());
                                     let shown = if cfg.win_left { tr("Left") } else { tr("Right") };
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Window buttons side"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::WIN_SIDE));
                                     }
@@ -4142,13 +4239,15 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     // …and order.
                                     use crate::titlebar::{ORDERS, preview};
                                     let order = ORDERS[cfg.win_order as usize % ORDERS.len()];
-                                    let (rect, r) = settings_row(ui, 48.0, st.row == row::WIN_ORDER, "win-order");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Button order"), label_font.clone(), v.text_color());
+                                    let two = settings_w() < 480.0;
+                                    let (rect, r) = settings_row(ui, if two { 84.0 } else { 48.0 }, st.row == row::WIN_ORDER, "win-order");
+                                    let (line, ctl) = split_row(rect, two, 216.0);
+                                    row_label(ui, line, tr("Button order"), &label_font, v.text_color(), if two { line.max.x } else { ctl.min.x - 8.0 });
                                     let f = FontId::proportional(15.0);
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "▶", f.clone(), v.strong_text_color());
-                                    let shown = Rect::from_min_max(pos2(rect.max.x - 210.0, rect.min.y), pos2(rect.max.x - 36.0, rect.max.y));
+                                    ui.painter().text(pos2(ctl.max.x - 6.0, ctl.center().y), Align2::RIGHT_CENTER, "▶", f.clone(), v.strong_text_color());
+                                    let shown = Rect::from_min_max(pos2(ctl.max.x - 200.0, ctl.min.y), pos2(ctl.max.x - 26.0, ctl.max.y));
                                     preview(ui, icons, cfg.win_style, &order, shown, 1.0);
-                                    ui.painter().text(pos2(shown.min.x - 4.0, rect.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
+                                    ui.painter().text(pos2(shown.min.x - 4.0, ctl.center().y), Align2::RIGHT_CENTER, "◀", f, v.strong_text_color());
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::WIN_ORDER));
                                     }
@@ -4156,9 +4255,9 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::TABS_ALIGN) => {
                                     // Where the tabs sit.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::TABS_ALIGN, "tabs-align");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Tabs"), label_font.clone(), v.text_color());
                                     let shown = [tr("Left"), tr("Centre"), tr("Right")][cfg.tabs_align.min(2) as usize];
-                                    ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, format!("◀ {shown} ▶"), FontId::proportional(15.0), v.strong_text_color());
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Tabs"), &label_font, v.text_color(), left - 8.0);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TABS_ALIGN));
                                     }
@@ -4166,7 +4265,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::TYPE_FILTER) => {
                                     // Typing in the list filters it.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::TYPE_FILTER, "type-filter");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Filter by typing"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Filter by typing"), &label_font, v.text_color(), rect.max.x - 40.0);
                                     let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                     ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                     if cfg.type_filter {
@@ -4179,7 +4278,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::PLACES) => {
                                     // The sidebar's places: a list to tick and order.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::PLACES, "places");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Sidebar places…"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Sidebar places…"), &label_font, v.text_color(), rect.max.x);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::PLACES));
                                     }
@@ -4187,7 +4286,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 SItem::Row(row::TOOLBARS) => {
                                     // The buttons on the panels: a window of them to drag.
                                     let (rect, r) = settings_row(ui, 44.0, st.row == row::TOOLBARS, "toolbars");
-                                    ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Panel items…"), label_font.clone(), v.text_color());
+                                    row_label(ui, rect, tr("Panel items…"), &label_font, v.text_color(), rect.max.x);
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TOOLBARS));
                                     }
@@ -4196,7 +4295,7 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                             // A status bar figure: shown or not.
                             SItem::Status(f) => {
                                 let (rect, r) = settings_row(ui, 44.0, cur == Some(it), ("status-fig", f.label()));
-                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, f.label(), label_font.clone(), v.text_color());
+                                row_label(ui, rect, f.label(), &label_font, v.text_color(), rect.max.x - 40.0);
                                 let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
                                 ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
                                 if cfg.status.get(f) {
@@ -4212,15 +4311,17 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                 ui.label(egui::RichText::new(tr("Gamepad-first file manager")).color(v.weak_text_color()));
                                 ui.add_space(6.0);
                                 let (rect, r) = settings_row(ui, 44.0, cur == Some(it), "versions");
-                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Versions and updates…"), label_font.clone(), v.text_color());
+                                row_label(ui, rect, tr("Versions and updates…"), &label_font, v.text_color(), rect.max.x);
                                 if r.clicked() {
                                     ev = Some(SettingsEvent::Item(it, 0));
                                 }
                             }
                             SItem::Page => {
                                 let (rect, r) = settings_row(ui, 44.0, cur == Some(it), "page");
-                                ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, tr("Project page"), label_font.clone(), v.text_color());
-                                ui.painter().text(pos2(rect.max.x - 16.0, rect.center().y), Align2::RIGHT_CENTER, "github.com/sendement/polka", FontId::proportional(13.0), v.weak_text_color());
+                                let link = elided(ui, "github.com/sendement/polka", FontId::proportional(13.0), v.weak_text_color(), (rect.width() - 150.0).max(80.0), 1);
+                                let left = rect.max.x - 16.0 - link.size().x;
+                                ui.painter().galley(pos2(left, rect.center().y - link.size().y / 2.0), link, v.weak_text_color());
+                                row_label(ui, rect, tr("Project page"), &label_font, v.text_color(), left - 8.0);
                                 if r.clicked() {
                                     ev = Some(SettingsEvent::Item(it, 0));
                                 }
@@ -4245,13 +4346,40 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
 /// The settings' category list.
 const CATS_W: f32 = 180.0;
 
+/// A settings row's name, kept left of `right` (on two lines if need be,
+/// cut short past that).
+fn row_label(ui: &Ui, rect: Rect, text: &str, font: &FontId, color: Color32, right: f32) {
+    let w = (right - rect.min.x - 14.0).max(40.0);
+    let g = elided(ui, text, font.clone(), color, w, 2);
+    ui.painter().galley(pos2(rect.min.x + 14.0, rect.center().y - g.size().y / 2.0), g, color);
+}
+
+/// A row's value ("◀ value ▶") at its right end; where it begins.
+fn row_value(ui: &Ui, rect: Rect, text: &str, color: Color32) -> f32 {
+    let g = elided(ui, text, FontId::proportional(15.0), color, (rect.width() * 0.6).max(80.0), 1);
+    let left = rect.max.x - 16.0 - g.size().x;
+    ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, color);
+    left
+}
+
+/// A row with a wide control: its name's line, and the control's room
+/// (beside the name, `w` wide; or, `two`, the whole line under it).
+fn split_row(rect: Rect, two: bool, w: f32) -> (Rect, Rect) {
+    if two {
+        let line = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + 34.0));
+        (line, Rect::from_min_max(pos2(rect.min.x + 10.0, line.max.y), pos2(rect.max.x - 10.0, rect.max.y - 8.0)))
+    } else {
+        (rect, Rect::from_min_max(pos2(rect.max.x - 10.0 - w, rect.min.y + 6.0), pos2(rect.max.x - 10.0, rect.max.y - 6.0)))
+    }
+}
+
 fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<SettingsEvent> {
     let mut ev = None;
     let v = ui.visuals().clone();
     ui.label(egui::RichText::new(tr("New color")).strong().size(18.0));
     ui.add_space(8.0);
     let [r, g, b] = ed.rgb();
-    let (prev, _) = ui.allocate_exact_size(vec2(SETTINGS_W, 56.0), Sense::hover());
+    let (prev, _) = ui.allocate_exact_size(vec2(dialog_w(), 56.0), Sense::hover());
     ui.painter().rect_filled(Rect::from_min_size(prev.min, vec2(120.0, 48.0)), 8.0, Color32::from_rgb(r, g, b));
     ui.painter().text(
         pos2(prev.min.x + 136.0, prev.min.y + 24.0),
@@ -4292,7 +4420,7 @@ fn draw_color_editor(ui: &mut Ui, ed: &crate::app::ColorEditor) -> Option<Settin
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         for (i, label) in [(3, tr("Save")), (4, tr("Cancel"))] {
-            let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
+            let (rect, r) = ui.allocate_exact_size(vec2(dialog_w() / 2.0 - 4.0, 40.0), Sense::click());
             let focused = ed.row == i;
             let fill = if focused { tint(&v, 0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
             ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
@@ -4484,7 +4612,7 @@ fn draw_compress(ui: &mut Ui, d: &crate::app::CompressDlg, pad: PadKind) -> Opti
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         for (i, label, g) in [(crow::CREATE, tr("Create"), Action::Menu), (crow::CANCEL, tr("Cancel"), Action::Back)] {
-            let (rect, r) = ui.allocate_exact_size(vec2(SETTINGS_W / 2.0 - 4.0, 40.0), Sense::click());
+            let (rect, r) = ui.allocate_exact_size(vec2(dialog_w() / 2.0 - 4.0, 40.0), Sense::click());
             let focused = d.row == i;
             let fill = if focused { tint(&v, 0.5) } else if r.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
             ui.painter().rect(rect, 8.0, fill, if focused { Stroke::new(1.5, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);

@@ -3556,7 +3556,7 @@ dependencies = [
 
 [[package]]
 name = "polka"
-version = "0.53.0"
+version = "0.53.1"
 dependencies = [
  "alacritty_terminal",
  "base64",

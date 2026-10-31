@@ -265,13 +265,17 @@ pub fn draw(ui: &mut Ui, d: &mut OpenWithDlg, icons: &mut crate::icons::Icons) -
         }
     }
     ui.add_space(4.0);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.button(tr("Cancel")).clicked() {
-            ev = Some(OwEv::Cancel);
-        }
-        if ui.add_enabled(!d.list.is_empty(), egui::Button::new(egui::RichText::new(tr("Open")).strong())).clicked() {
-            ev = Some(OwEv::Go);
-        }
+    // (In a row: laid out right to left in the window itself, it would
+    // take all the height there is.)
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(tr("Cancel")).clicked() {
+                ev = Some(OwEv::Cancel);
+            }
+            if ui.add_enabled(!d.list.is_empty(), egui::Button::new(egui::RichText::new(tr("Open")).strong())).clicked() {
+                ev = Some(OwEv::Go);
+            }
+        });
     });
     ev
 }

@@ -181,7 +181,7 @@ pub fn draw_places(ui: &mut egui::Ui, d: &mut PlacesDlg, all: &[SideItem], hidde
     use egui::{Align2, FontId, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
     let mut ev = None;
     let mut rows = Vec::new();
-    ui.set_width(440.0);
+    ui.set_width(crate::view::dialog_w().min(440.0));
     ui.label(egui::RichText::new(tr("Sidebar places")).strong().size(18.0));
     ui.label(egui::RichText::new(tr("Untick to hide; drag to put in another order.")).weak());
     ui.add_space(6.0);

@@ -416,103 +416,107 @@ pub fn draw(ui: &mut Ui, d: &NetDlg) -> Option<(NRow, isize)> {
     ui.spacing_mut().item_spacing.y = 4.0;
     let c = &d.conn;
     let tool = c.tool();
-    for row in d.rows() {
-        let h = if row == NRow::Kind || row == NRow::Tool { 48.0 } else { 40.0 };
-        let (rect, r) = crate::view::settings_row(ui, h, d.row == row, ("net", row as u8));
-        if row == NRow::Buttons {
-            // The mouse's buttons (the pad: ← → and ✕).
-            let names = [tr("Connect"), tr("Save"), tr("Cancel")];
-            let w = 130.0;
-            for (i, n) in names.iter().enumerate() {
-                let b = Rect::from_min_size(pos2(rect.max.x - (3 - i) as f32 * (w + 8.0), rect.center().y - 15.0), egui::vec2(w, 30.0));
-                let br = ui.interact(b, ui.id().with(("net-btn", i)), Sense::click());
-                let on = d.row == NRow::Buttons && d.button == i;
-                let fill = if on || (i == 0 && d.row != NRow::Buttons) { v.selection.bg_fill } else if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
-                ui.painter().rect(b, 6.0, fill, Stroke::NONE, StrokeKind::Inside);
-                let fg = if on || (i == 0 && d.row != NRow::Buttons) { v.selection.stroke.color } else { v.text_color() };
-                ui.painter().text(b.center(), Align2::CENTER_CENTER, *n, font.clone(), fg);
-                if br.clicked() {
-                    ev = Some((NRow::Buttons, i as isize + 10));
-                }
-            }
-            continue;
-        }
-        if r.clicked() && !matches!(row, NRow::Kind | NRow::Tool) {
-            ev = Some((row, 0));
-        }
-        let label = match row {
-            NRow::Kind => tr("Type"),
-            NRow::Remember => {
-                if crate::net::keyring() {
-                    tr("Remember the password (keyring)")
-                } else {
-                    tr("Remember the password (this session)")
-                }
-            }
-            NRow::Tool => tr("Mount with"),
-            _ => d.label(row),
-        };
-        ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, font.clone(), v.text_color());
-        match row {
-            NRow::Kind | NRow::Tool => {
-                // Chips: the kinds, or the tools (those not installed dim).
-                let items: Vec<(String, bool, bool)> = if row == NRow::Kind {
-                    KINDS.iter().map(|k| (k.label().to_string(), *k == c.kind, true)).collect()
-                } else {
-                    c.kind.tools().iter().map(|t| (t.label().to_string(), Some(*t) == tool, crate::net::available(*t, c.kind))).collect()
-                };
-                let mut x = rect.max.x - 10.0;
-                for (i, (name, on, there)) in items.iter().enumerate().rev() {
-                    let g = ui.painter().layout_no_wrap(name.clone(), FontId::proportional(13.0), Color32::WHITE);
-                    let w = g.size().x + 16.0;
-                    let chip = Rect::from_min_size(pos2(x - w, rect.center().y - 13.0), egui::vec2(w, 26.0));
-                    x -= w + 4.0;
-                    let cr = ui.interact(chip, ui.id().with(("net-chip", row as u8, i)), Sense::click());
-                    let fill = if *on { v.selection.bg_fill } else if cr.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
-                    ui.painter().rect(chip, 6.0, fill, Stroke::NONE, StrokeKind::Inside);
-                    let fg = if *on { v.selection.stroke.color } else if *there { v.text_color() } else { v.weak_text_color() };
-                    ui.painter().text(chip.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.0), fg);
-                    let cr = if *there { cr } else { cr.on_hover_text(format!("{} {}", tr("Not installed:"), c.kind.tools()[i].package())) };
-                    if cr.clicked() {
-                        ev = Some((row, i as isize + 100));
+    // (A short window: they scroll.)
+    let max_h = (ui.ctx().content_rect().height() - 160.0).max(160.0);
+    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+        for row in d.rows() {
+            let h = if row == NRow::Kind || row == NRow::Tool { 48.0 } else { 40.0 };
+            let (rect, r) = crate::view::settings_row(ui, h, d.row == row, ("net", row as u8));
+            if row == NRow::Buttons {
+                // The mouse's buttons (the pad: ← → and ✕).
+                let names = [tr("Connect"), tr("Save"), tr("Cancel")];
+                let w = 130.0;
+                for (i, n) in names.iter().enumerate() {
+                    let b = Rect::from_min_size(pos2(rect.max.x - (3 - i) as f32 * (w + 8.0), rect.center().y - 15.0), egui::vec2(w, 30.0));
+                    let br = ui.interact(b, ui.id().with(("net-btn", i)), Sense::click());
+                    let on = d.row == NRow::Buttons && d.button == i;
+                    let fill = if on || (i == 0 && d.row != NRow::Buttons) { v.selection.bg_fill } else if br.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
+                    ui.painter().rect(b, 6.0, fill, Stroke::NONE, StrokeKind::Inside);
+                    let fg = if on || (i == 0 && d.row != NRow::Buttons) { v.selection.stroke.color } else { v.text_color() };
+                    ui.painter().text(b.center(), Align2::CENTER_CENTER, *n, font.clone(), fg);
+                    if br.clicked() {
+                        ev = Some((NRow::Buttons, i as isize + 10));
                     }
                 }
+                continue;
             }
-            NRow::Remember => {
-                let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
-                ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-                if c.remember {
-                    ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+            if r.clicked() && !matches!(row, NRow::Kind | NRow::Tool) {
+                ev = Some((row, 0));
+            }
+            let label = match row {
+                NRow::Kind => tr("Type"),
+                NRow::Remember => {
+                    if crate::net::keyring() {
+                        tr("Remember the password (keyring)")
+                    } else {
+                        tr("Remember the password (this session)")
+                    }
+                }
+                NRow::Tool => tr("Mount with"),
+                _ => d.label(row),
+            };
+            ui.painter().text(pos2(rect.min.x + 14.0, rect.center().y), Align2::LEFT_CENTER, label, font.clone(), v.text_color());
+            match row {
+                NRow::Kind | NRow::Tool => {
+                    // Chips: the kinds, or the tools (those not installed dim).
+                    let items: Vec<(String, bool, bool)> = if row == NRow::Kind {
+                        KINDS.iter().map(|k| (k.label().to_string(), *k == c.kind, true)).collect()
+                    } else {
+                        c.kind.tools().iter().map(|t| (t.label().to_string(), Some(*t) == tool, crate::net::available(*t, c.kind))).collect()
+                    };
+                    let mut x = rect.max.x - 10.0;
+                    for (i, (name, on, there)) in items.iter().enumerate().rev() {
+                        let g = ui.painter().layout_no_wrap(name.clone(), FontId::proportional(13.0), Color32::WHITE);
+                        let w = g.size().x + 16.0;
+                        let chip = Rect::from_min_size(pos2(x - w, rect.center().y - 13.0), egui::vec2(w, 26.0));
+                        x -= w + 4.0;
+                        let cr = ui.interact(chip, ui.id().with(("net-chip", row as u8, i)), Sense::click());
+                        let fill = if *on { v.selection.bg_fill } else if cr.hovered() { v.widgets.hovered.bg_fill } else { v.widgets.inactive.bg_fill };
+                        ui.painter().rect(chip, 6.0, fill, Stroke::NONE, StrokeKind::Inside);
+                        let fg = if *on { v.selection.stroke.color } else if *there { v.text_color() } else { v.weak_text_color() };
+                        ui.painter().text(chip.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.0), fg);
+                        let cr = if *there { cr } else { cr.on_hover_text(format!("{} {}", tr("Not installed:"), c.kind.tools()[i].package())) };
+                        if cr.clicked() {
+                            ev = Some((row, i as isize + 100));
+                        }
+                    }
+                }
+                NRow::Remember => {
+                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                    if c.remember {
+                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                    }
+                }
+                _ => {
+                    let value = match row {
+                        NRow::Name => c.name.clone(),
+                        NRow::Address => c.address.clone(),
+                        NRow::Path => c.path.clone(),
+                        NRow::User => c.user.clone(),
+                        NRow::Port => c.port.map(|p| p.to_string()).unwrap_or_default(),
+                        NRow::Password => "•".repeat(d.password.chars().count().min(12)),
+                        _ => String::new(),
+                    };
+                    let hint = match row {
+                        NRow::Address if c.kind == Kind::WebDav => "https://cloud.example.org/remote.php/dav/files/me",
+                        NRow::Address if c.kind == Kind::Rclone => "gdrive",
+                        NRow::Address => "nas.local / 192.168.1.10",
+                        NRow::Port => match c.kind {
+                            Kind::Smb => "445",
+                            Kind::Sftp => "22",
+                            Kind::Ftp => "21",
+                            _ => "",
+                        },
+                        _ => "",
+                    };
+                    let (text, color) = if value.is_empty() { (hint.to_string(), v.weak_text_color()) } else { (value, v.strong_text_color()) };
+                    let g = crate::view::elided(ui, &text, font.clone(), color, 300.0, 1);
+                    ui.painter().galley(pos2(rect.max.x - 14.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, color);
                 }
             }
-            _ => {
-                let value = match row {
-                    NRow::Name => c.name.clone(),
-                    NRow::Address => c.address.clone(),
-                    NRow::Path => c.path.clone(),
-                    NRow::User => c.user.clone(),
-                    NRow::Port => c.port.map(|p| p.to_string()).unwrap_or_default(),
-                    NRow::Password => "•".repeat(d.password.chars().count().min(12)),
-                    _ => String::new(),
-                };
-                let hint = match row {
-                    NRow::Address if c.kind == Kind::WebDav => "https://cloud.example.org/remote.php/dav/files/me",
-                    NRow::Address if c.kind == Kind::Rclone => "gdrive",
-                    NRow::Address => "nas.local / 192.168.1.10",
-                    NRow::Port => match c.kind {
-                        Kind::Smb => "445",
-                        Kind::Sftp => "22",
-                        Kind::Ftp => "21",
-                        _ => "",
-                    },
-                    _ => "",
-                };
-                let (text, color) = if value.is_empty() { (hint.to_string(), v.weak_text_color()) } else { (value, v.strong_text_color()) };
-                let g = crate::view::elided(ui, &text, font.clone(), color, 300.0, 1);
-                ui.painter().galley(pos2(rect.max.x - 14.0 - g.size().x, rect.center().y - g.size().y / 2.0), g, color);
-            }
         }
-    }
+    });
     // No tool for it on the system: what to install.
     if tool.is_none() {
         ui.add_space(4.0);

@@ -726,12 +726,12 @@ fn prepare(paths: Vec<PathBuf>, last: &[(Group, Target)], numbering: crate::tabl
 /// The files as tiles: their thumbnail or icon, the name, maybe why not.
 fn tiles(ui: &mut Ui, items: &[(&Path, Option<&str>)], icons: &mut crate::icons::Icons, dim: bool) {
     let v = ui.visuals().clone();
-    let per_line = ((crate::view::SETTINGS_W - 8.0) / TILE.x).floor().max(1.0) as usize;
+    let per_line = ((crate::view::dialog_w() - 8.0) / TILE.x).floor().max(1.0) as usize;
     let max = per_line * TILE_LINES;
     let shown = if items.len() > max { max - 1 } else { items.len() };
     let lines = (shown + usize::from(items.len() > shown)).div_ceil(per_line).max(1);
     let tile = vec2(TILE.x, if items.iter().any(|i| i.1.is_some()) { TILE_WHY } else { TILE.y });
-    let (room, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, lines as f32 * tile.y), Sense::hover());
+    let (room, _) = ui.allocate_exact_size(vec2(crate::view::dialog_w(), lines as f32 * tile.y), Sense::hover());
     let tint = if dim { Color32::from_white_alpha(110) } else { Color32::WHITE };
     for (i, (path, why)) in items.iter().take(shown).enumerate() {
         let at = room.min + vec2((i % per_line) as f32 * tile.x, (i / per_line) as f32 * tile.y);
@@ -856,7 +856,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
         for (i, g) in d.groups.iter().enumerate() {
             // A block each (a line between).
             if i > 0 {
-                let (r, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 9.0), Sense::hover());
+                let (r, _) = ui.allocate_exact_size(vec2(crate::view::dialog_w(), 9.0), Sense::hover());
                 ui.painter().hline(r.x_range().shrink(14.0), r.center().y, Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color));
             }
             // The kind's files first (tables: with their columns)…
@@ -866,8 +866,8 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
                 Some(None) => head += &format!(" · {}", tr("no header row")),
                 None => {}
             }
-            let gal = crate::view::elided(ui, &head, egui::TextStyle::Body.resolve(ui.style()), v.strong_text_color(), crate::view::SETTINGS_W - 10.0, 1);
-            let (r, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, gal.size().y), Sense::hover());
+            let gal = crate::view::elided(ui, &head, egui::TextStyle::Body.resolve(ui.style()), v.strong_text_color(), crate::view::dialog_w() - 10.0, 1);
+            let (r, _) = ui.allocate_exact_size(vec2(crate::view::dialog_w(), gal.size().y), Sense::hover());
             ui.painter().galley(r.min, gal, v.strong_text_color());
             let items: Vec<(&Path, Option<&str>)> = g.items.iter().map(|p| (p.as_path(), None)).collect();
             tiles(ui, &items, icons, false);
@@ -875,7 +875,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
             if g.group == Group::Archive {
                 let o = &d.arch;
                 let names: Vec<String> = g.targets.iter().map(|t| t.label().to_string()).collect();
-                let h = 24.0 + 30.0 * lines(ui, &names, crate::view::SETTINGS_W - CHIPS_X - 10.0) as f32;
+                let h = 24.0 + 30.0 * lines(ui, &names, crate::view::dialog_w() - CHIPS_X - 10.0) as f32;
                 let (rect, r) = crate::view::settings_row(ui, h.max(44.0), d.row == CRow::Format, ("conv", "format"));
                 if r.clicked() {
                     ev = Some((CRow::Format, 0));
@@ -910,7 +910,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
                 }
             } else {
                 let names: Vec<String> = g.targets.iter().map(|t| t.label().to_string()).collect();
-                let h = 24.0 + 30.0 * lines(ui, &names, crate::view::SETTINGS_W - CHIPS_X - 10.0) as f32;
+                let h = 24.0 + 30.0 * lines(ui, &names, crate::view::dialog_w() - CHIPS_X - 10.0) as f32;
                 let row = CRow::Target(i);
                 let (rect, r) = crate::view::settings_row(ui, h.max(44.0), d.row == row, ("conv", i));
                 if r.clicked() {
@@ -965,7 +965,7 @@ pub fn draw(ui: &mut Ui, d: &ConvertDlg, icons: &mut crate::icons::Icons) -> Opt
             ui.label(egui::RichText::new(format!("{} · {}", tr("Left out"), d.refused.len())).strong().color(v.warn_fg_color));
             // A line each: the icon, the name, why.
             for (p, why) in &d.refused {
-                let (rect, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 26.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(vec2(crate::view::dialog_w(), 26.0), Sense::hover());
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let e = crate::vfs::Entry { name: name.clone(), is_dir: p.is_dir(), is_link: false, size: 0, mtime: None, mode: 0o644, tags: Vec::new() };
                 if let Some(u) = icons.for_entry(&e, Some(p), 32) {
@@ -1019,7 +1019,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, i: usize, g: &GroupRow, t: &TableSide
         // How the first CSV reads with it: a few rows, a few columns (the
         // column being set among them), as their types make them.
         const ROW_H: f32 = 20.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(crate::view::SETTINGS_W, 18.0 + 6.0 * ROW_H + 4.0), Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(vec2(crate::view::dialog_w(), 18.0 + 6.0 * ROW_H + 4.0), Sense::hover());
         let caption = Rect::from_min_max(pos2(rect.min.x + 18.0, rect.min.y), pos2(rect.max.x - 18.0, rect.min.y + 16.0));
         let area = Rect::from_min_max(pos2(rect.min.x + 14.0, rect.min.y + 18.0), pos2(rect.max.x - 14.0, rect.max.y - 2.0));
         ui.painter().rect_filled(area, 6.0, v.extreme_bg_color);
@@ -1087,7 +1087,7 @@ fn table_rows(ui: &mut Ui, d: &ConvertDlg, i: usize, g: &GroupRow, t: &TableSide
                         Some(h) => h.clone(),
                         None => trn("Column %n", k + 1),
                     };
-                    let label_w = crate::view::SETTINGS_W - 250.0;
+                    let label_w = crate::view::dialog_w() - 250.0;
                     // Folded: an arrow, and the columns set by hand under it.
                     let rect = stepper(ui, CRow::ColsAll(i), "", all, ev);
                     let (cx, cy) = (rect.min.x + 20.0, rect.center().y - 7.0);

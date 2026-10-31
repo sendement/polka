@@ -384,39 +384,45 @@ pub enum PaletteEv {
 /// The panel items window: every button, to drag onto a place.
 pub fn draw_palette(ui: &mut Ui, icons: &mut Icons, cfg: &Config) -> Option<PaletteEv> {
     let mut ev = None;
-    ui.set_width(560.0);
+    let width = crate::view::dialog_w();
+    ui.set_width(width);
     ui.label(egui::RichText::new(tr("Panel items")).strong().size(18.0));
     ui.label(egui::RichText::new(tr("Drag buttons onto the panels above; drag one off a panel to take it away.")).weak());
     ui.add_space(8.0);
-    const COLS: usize = 6;
-    let tile = vec2((560.0 - (COLS - 1) as f32 * 6.0) / COLS as f32, 76.0);
-    for line in ALL.chunks(COLS) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            for t in line {
-                let (r, resp) = ui.allocate_exact_size(tile, Sense::click_and_drag());
-                let v = ui.visuals();
-                let placed = cfg.toolbars.contains(*t);
-                let fill = if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
-                ui.painter().rect(r, 8.0, fill, if placed { Stroke::new(1.0, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
-                let icon = Rect::from_center_size(pos2(r.center().x, r.min.y + 20.0), Vec2::splat(22.0));
-                let px = ((22.0 * ui.pixels_per_point()).ceil() as u16).max(22);
-                match icons.ui_icon(t.icons(cfg), px, v.text_color()) {
-                    Some(u) => egui::Image::new(u).paint_at(ui, icon),
-                    None => {
-                        ui.painter().text(icon.center(), Align2::CENTER_CENTER, t.glyph(), FontId::proportional(18.0), v.text_color());
+    // (Fewer a line in a narrow window.)
+    let cols = (((width + 6.0) / 96.0).floor() as usize).clamp(3, 6);
+    let tile = vec2((width - (cols - 1) as f32 * 6.0) / cols as f32, 76.0);
+    // (A short window: they scroll.)
+    let max_h = (ui.ctx().content_rect().height() - 220.0).max(160.0);
+    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+        for line in ALL.chunks(cols) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for t in line {
+                    let (r, resp) = ui.allocate_exact_size(tile, Sense::click_and_drag());
+                    let v = ui.visuals();
+                    let placed = cfg.toolbars.contains(*t);
+                    let fill = if resp.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill };
+                    ui.painter().rect(r, 8.0, fill, if placed { Stroke::new(1.0, v.selection.bg_fill) } else { Stroke::NONE }, StrokeKind::Inside);
+                    let icon = Rect::from_center_size(pos2(r.center().x, r.min.y + 20.0), Vec2::splat(22.0));
+                    let px = ((22.0 * ui.pixels_per_point()).ceil() as u16).max(22);
+                    match icons.ui_icon(t.icons(cfg), px, v.text_color()) {
+                        Some(u) => egui::Image::new(u).paint_at(ui, icon),
+                        None => {
+                            ui.painter().text(icon.center(), Align2::CENTER_CENTER, t.glyph(), FontId::proportional(18.0), v.text_color());
+                        }
+                    }
+                    let g = ui.painter().layout(t.label().to_string(), FontId::proportional(11.0), v.text_color(), tile.x - 6.0);
+                    ui.painter().galley(pos2(r.center().x - g.size().x / 2.0, r.min.y + 36.0), g, v.text_color());
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.label()));
+                    if resp.drag_started_by(egui::PointerButton::Primary) {
+                        ev = Some(PaletteEv::Pick(*t));
                     }
                 }
-                let g = ui.painter().layout(t.label().to_string(), FontId::proportional(11.0), v.text_color(), tile.x - 6.0);
-                ui.painter().galley(pos2(r.center().x - g.size().x / 2.0, r.min.y + 36.0), g, v.text_color());
-                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, t.label()));
-                if resp.drag_started_by(egui::PointerButton::Primary) {
-                    ev = Some(PaletteEv::Pick(*t));
-                }
-            }
-        });
-        ui.add_space(6.0);
-    }
+            });
+            ui.add_space(6.0);
+        }
+    });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.button(tr("Default")).clicked() {

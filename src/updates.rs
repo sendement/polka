@@ -470,7 +470,7 @@ pub fn event(app: &mut App, ev: VEv) {
 pub fn draw(ui: &mut Ui, d: &VersionsDlg) -> Option<VEv> {
     let mut ev = None;
     let v = ui.visuals().clone();
-    let w = crate::view::SETTINGS_W;
+    let w = crate::view::dialog_w();
     ui.set_width(w);
     ui.label(egui::RichText::new(tr("Polka versions")).strong().size(18.0));
     let mut here = format!("{}: {} · {}", tr("Installed"), shown(current()), d.way.name());

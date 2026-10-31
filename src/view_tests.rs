@@ -7226,3 +7226,107 @@ fn places_screens() {
     h.state_mut().cfg.save();
     h.state_mut().refresh_sidebar();
 }
+
+/// A narrow window: the tabs keep off the buttons beside them (narrower,
+/// then scrolled with the current one in sight); every dialog fits.
+#[test]
+#[ignore]
+fn narrow_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::toolbar::{Tool, Zone};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let (w, hgt) = (560.0, 520.0);
+    let mut h = harness_with(dir.clone(), [w, hgt], "-narrow");
+    let mut cfg = h.state().cfg.clone();
+    cfg.dual = false;
+    cfg.toolbars = Default::default();
+    cfg.toolbars.tabs_left = vec![Tool::NewTab];
+    cfg.toolbars.tabs_right = vec![Tool::Copy, Tool::Paste];
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    // Many tabs: within their room, the current one shown whole.
+    for _ in 0..8 {
+        h.state_mut().run(Cmd::NewTab);
+    }
+    settle(&mut h);
+    settle(&mut h);
+    let room = |h: &Harness<'static, App>| {
+        let t = &h.state().tool_targets;
+        let l = t.iter().find(|t| t.zone == Zone::TabsLeft).unwrap().area.max.x;
+        let r = t.iter().find(|t| t.zone == Zone::TabsRight).unwrap().area.min.x;
+        (l, r)
+    };
+    let check = |h: &Harness<'static, App>, what: &str| {
+        let (l, r) = room(h);
+        let cur = h.state().tab_rects[h.state().tab];
+        assert!(cur.min.x >= l && cur.max.x <= r, "{what}: the current tab {cur:?} outside {l}..{r}");
+        for (i, t) in h.state().tab_rects.iter().enumerate() {
+            let shown = t.max.x > l && t.min.x < r;
+            assert!(!shown || (t.min.x > l - t.width() && t.max.x < r + t.width()), "{what}: tab {i} {t:?}");
+        }
+    };
+    check(&h, "last tab current");
+    shot(&mut h, "nw1-many-tabs");
+    h.state_mut().pick_tab(0);
+    settle(&mut h);
+    check(&h, "first tab current");
+    shot(&mut h, "nw2-first-tab");
+    for i in (1..9).rev() {
+        h.state_mut().run(Cmd::CloseTabAt(i));
+    }
+    settle(&mut h);
+    // Every dialog within the window.
+    let fits = |h: &mut Harness<'static, App>, what: &str| {
+        for _ in 0..4 {
+            settle(h);
+        }
+        let kind = h.state().overlay.as_ref().map(std::mem::discriminant);
+        let menu = match h.state().overlay.as_ref() {
+            Some(Overlay::Menu(m)) => Some((m.title.clone(), m.items.len())),
+            _ => None,
+        };
+        let r = h.ctx.memory(|m| m.area_rect(egui::Id::new(("overlay", kind, menu)))).unwrap_or_else(|| panic!("{what}: not shown"));
+        shot(h, &format!("nw-{what}"));
+        assert!(r.min.x >= -1.0 && r.max.x <= w + 1.0, "{what}: {r:?} wider than the window");
+        assert!(r.min.y >= -1.0 && r.max.y <= hgt + 1.0, "{what}: {r:?} taller than the window");
+        h.state_mut().overlay = None;
+        settle(h);
+    };
+    for c in 0..crate::app::SETTINGS_CATS {
+        h.state_mut().run(Cmd::Settings);
+        if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+            st.cat = c;
+        }
+        fits(&mut h, &format!("settings-{c}"));
+    }
+    h.state_mut().open_app_menu();
+    fits(&mut h, "app-menu");
+    h.state_mut().overlay = Some(Overlay::Toolbars);
+    fits(&mut h, "panel-items");
+    h.state_mut().overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None }));
+    fits(&mut h, "places");
+    h.state_mut().run(Cmd::Help);
+    fits(&mut h, "help");
+    let i = h.state().pane().entries.iter().position(|e| e.name == "note.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Rename);
+    fits(&mut h, "rename");
+    h.state_mut().run(Cmd::CompressAsk);
+    fits(&mut h, "compress");
+    h.state_mut().run(Cmd::Properties);
+    fits(&mut h, "properties");
+    h.state_mut().run(Cmd::ConvertAsk);
+    for _ in 0..20 {
+        settle(&mut h);
+    }
+    if h.state().overlay.is_some() {
+        fits(&mut h, "convert");
+    }
+    h.state_mut().run(Cmd::NetAdd);
+    fits(&mut h, "network");
+    h.state_mut().run(Cmd::TagsAsk);
+    fits(&mut h, "tags");
+    h.state_mut().run(Cmd::IconThemes);
+    fits(&mut h, "themes");
+}
