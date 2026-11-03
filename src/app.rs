@@ -765,11 +765,35 @@ pub struct Menu {
     pub sub: Option<Box<Menu>>,
     /// The item last scrolled into view (long menus scroll).
     pub shown: Option<usize>,
+    /// How it shows, and where (beside what it's for), settled as it
+    /// first shows.
+    /// (What it's beside: a row, or the point clicked.)
+    pub place: Option<(MenuStyle, Option<egui::Rect>)>,
+}
+
+/// How a menu shows: in the middle with the pad's hints (the pad), or
+/// beside what it's for, compact (the mouse) or with big items (a finger).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuStyle {
+    Pad,
+    Mouse,
+    Touch,
+}
+
+impl MenuStyle {
+    /// An item's height, the font, the narrowest width.
+    pub fn sizes(self) -> (f32, f32, f32) {
+        match self {
+            MenuStyle::Pad => (34.0, 15.0, 300.0),
+            MenuStyle::Mouse => (26.0, 14.0, 200.0),
+            MenuStyle::Touch => (44.0, 17.0, 260.0),
+        }
+    }
 }
 
 impl Menu {
     pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
-        Self { title: title.into(), items, cursor: 0, kind: None, sub: None, shown: None }
+        Self { title: title.into(), items, cursor: 0, kind: None, sub: None, shown: None, place: None }
     }
 
     pub fn depth(&self) -> usize {
@@ -1200,7 +1224,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
         1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
-        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::TYPE_HOP, row::LENS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
+        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::TYPE_HOP, row::LENS, row::MENU_STYLE, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
         3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
@@ -1302,6 +1326,7 @@ pub mod row {
     pub const T_UP: usize = 32;
     pub const T_SEED: usize = 33;
     pub const T_AUTO: usize = 34;
+    pub const MENU_STYLE: usize = 35;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -4023,7 +4048,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4261,6 +4286,7 @@ impl App {
             }
             row::TYPE_FILTER => self.cfg.type_filter = !self.cfg.type_filter,
             row::TYPE_HOP => self.cfg.type_hop = !self.cfg.type_hop,
+            row::MENU_STYLE => self.cfg.menu_style = (self.cfg.menu_style as isize + if d < 0.0 { -1 } else { 1 }).rem_euclid(4) as u8,
             row::T_ON => {
                 self.cfg.torrent.enabled = !self.cfg.torrent.enabled;
                 // Off: the client stops (its torrents wait for next time).

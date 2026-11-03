@@ -122,6 +122,9 @@ pub struct Config {
     pub lens: u8,
     /// A typed letter grows a little and hops as it comes.
     pub type_hop: bool,
+    /// Menus: 0 as what opened them, 1 the pad's, 2 the mouse's, 3 a
+    /// finger's.
+    pub menu_style: u8,
     pub side_order: Vec<String>,
     /// The status bar's figures.
     pub status: crate::status::Shown,
@@ -332,6 +335,7 @@ impl Default for Config {
             type_filter: true,
             lens: 1,
             type_hop: true,
+            menu_style: 0,
             side_order: Vec::new(),
             pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),

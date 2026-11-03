@@ -1841,6 +1841,34 @@ impl App {
                 return;
             }
         }
+        // A menu, as it first shows: how (as set, or as what opened it) and
+        // where (where it was clicked, else beside the item it's for).
+        if let Some(Overlay::Menu(m)) = &self.overlay {
+            if m.place.is_none() {
+                use crate::app::MenuStyle;
+                let style = match self.cfg.menu_style {
+                    1 => MenuStyle::Pad,
+                    2 => MenuStyle::Mouse,
+                    3 => MenuStyle::Touch,
+                    _ if self.touch.active => MenuStyle::Touch,
+                    _ if self.pad_active => MenuStyle::Pad,
+                    _ => MenuStyle::Mouse,
+                };
+                let by_pointer = ctx.input(|i| i.pointer.any_pressed() || i.pointer.any_released());
+                let pointer = ctx.input(|i| i.pointer.interact_pos().or(i.pointer.latest_pos())).filter(|_| by_pointer).map(|p| Rect::from_min_size(p, Vec2::ZERO));
+                let item = (self.focus == Focus::Panes && !self.cur_tab().page_shown())
+                    .then(|| self.pane().drawn.iter().find(|d| d.0 == self.pane().cursor).map(|d| Rect::from_min_max(pos2(d.2.min.x + 28.0, d.2.min.y - 2.0), pos2(d.2.max.x, d.2.max.y + 2.0))))
+                    .flatten();
+                let at = pointer.or(item);
+                if let Some(Overlay::Menu(m)) = self.overlay.as_mut() {
+                    m.place = Some((style, at));
+                }
+            }
+        }
+        let menu_place = match &self.overlay {
+            Some(Overlay::Menu(m)) => m.place.filter(|p| p.0 != crate::app::MenuStyle::Pad),
+            _ => None,
+        };
         // Viewer settings sit beside the file so changes show live.
         let live = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.live() || k.in_bar());
         // (The panel items, in the middle: nothing dims, the panels stay in
@@ -1853,7 +1881,8 @@ impl App {
                 return;
             }
             let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side { 0 } else { 140 }));
+            // (A menu beside its item: nothing dims.)
+            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side || menu_place.is_some() { 0 } else { 140 }));
             close = resp.clicked();
         });
         if close {
@@ -1883,7 +1912,7 @@ impl App {
         let mut qkey_ev: Option<(usize, bool)> = None;
         let dark = ctx.global_style().visuals.dark_mode;
         // The window's own buttons, at its foot (not in the status bar).
-        let hints = if show_pad { self.hints() } else { Vec::new() };
+        let hints = if show_pad && menu_place.is_none() { self.hints() } else { Vec::new() };
         let (overlay, icons, cfg, schemes) = (&mut self.overlay, &mut self.icons, &self.cfg, &self.schemes);
         let (anchor, offset) = if bottom {
             // Just above the hints bar.
@@ -1902,11 +1931,33 @@ impl App {
             Some(Overlay::Menu(m)) => Some((m.title.clone(), m.items.len())),
             _ => None,
         };
-        let shown = egui::Area::new(egui::Id::new(("overlay", kind, menu)))
-            .order(Order::Foreground)
-            .anchor(anchor, offset)
+        // (A menu beside its item is an area of its own: one in the middle
+        // would carry its place over.)
+        let id = match menu_place {
+            Some(p) => egui::Id::new(("overlay", kind, menu, p.0 as u8)),
+            None => egui::Id::new(("overlay", kind, menu)),
+        };
+        let mut area = egui::Area::new(id).order(Order::Foreground);
+        area = match (menu_place, &*overlay) {
+            // Below its item, or above it when there's more room there;
+            // kept on the screen.
+            (Some((style, Some(at))), Some(Overlay::Menu(m))) => {
+                let (row_h, font, _) = style.sizes();
+                let h = m.items.len() as f32 * (row_h + 2.0) + font + 24.0;
+                let below = screen.max.y - at.max.y;
+                let above = at.min.y - screen.min.y;
+                if h > below && above > below {
+                    area.fixed_pos(at.left_top()).pivot(Align2::LEFT_BOTTOM).constrain(true)
+                } else {
+                    area.fixed_pos(at.left_bottom()).constrain(true)
+                }
+            }
+            _ => area.anchor(anchor, offset),
+        };
+        let margin = if menu_place.is_some() { 6.0 } else if live { 8.0 } else { 14.0 };
+        let shown = area
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(if live { 8.0 } else { 14.0 }).corner_radius(10.0).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(margin).corner_radius(if menu_place.is_some() { 8.0 } else { 10.0 }).show(ui, |ui| {
                     match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live() || k.in_bar()), auto_keys),
@@ -2767,6 +2818,7 @@ pub(crate) fn elided_centered(ui: &Ui, text: &str, font: FontId, color: Color32,
 /// (depth, item index).
 fn draw_menu_cascade(ui: &mut Ui, root: &mut Menu) -> Option<(usize, usize)> {
     let mut click = None;
+    let style = root.place.map_or(crate::app::MenuStyle::Pad, |p| p.0);
     ui.horizontal_top(|ui| {
         let mut depth = 0;
         let mut m = Some(root);
@@ -2774,7 +2826,7 @@ fn draw_menu_cascade(ui: &mut Ui, root: &mut Menu) -> Option<(usize, usize)> {
             let focused = menu.sub.is_none();
             let height = ui
                 .vertical(|ui| {
-                    if let Some(i) = draw_menu(ui, menu, focused) {
+                    if let Some(i) = draw_menu(ui, menu, focused, style) {
                         click = Some((depth, i));
                     }
                 })
@@ -2794,24 +2846,41 @@ fn draw_menu_cascade(ui: &mut Ui, root: &mut Menu) -> Option<(usize, usize)> {
 
 /// One menu column. `focused` is false while a submenu to its right has
 /// the cursor, which dims this column's highlight.
-fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
+fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool, style: crate::app::MenuStyle) -> Option<usize> {
+    use crate::app::MenuStyle;
     let mut click = None;
-    ui.set_min_width(300.0);
-    ui.label(egui::RichText::new(&m.title).strong().size(16.0));
-    ui.add_space(6.0);
+    let (row_h, font, min_w) = style.sizes();
+    // As wide as its longest item (the pad's: a fixed width).
+    let width = if style == MenuStyle::Pad {
+        min_w
+    } else {
+        let widest = m.items.iter().map(|it| ui.painter().layout_no_wrap(it.label.clone(), FontId::proportional(font), Color32::WHITE).size().x).fold(0.0, f32::max);
+        (widest + 24.0 + 40.0).clamp(min_w, 420.0)
+    };
+    ui.set_min_width(width);
+    if style == MenuStyle::Pad {
+        ui.label(egui::RichText::new(&m.title).strong().size(16.0));
+        ui.add_space(6.0);
+    } else {
+        // What it's for, quietly.
+        let g = elided_text(ui, &m.title, FontId::proportional(font - 2.0), ui.visuals().weak_text_color(), width - 16.0);
+        let (r, _) = ui.allocate_exact_size(vec2(width, g.size().y + 6.0), Sense::hover());
+        ui.painter().galley(pos2(r.min.x + 8.0, r.min.y + 1.0), g, ui.visuals().weak_text_color());
+    }
     // Long lists (shell history) scroll, following the cursor.
     let max_h = (ui.ctx().content_rect().height() - 140.0).max(200.0);
     let follow = m.shown != Some(m.cursor);
     m.shown = Some(m.cursor);
     // As tall as its items (up to max_h) from the first frame: a new area
     // starts at the centre, with only half the screen below it.
-    let natural = m.items.len() as f32 * 36.0;
+    let natural = m.items.len() as f32 * (row_h + 2.0);
     egui::ScrollArea::vertical().id_salt(("menu-scroll", m.title.clone())).max_height(max_h).min_scrolled_height(natural.min(max_h)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         // Line labels up when some items have checkboxes and others don't.
         let has_checks = m.items.iter().any(|i| i.checked.is_some());
         for (i, it) in m.items.iter().enumerate() {
-            let (rect, r) = ui.allocate_exact_size(vec2(300.0, 34.0), if it.enabled { Sense::click() } else { Sense::hover() });
+            let (rect, r) = ui.allocate_exact_size(vec2(width, row_h), if it.enabled { Sense::click() } else { Sense::hover() });
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, it.enabled, &it.label));
             if r.hovered() && it.enabled && ui.input(|i| i.pointer.delta() != Vec2::ZERO) {
                 m.cursor = i;
                 m.shown = Some(i);
@@ -2843,7 +2912,7 @@ fn draw_menu(ui: &mut Ui, m: &mut Menu, focused: bool) -> Option<usize> {
             }
             let sub = matches!(it.cmd, Cmd::Submenu(_));
             // Long labels (commands) are cut short.
-            let g = elided_text(ui, &it.label, FontId::proportional(15.0), color, rect.max.x - x - if sub { 28.0 } else { 10.0 });
+            let g = elided_text(ui, &it.label, FontId::proportional(font), color, rect.max.x - x - if sub { 28.0 } else { 10.0 });
             ui.painter().galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
             if sub {
                 ui.painter().text(pos2(rect.max.x - 12.0, rect.center().y), Align2::RIGHT_CENTER, "›", FontId::proportional(18.0), color);
@@ -4431,6 +4500,16 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TYPE_HOP));
+                                    }
+                                }
+                                SItem::Row(row::MENU_STYLE) => {
+                                    // How menus show.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::MENU_STYLE, "menu-style");
+                                    let shown = [tr("Auto"), tr("Gamepad"), tr("Mouse"), tr("Touch")][cfg.menu_style.min(3) as usize];
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Menus"), &label_font, v.text_color(), left - 8.0);
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Step(row::MENU_STYLE, 1.0));
                                     }
                                 }
                                 SItem::Row(row::LENS) => {

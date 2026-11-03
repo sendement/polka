@@ -48,6 +48,9 @@ fn harness_with(dir: PathBuf, size: [f32; 2], tag: &str) -> Harness<'static, App
     // The gamepad's hints always (tests press it through handle(), and
     // click with the mouse); pad_hints_screens sees to "while in use".
     h.state_mut().cfg.pad_hints = crate::config::PadHints::Always;
+    // Menus the pad's (in the middle) whatever opened them;
+    // menu_style_screens sees to the others.
+    h.state_mut().cfg.menu_style = 1;
     h
 }
 
@@ -7744,4 +7747,132 @@ fn torrents_screens() {
         std::env::remove_var("POLKA_TORRENT_DATA");
         std::env::remove_var("POLKA_TORRENT_PEERS");
     }
+}
+
+/// Menus as set: the pad's in the middle; the mouse's compact beside the
+/// item (or where it was clicked); a finger's the same with big items;
+/// "as what opened them" picks one of those.
+#[test]
+#[ignore]
+fn menu_style_screens() {
+    use crate::app::{MenuStyle, Overlay};
+    use crate::i18n::tr;
+    use egui_kittest::kittest::Queryable;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("menustyle");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..8 {
+        std::fs::write(dir.join(format!("file{i}.txt")), "x").unwrap();
+    }
+    let mut h = harness_with(dir.clone(), [1000.0, 640.0], "");
+    let mut cfg = h.state().cfg.clone();
+    cfg.view = crate::config::ViewMode::List;
+    cfg.dual = false;
+    h.state_mut().cfg = cfg;
+    settle(&mut h);
+    let place = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.place,
+        _ => panic!("no menu"),
+    };
+    let item = |h: &Harness<'static, App>| h.get_by_label(tr("Rename")).rect();
+    // The menu's first item.
+    let first = |h: &Harness<'static, App>| {
+        let label = match &h.state().overlay {
+            Some(Overlay::Menu(m)) => m.items[0].label.clone(),
+            _ => panic!("no menu"),
+        };
+        h.get_by_label(&label).rect()
+    };
+    let row = |h: &Harness<'static, App>, name: &str| {
+        let p = h.state().pane();
+        let i = p.entries.iter().position(|e| e.name == name).unwrap();
+        p.drawn.iter().find(|d| d.0 == i).unwrap().2
+    };
+    let pick = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        settle(h);
+    };
+    // The mouse's, opened by △: compact, by the item.
+    h.state_mut().cfg.menu_style = 2;
+    pick(&mut h, "file3.txt");
+    press(&mut h, &[Action::Actions]);
+    settle(&mut h);
+    let (style, at) = place(&h).unwrap();
+    assert_eq!(style, MenuStyle::Mouse);
+    let r = row(&h, "file3.txt");
+    let at = at.expect("not by its item");
+    assert!((at.max.y - r.max.y).abs() < 8.0 && at.min.x < r.min.x + 60.0, "{at:?} vs {r:?}");
+    let it = item(&h);
+    assert!((it.height() - 26.0).abs() < 1.0, "{it:?}");
+    let f = first(&h);
+    assert!(f.min.y > r.max.y && f.min.y < r.max.y + 40.0 && (f.min.x - at.min.x).abs() < 20.0, "not by it: {f:?}");
+    shot(&mut h, "ms0-mouse");
+    // A click on an item runs it (here: none; just away to close).
+    h.state_mut().overlay = None;
+    // The finger's: big items.
+    h.state_mut().cfg.menu_style = 3;
+    press(&mut h, &[Action::Actions]);
+    settle(&mut h);
+    assert_eq!(place(&h).unwrap().0, MenuStyle::Touch);
+    assert!((item(&h).height() - 44.0).abs() < 1.0);
+    shot(&mut h, "ms1-touch");
+    h.state_mut().overlay = None;
+    // The pad's: in the middle, as before.
+    h.state_mut().cfg.menu_style = 1;
+    press(&mut h, &[Action::Actions]);
+    settle(&mut h);
+    assert_eq!(place(&h).unwrap().0, MenuStyle::Pad);
+    let it = item(&h);
+    assert!((it.center().x - 500.0).abs() < 80.0 && (it.height() - 34.0).abs() < 1.0, "{it:?}");
+    shot(&mut h, "ms2-pad");
+    h.state_mut().overlay = None;
+    // As what opened it: a right click, where it was clicked, compact.
+    h.state_mut().cfg.menu_style = 0;
+    h.state_mut().pad_active = false;
+    let p = row(&h, "file6.txt").center();
+    h.event(egui::Event::PointerMoved(p));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.step();
+    settle(&mut h);
+    let (style, at) = place(&h).unwrap();
+    assert_eq!(style, MenuStyle::Mouse);
+    assert!(at.is_some_and(|a| a.min.distance(p) < 2.0), "{at:?} vs {p:?}");
+    // (Taller than the room either side: kept on the screen.)
+    let last = h.get_by_label(tr("Properties")).rect();
+    assert!(last.max.y <= 640.0 && first(&h).min.y >= 0.0 && (first(&h).min.x - p.x).abs() < 12.0, "{last:?} vs {p:?}");
+    shot(&mut h, "ms3-right-click");
+    // A click on one of its items runs it: Rename's keyboard.
+    h.get_by_label(tr("Rename")).click();
+    settle(&mut h);
+    assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))), "the item didn't run");
+    h.state_mut().overlay = None;
+    // Near the window's foot: kept on the screen.
+    h.state_mut().cfg.menu_style = 2;
+    let p = egui::pos2(900.0, 600.0);
+    h.state_mut().overlay = Some(Overlay::Menu(crate::app::Menu { place: Some((MenuStyle::Mouse, Some(egui::Rect::from_min_size(p, egui::Vec2::ZERO)))), ..crate::app::Menu::new("x", (0..8).map(|i| crate::app::item(&format!("item {i}"), crate::app::Cmd::SelectAll)).collect()) }));
+    settle(&mut h);
+    // Near the foot: it opens upwards, ending where it was asked.
+    let last = h.get_by_label("item 7").rect();
+    assert!(last.max.y < p.y && last.max.y > p.y - 30.0 && last.max.x <= 1000.0, "not above it: {last:?}");
+    shot(&mut h, "ms4-upwards");
+    h.state_mut().overlay = None;
+    // The pad in use, as what opened it: the pad's.
+    h.state_mut().cfg.menu_style = 0;
+    h.state_mut().pad_active = true;
+    press(&mut h, &[Action::Actions]);
+    settle(&mut h);
+    assert_eq!(place(&h).unwrap().0, MenuStyle::Pad);
+    h.state_mut().overlay = None;
+    // The setting steps round.
+    h.state_mut().settings_step(crate::app::row::MENU_STYLE, 1.0);
+    assert_eq!(h.state().cfg.menu_style, 1);
+    h.state_mut().settings_step(crate::app::row::MENU_STYLE, -1.0);
+    h.state_mut().settings_step(crate::app::row::MENU_STYLE, -1.0);
+    assert_eq!(h.state().cfg.menu_style, 3);
+    h.state_mut().cfg.menu_style = 0;
+    h.state_mut().cfg.save();
 }
