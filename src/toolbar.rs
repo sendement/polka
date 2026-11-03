@@ -37,11 +37,12 @@ pub enum Tool {
     Redo,
     Properties,
     Usage,
+    Torrents,
     Settings,
 }
 
 /// All of them, in the palette's order.
-pub const ALL: [Tool; 24] = [
+pub const ALL: [Tool; 25] = [
     Tool::Sidebar,
     Tool::Back,
     Tool::Forward,
@@ -65,6 +66,7 @@ pub const ALL: [Tool; 24] = [
     Tool::Terminal,
     Tool::Properties,
     Tool::Usage,
+    Tool::Torrents,
     Tool::Settings,
 ];
 
@@ -97,6 +99,7 @@ impl Tool {
             Tool::Redo => &["edit-redo"],
             Tool::Properties => &["document-properties", "dialog-information"],
             Tool::Usage => &["baobab", "drive-harddisk", "disk-quota"],
+            Tool::Torrents => &["transmission", "qbittorrent", "ktorrent", "folder-download", "emblem-downloads", "go-down"],
             Tool::Settings => &["configure", "preferences-system", "settings"],
         }
     }
@@ -127,6 +130,7 @@ impl Tool {
             Tool::Redo => "↷",
             Tool::Properties => "ⓘ",
             Tool::Usage => "◔",
+            Tool::Torrents => "⇩",
             Tool::Settings => "⚙",
         }
     }
@@ -156,6 +160,7 @@ impl Tool {
             Tool::Redo => "Redo",
             Tool::Properties => "Properties",
             Tool::Usage => "Disk usage",
+            Tool::Torrents => "Torrents",
             Tool::Settings => "Settings",
         })
     }
@@ -499,6 +504,7 @@ impl App {
                 };
                 self.run(Cmd::UsageOpen(here));
             }
+            Tool::Torrents => self.run(Cmd::TorrentsOpen),
             Tool::Settings => self.run(Cmd::Settings),
         }
     }

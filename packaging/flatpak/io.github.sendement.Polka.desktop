@@ -10,4 +10,4 @@ Icon=io.github.sendement.Polka
 Terminal=false
 Categories=System;FileTools;FileManager;
 Keywords=files;folders;archive;gamepad;controller;
-MimeType=inode/directory;application/zip;application/x-7z-compressed;application/x-tar;application/x-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-bzip-compressed-tar;application/vnd.rar;application/x-rar;application/x-cd-image;
+MimeType=inode/directory;application/zip;application/x-7z-compressed;application/x-tar;application/x-compressed-tar;application/x-xz-compressed-tar;application/x-zstd-compressed-tar;application/x-bzip-compressed-tar;application/vnd.rar;application/x-rar;application/x-cd-image;application/x-bittorrent;x-scheme-handler/magnet;

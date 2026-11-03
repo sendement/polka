@@ -154,12 +154,7 @@ impl App {
 
     fn net_show(&mut self, p: PathBuf) {
         let cfg = self.cfg.clone();
-        if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
-            u.shown = false;
-        }
-        if let Some(t) = self.tabs[self.tab].term.as_deref_mut() {
-            t.shown = false;
-        }
+        self.tabs[self.tab].hide_pages();
         self.pane_mut().navigate(Location::Local(p), None, &cfg);
     }
 

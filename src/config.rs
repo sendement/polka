@@ -82,6 +82,8 @@ pub struct Config {
     /// Interface language code; None follows the system.
     pub language: Option<String>,
     pub terminal: TermPrefs,
+    /// The torrent client.
+    pub torrent: TorrentPrefs,
     /// Passwords typed show nothing at all (else an asterisk a character).
     pub password_hidden: bool,
     /// On-screen keyboard layouts ⇄ goes through (codes; empty: English
@@ -145,6 +147,36 @@ impl PadHints {
             PadHints::Always => "Always",
             PadHints::Never => "Never",
         })
+    }
+}
+
+/// The torrent client.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TorrentPrefs {
+    /// Torrents and magnet links open in Polka (else in another app).
+    pub enabled: bool,
+    /// Where downloads go (None: the Downloads folder).
+    pub folder: Option<std::path::PathBuf>,
+    /// KiB a second (0: no limit).
+    pub down: u32,
+    pub up: u32,
+    /// Go on sharing what's downloaded.
+    pub seed: bool,
+    /// Torrents left unfinished go on as Polka starts.
+    pub autostart: bool,
+}
+
+impl Default for TorrentPrefs {
+    fn default() -> Self {
+        TorrentPrefs { enabled: true, folder: None, down: 0, up: 0, seed: true, autostart: true }
+    }
+}
+
+impl TorrentPrefs {
+    /// Where downloads go.
+    pub fn folder(&self) -> std::path::PathBuf {
+        self.folder.clone().or_else(dirs::download_dir).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| "/".into()).join("Downloads"))
     }
 }
 
@@ -282,6 +314,7 @@ impl Default for Config {
             appearance: 0,
             language: None,
             terminal: TermPrefs::default(),
+            torrent: TorrentPrefs::default(),
             password_hidden: false,
             osk_layouts: Vec::new(),
             install_on_open: true,

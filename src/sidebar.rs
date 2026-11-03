@@ -51,6 +51,7 @@ impl App {
             _ if it.phone.is_some() => it.phone.as_ref().map(|(key, _)| PathBuf::from(key)),
             (Some(d), _) => Some(PathBuf::from(d.key())),
             (None, _) if it.term => Some(PathBuf::from("polka:terminal")),
+            (None, _) if it.torrents => Some(PathBuf::from("polka:torrents")),
             (None, Location::Steam(_)) => Some(PathBuf::from("polka:steam")),
             (None, loc) => loc.local_path().map(|p| p.to_path_buf()),
         };
@@ -126,9 +127,7 @@ impl App {
             Ok(Done::Mounted(p)) => {
                 // Opened right away, in place of the disk usage page if any.
                 let cfg = self.cfg.clone();
-                if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
-                    u.shown = false;
-                }
+                self.tabs[self.tab].hide_pages();
                 self.close_viewer();
                 self.pane_mut().navigate(Location::Local(p), None, &cfg);
                 self.focus = Focus::Panes;

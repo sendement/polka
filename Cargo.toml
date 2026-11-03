@@ -1,6 +1,6 @@
 [package]
 name = "polka"
-version = "0.55.0"
+version = "0.56.0"
 edition = "2024"
 license = "MIT"
 description = "Gamepad-first dual-pane file manager"
@@ -83,6 +83,9 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 # raster-images: SVG icons that wrap a PNG (Windows-look themes) draw.
 resvg = { version = "0.45", default-features = false, features = ["raster-images"] }
+# The torrent client: its engine, and the runtime it runs on.
+librqbit = { version = "9.1", default-features = false, features = ["rust-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
 [profile.release]
 lto = "thin"

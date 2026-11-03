@@ -25,7 +25,7 @@ const SLOP: f32 = 12.0;
 const SWIPE: f32 = 100.0;
 const SWIPE_TIME: Duration = Duration::from_millis(600);
 /// A second tap this soon, this near: a double tap.
-const DOUBLE_TIME: Duration = Duration::from_millis(450);
+pub const DOUBLE_TIME: Duration = Duration::from_millis(450);
 const DOUBLE_NEAR: f32 = 40.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -87,6 +87,9 @@ pub struct Touch {
     /// Two fingers: their distance when last measured.
     pinch: Option<f32>,
     finger_pos: Vec<(u64, Pos2)>,
+    /// A second tap this soon is a double tap (zero: DOUBLE_TIME; tests
+    /// widen it).
+    pub double_time: Duration,
 }
 
 fn wheel(delta: Vec2) -> Event {
@@ -249,7 +252,7 @@ impl Touch {
                         // A tap: a click (its release next frame).
                         out.push(Event::PointerMoved(pos));
                         out.push(button(pos, PointerButton::Primary, true));
-                        let double = self.last_tap.take().is_some_and(|(t, at)| now.duration_since(t) < DOUBLE_TIME && at.distance(pos) < DOUBLE_NEAR);
+                        let double = self.last_tap.take().is_some_and(|(t, at)| now.duration_since(t) < if self.double_time.is_zero() { DOUBLE_TIME } else { self.double_time } && at.distance(pos) < DOUBLE_NEAR);
                         if !double {
                             self.last_tap = Some((now, pos));
                         }

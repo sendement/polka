@@ -244,7 +244,7 @@ impl App {
             }
         }
         // Typing in the file list: the filter, with what's typed.
-        let list = self.cfg.type_filter && self.overlay.is_none() && self.focus == Focus::Panes && self.cur_tab().viewer.is_none() && !self.usage_shown() && !self.term_shown();
+        let list = self.cfg.type_filter && self.overlay.is_none() && self.focus == Focus::Panes && !self.cur_tab().page_shown();
         if list {
             let typed: String = events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
             let plain = ctx.input(|i| !i.modifiers.command && !i.modifiers.alt);
@@ -719,7 +719,7 @@ impl App {
                 let usage = t.usage.as_ref().is_some_and(|u| u.shown);
                 let term = t.term.as_ref().is_some_and(|u| u.shown);
                 t.viewer.as_ref().map_or_else(
-                    || if term { tr("Terminal").to_string() } else if usage { tr("Disk usage").to_string() } else { p.loc.title() },
+                    || if t.torrents { tr("Torrents").to_string() } else if term { tr("Terminal").to_string() } else if usage { tr("Disk usage").to_string() } else { p.loc.title() },
                     |v| v.name.clone(),
                 )
             })
@@ -1216,6 +1216,7 @@ impl App {
             Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
             Some(Overlay::Versions(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Install")), (Action::Back, tr("Close"))],
             Some(Overlay::Places(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Show or hide")), (Action::PrevTab, tr("Reorder")), (Action::Back, tr("Close"))],
+            Some(Overlay::TorrentAdd(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Choose")), (Action::Select, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
             Some(Overlay::OpenWith(_)) => vec![
                 (Action::Up, tr("Move")),
                 (Action::Accept, tr("Open")),
@@ -1319,6 +1320,7 @@ impl App {
             ],
             None if self.usage_shown() && self.focus == Focus::Panes => self.usage_hints(),
             None if self.term_shown() && self.focus == Focus::Panes => self.terminal_hints(),
+            None if self.torrents_shown() && self.focus == Focus::Panes => self.torrents_hints(),
             None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
                 vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
@@ -1351,6 +1353,7 @@ impl App {
         let cur_loc = self.pane().loc.clone();
         let usage_here = self.usage_shown();
         let term_here = self.term_shown();
+        let torrents_here = self.torrents_shown();
         let dragging = self.drag.is_some();
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let released = ui.input(|i| i.pointer.primary_released());
@@ -1392,11 +1395,13 @@ impl App {
                             usage_here
                         } else if it.term {
                             term_here
+                        } else if it.torrents {
+                            torrents_here
                         } else {
-                            it.loc == cur_loc && !usage_here && !term_here
+                            it.loc == cur_loc && !usage_here && !term_here && !torrents_here
                         };
                         paint_row_bg(ui, rect, is_cursor, here, r.hovered());
-                        if dragging && !it.usage && !it.term && !it.offline() && pointer.is_some_and(|p| rect.contains(p)) {
+                        if dragging && !it.usage && !it.term && !it.torrents && !it.offline() && pointer.is_some_and(|p| rect.contains(p)) {
                             ui.painter().rect_stroke(rect, 6.0, Stroke::new(2.0, ui.visuals().selection.bg_fill), StrokeKind::Inside);
                             if released {
                                 dropped = Some(i);
@@ -1408,7 +1413,7 @@ impl App {
                                 }
                             }
                         }
-                        let under = dragging && !it.usage && !it.term && pointer.is_some_and(|p| rect.contains(p));
+                        let under = dragging && !it.usage && !it.term && !it.torrents && pointer.is_some_and(|p| rect.contains(p));
                         let grow = 1.0 + 0.15 * ui.ctx().animate_bool_with_time(ui.id().with(("side-grow", i)), under, 0.12);
                         let icon_rect = Rect::from_center_size(pos2(rect.min.x + 8.0 + side_icon / 2.0, rect.center().y), Vec2::splat(side_icon * grow));
                         let px = lookup_px(ui, side_icon);
@@ -1555,6 +1560,7 @@ impl App {
         let mut viewer_act = None;
         let mut usage_act = None;
         let mut term_act = None;
+        let mut torrent_act = None;
         let full = self.video_full();
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -1565,6 +1571,13 @@ impl App {
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
                 let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
                 viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                return;
+            }
+            if self.tabs[tab].torrents {
+                let items = self.torrents.as_ref().map(|e| e.items()).unwrap_or_default();
+                let err = self.torrents.as_ref().and_then(|e| e.snap.lock().ok().and_then(|s| s.error.clone()));
+                self.torrent_cursor = self.torrent_cursor.min(items.len().saturating_sub(1));
+                torrent_act = crate::torrents::draw::draw(ui, &items, self.torrent_cursor, err.as_deref(), focused, &mut self.icons);
                 return;
             }
             if let Some(u) = self.tabs[tab].usage.as_deref_mut().filter(|u| u.shown) {
@@ -1636,7 +1649,22 @@ impl App {
         if let Some(a) = term_act {
             self.terminal_act(a);
         }
-        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].term.as_ref().is_some_and(|u| u.shown);
+        if let Some(a) = torrent_act {
+            use crate::torrents::draw::Act;
+            self.focus = Focus::Panes;
+            match a {
+                Act::Close => self.run(Cmd::TorrentsClose),
+                Act::Magnet => self.run(Cmd::TorrentMagnet),
+                Act::Pick(i) => self.torrent_cursor = i,
+                Act::Toggle(i) => self.run(Cmd::TorrentToggle(i)),
+                Act::Reveal(i) => self.run(Cmd::TorrentReveal(i)),
+                Act::Context(i) => {
+                    self.torrent_cursor = i;
+                    self.torrents_menu();
+                }
+            }
+        }
+        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].term.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].torrents;
         let divider = if self.tabs[tab].viewer.is_some() || usage { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
@@ -1848,6 +1876,8 @@ impl App {
         let mut ver_ev = None;
         let mut pal_ev = None;
         let mut places = None;
+        let mut tadd_ev = None;
+        let torrent_folder = self.cfg.torrent.folder();
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1889,6 +1919,7 @@ impl App {
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
                     Some(Overlay::Toolbars) => pal_ev = crate::toolbar::draw_palette(ui, icons, cfg),
+                    Some(Overlay::TorrentAdd(d)) => tadd_ev = crate::torrents::draw::draw_add(ui, d, &torrent_folder),
                     Some(Overlay::Places(d)) => places = Some(crate::sidebar::draw_places(ui, d, &self.side_all, &cfg.side_hidden, self.side_drag.as_ref().map(|(k, _)| k.as_str()), icons)),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
@@ -1958,6 +1989,9 @@ impl App {
         }
         if let Some(ev) = ow_ev {
             crate::openwith::event(self, ev);
+        }
+        if let Some(ev) = tadd_ev {
+            self.torrent_add_ev(ev);
         }
         if let Some(ev) = ver_ev {
             crate::updates::event(self, ev);
@@ -4343,6 +4377,47 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TYPE_FILTER));
+                                    }
+                                }
+                                SItem::Row(r @ (row::T_ON | row::T_SEED | row::T_AUTO)) => {
+                                    // The torrent client's switches.
+                                    let (label, on, salt) = match r {
+                                        row::T_ON => (tr("Built-in torrent client"), cfg.torrent.enabled, "t-on"),
+                                        row::T_SEED => (tr("Share after downloading"), cfg.torrent.seed, "t-seed"),
+                                        _ => (tr("Go on with torrents as Polka starts"), cfg.torrent.autostart, "t-auto"),
+                                    };
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == r, salt);
+                                    row_label(ui, rect, label, &label_font, v.text_color(), rect.max.x - 40.0);
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if on {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(r));
+                                    }
+                                }
+                                SItem::Row(row::T_FOLDER) => {
+                                    // Where downloads go: typed (✕).
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == row::T_FOLDER, "t-folder");
+                                    let path = cfg.torrent.folder().display().to_string();
+                                    let room = (rect.width() * 0.55).max(120.0);
+                                    let g = elided_text(ui, &path, FontId::proportional(14.0), v.strong_text_color(), room);
+                                    let left = rect.max.x - 14.0 - g.size().x;
+                                    ui.painter().galley(pos2(left, rect.center().y - g.size().y / 2.0), g, v.strong_text_color());
+                                    row_label(ui, rect, tr("Downloads go to"), &label_font, v.text_color(), left - 8.0);
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::T_FOLDER));
+                                    }
+                                }
+                                SItem::Row(r @ (row::T_DOWN | row::T_UP)) => {
+                                    // Speed limits, ◀ ▶ through them.
+                                    let (label, kib, salt) = if r == row::T_DOWN { (tr("Download speed limit"), cfg.torrent.down, "t-down") } else { (tr("Upload speed limit"), cfg.torrent.up, "t-up") };
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == r, salt);
+                                    let left = row_value(ui, rect, &format!("◀ {} ▶", crate::torrents::limit_name(kib)), v.strong_text_color());
+                                    row_label(ui, rect, label, &label_font, v.text_color(), left - 8.0);
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Step(r, 1.0));
                                     }
                                 }
                                 SItem::Row(row::TYPE_HOP) => {

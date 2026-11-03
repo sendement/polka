@@ -5763,9 +5763,13 @@ fn touch_screens() {
     idle(&mut h, 500);
     // Two taps on Album: opened, and not left chosen.
     let p = name_at(row_of(&h, "Album"));
+    // (Real time: a slow test machine can take longer than a finger
+    // would between the taps; the window's wider for this one.)
+    h.state_mut().touch.double_time = std::time::Duration::from_secs(3);
     tap(&mut h, p);
     tap(&mut h, p);
     settle(&mut h);
+    h.state_mut().touch.double_time = crate::touch::DOUBLE_TIME;
     assert_eq!(h.state().pane().loc, Location::Local(dir.join("Album")), "two taps didn't open it");
     let cfg = h.state().cfg.clone();
     h.state_mut().pane_mut().go_up(&cfg);
@@ -6402,7 +6406,7 @@ fn settings_cats_screens() {
     }
     assert_eq!(at(&h).0, 0, "RB came round");
     // The viewer: its font size one up, from here.
-    press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
+    press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
     assert_eq!(at(&h), (4, SItem::Viewer(crate::app::vrow::THEME)));
     let size = h.state().cfg.viewer.font_size;
     press(&mut h, &[Action::Accept, Action::Down, Action::Down, Action::Right]);
@@ -6424,8 +6428,8 @@ fn settings_cats_screens() {
     press(&mut h, &[Action::Accept]);
     assert_ne!(h.state().cfg.status.get(f), was);
     press(&mut h, &[Action::Accept]);
-    // About: the versions.
-    press(&mut h, &[Action::NextTab, Action::Accept]);
+    // (The torrents', then) About: the versions.
+    press(&mut h, &[Action::NextTab, Action::NextTab, Action::Accept]);
     assert!(matches!(h.state().overlay, Some(Overlay::Versions(_))), "no versions");
     h.state_mut().overlay = None;
 }
@@ -7571,4 +7575,173 @@ fn textfx_screens() {
     h.state_mut().cfg.save();
     h.state_mut().run(Cmd::CloseViewer);
     settle(&mut h);
+}
+
+/// The torrent client: a .torrent opened in the panes asks which files
+/// and where, downloads them (from a local peer here), the page shows it;
+/// shown in its folder, paused, removed with its files; its settings.
+#[test]
+#[ignore]
+fn torrents_screens() {
+    use crate::app::{Cmd, Overlay, OskKey};
+    use crate::vfs::Location;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("torrents");
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("seed/Holiday photos");
+    std::fs::create_dir_all(&src).unwrap();
+    let a: Vec<u8> = (0..400_000u32).map(|i| (i * 13 % 251) as u8).collect();
+    std::fs::write(src.join("beach.jpg"), &a).unwrap();
+    std::fs::write(src.join("notes.txt"), vec![b'n'; 40_000]).unwrap();
+    std::fs::create_dir_all(dir.join("files")).unwrap();
+    // The other side shares them.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (seeder, addr) = rt.block_on(async {
+        let opts = librqbit::SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(librqbit::ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), enable_upnp_port_forwarding: false, ..Default::default() }),
+            ..Default::default()
+        };
+        let s = librqbit::Session::new_with_opts(dir.join("seed"), opts).await.unwrap();
+        let (t, h) = s.create_and_serve_torrent(&src, librqbit::CreateTorrentOptions { name: None, trackers: vec![], piece_length: Some(16384) }).await.unwrap();
+        h.wait_until_initialized().await.unwrap();
+        std::fs::write(dir.join("files/Holiday photos.torrent"), t.as_bytes().unwrap()).unwrap();
+        let addr = s.listen_addr().unwrap();
+        (s, addr)
+    });
+    // SAFETY: tests holding GLOBALS for writing run alone.
+    unsafe {
+        std::env::set_var("POLKA_TORRENT_LOCAL", "1");
+        std::env::set_var("POLKA_TORRENT_DATA", dir.join("data"));
+        std::env::set_var("POLKA_TORRENT_PEERS", addr.to_string());
+    }
+    let mut h = harness_with(dir.join("files"), [1000.0, 640.0], "");
+    settle(&mut h);
+    let saved = h.state().cfg.torrent.clone();
+    h.state_mut().cfg.torrent = crate::config::TorrentPrefs { folder: Some(dir.join("dl")), ..Default::default() };
+    h.state_mut().refresh_sidebar();
+    assert!(h.state().side_items.iter().any(|it| it.torrents), "no Torrents in the sidebar");
+    // Opened: which files, where.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "Holiday photos.torrent").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(h.state().overlay, Some(Overlay::TorrentAdd(_))), "no window to add it");
+    for _ in 0..100 {
+        settle(&mut h);
+        if matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.ready() || d.error.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let names = match &h.state().overlay {
+        Some(Overlay::TorrentAdd(d)) => {
+            assert!(d.error.is_none(), "{:?}", d.error);
+            assert_eq!(d.name, "Holiday photos");
+            d.files.iter().map(|f| f.0.clone()).collect::<Vec<_>>()
+        }
+        _ => panic!("the window went"),
+    };
+    // Its own folder is offered too (the panes show another one).
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.here.is_some()));
+    // The notes not wanted: ↓ to them, ✕.
+    let notes = names.iter().position(|n| n == "notes.txt").unwrap();
+    for _ in 0..=notes {
+        press(&mut h, &[Action::Down]);
+    }
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if !d.files[notes].2 && d.chosen().0 == 1));
+    settle(&mut h);
+    shot(&mut h, "tr0-add");
+    // ≡: downloading, the page shows it.
+    press(&mut h, &[Action::Menu]);
+    assert!(h.state().overlay.is_none());
+    assert!(h.state().torrents_shown(), "no page");
+    let mut done = false;
+    for _ in 0..200 {
+        settle(&mut h);
+        if h.state().torrent_items().first().is_some_and(|t| t.finished()) {
+            done = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(done, "not downloaded: {:?}", h.state().torrent_items());
+    let got = dir.join("dl/Holiday photos");
+    assert_eq!(std::fs::read(got.join("beach.jpg")).unwrap(), a);
+    settle(&mut h);
+    shot(&mut h, "tr1-page");
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("Holiday photos")), "not said: {:?}", h.state().toast);
+    // ✕ on it: paused (it was sharing); again: going on.
+    press(&mut h, &[Action::Accept]);
+    let mut paused = false;
+    for _ in 0..40 {
+        settle(&mut h);
+        if h.state().torrent_items().first().is_some_and(|t| matches!(t.state, crate::torrents::State::Done | crate::torrents::State::Paused)) {
+            paused = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(paused, "{:?}", h.state().torrent_items());
+    // △: its actions.
+    press(&mut h, &[Action::Actions]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Menu(m)) if m.items.len() >= 5));
+    shot(&mut h, "tr2-menu");
+    h.state_mut().overlay = None;
+    // Shown in its folder.
+    h.state_mut().run(Cmd::TorrentReveal(0));
+    assert!(!h.state().torrents_shown());
+    assert_eq!(h.state().pane().loc, Location::Local(got.clone()));
+    // Back on the page (its sidebar entry); a magnet link that isn't one.
+    h.state_mut().run(Cmd::TorrentsOpen);
+    assert!(h.state().torrents_shown());
+    h.state_mut().run(Cmd::TorrentMagnet);
+    for c in "nonsense".chars() {
+        h.state_mut().osk_key(OskKey::Char(c));
+    }
+    h.state_mut().osk_submit();
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.1), "no complaint");
+    // Removed with its files.
+    h.state_mut().run(Cmd::TorrentRemove(0, true));
+    for _ in 0..40 {
+        settle(&mut h);
+        if h.state().torrent_items().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(h.state().torrent_items().is_empty());
+    assert!(!got.join("beach.jpg").exists(), "its files stayed");
+    settle(&mut h);
+    shot(&mut h, "tr3-empty");
+    // The settings: a category of their own; limits step.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::T_DOWN);
+    }
+    press(&mut h, &[Action::Right]);
+    assert_eq!(h.state().cfg.torrent.down, 128);
+    settle(&mut h);
+    shot(&mut h, "tr4-settings");
+    press(&mut h, &[Action::Left]);
+    assert_eq!(h.state().cfg.torrent.down, 0);
+    // Off: no page, no sidebar entry; .torrent files go elsewhere.
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::T_ON);
+    }
+    press(&mut h, &[Action::Accept]);
+    assert!(!h.state().cfg.torrent.enabled && h.state().torrents.is_none());
+    assert!(!h.state().side_items.iter().any(|it| it.torrents));
+    h.state_mut().overlay = None;
+    h.state_mut().cfg.torrent = saved;
+    h.state_mut().cfg.save();
+    drop(h);
+    drop(seeder);
+    unsafe {
+        std::env::remove_var("POLKA_TORRENT_LOCAL");
+        std::env::remove_var("POLKA_TORRENT_DATA");
+        std::env::remove_var("POLKA_TORRENT_PEERS");
+    }
 }

@@ -469,12 +469,25 @@ pub struct Tab {
     /// Opened for a page of its own (a file shown, the terminal, disk
     /// usage) beside the tab it came from: closing the page closes it.
     pub own: bool,
+    /// The torrents page shows here.
+    pub torrents: bool,
 }
 
 impl Tab {
     /// Showing a page over the panes (a file, the terminal, disk usage).
     pub fn page_shown(&self) -> bool {
-        self.viewer.is_some() || self.usage.as_ref().is_some_and(|u| u.shown) || self.term.as_ref().is_some_and(|t| t.shown)
+        self.viewer.is_some() || self.usage.as_ref().is_some_and(|u| u.shown) || self.term.as_ref().is_some_and(|t| t.shown) || self.torrents
+    }
+
+    /// The panes back in front of its pages (kept for later).
+    pub fn hide_pages(&mut self) {
+        if let Some(u) = self.usage.as_deref_mut() {
+            u.shown = false;
+        }
+        if let Some(t) = self.term.as_deref_mut() {
+            t.shown = false;
+        }
+        self.torrents = false;
     }
 }
 
@@ -495,7 +508,7 @@ pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
-        Tab { pane, for_right: false, viewer: None, usage: None, term: None, own: false }
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None, own: false, torrents: false }
     }
 }
 
@@ -522,6 +535,16 @@ pub fn two_panes(tabs: &mut [Tab], a: usize, b: usize) -> (&mut Pane, &mut Pane)
 pub enum Cmd {
     /// The terminal page (a new shell in this folder, if given).
     TermOpen(Option<PathBuf>),
+    /// The torrents page; closed.
+    TorrentsOpen,
+    TorrentsClose,
+    /// A magnet link to type or paste.
+    TorrentMagnet,
+    /// A torrent of the page's list paused or resumed, its files shown,
+    /// removed (with its files, or not).
+    TorrentToggle(usize),
+    TorrentReveal(usize),
+    TorrentRemove(usize, bool),
     TermNew,
     TermCloseTab(usize),
     TermSwitch(usize),
@@ -821,6 +844,10 @@ pub enum OskPurpose {
     ConvertPassword { dlg: Box<crate::convert_ui::ConvertDlg> },
     /// A size of table parts of one's own, for that group.
     ConvertRows { dlg: Box<crate::convert_ui::ConvertDlg>, group: usize },
+    /// A magnet link to download.
+    TorrentMagnet,
+    /// The folder downloads go to (settings).
+    TorrentFolder,
 }
 
 /// What to do again once an archive password is entered.
@@ -984,6 +1011,8 @@ pub enum Overlay {
     Toolbars,
     /// The sidebar's places: shown or not, in which order.
     Places(crate::sidebar::PlacesDlg),
+    /// A torrent being added: its files, where it goes.
+    TorrentAdd(Box<crate::torrents::app::AddDlg>),
 }
 
 /// Text viewer settings, shown beside the open file.
@@ -1156,12 +1185,12 @@ pub enum SItem {
     Page,
 }
 
-pub const SETTINGS_CATS: usize = 8;
+pub const SETTINGS_CATS: usize = 9;
 pub const NO_ROW: usize = usize::MAX;
 
 /// A category's name.
 pub fn settings_cat_name(cat: usize) -> &'static str {
-    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "About"][cat.min(SETTINGS_CATS - 1)])
+    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "Torrents", "About"][cat.min(SETTINGS_CATS - 1)])
 }
 
 /// What a category holds, in order.
@@ -1180,6 +1209,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         }
         5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
         6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
+        7 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
         _ => vec![SItem::Versions, SItem::Page],
     }
 }
@@ -1264,6 +1294,14 @@ pub mod row {
     pub const TYPE_FILTER: usize = 26;
     pub const LENS: usize = 27;
     pub const TYPE_HOP: usize = 28;
+    // The torrent client: on, where downloads go, speed limits, sharing
+    // after, going on at the start.
+    pub const T_ON: usize = 29;
+    pub const T_FOLDER: usize = 30;
+    pub const T_DOWN: usize = 31;
+    pub const T_UP: usize = 32;
+    pub const T_SEED: usize = 33;
+    pub const T_AUTO: usize = 34;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1386,6 +1424,8 @@ pub struct SideItem {
     pub usage: bool,
     /// Opens the terminal page.
     pub term: bool,
+    /// Opens the torrents page.
+    pub torrents: bool,
     /// A drive (maybe not mounted: then `loc` is no real place).
     pub drive: Option<crate::drives::Drive>,
     /// A network place: its connection's id, and whether it's connected
@@ -1401,6 +1441,8 @@ impl SideItem {
     pub fn key(&self) -> String {
         if self.term {
             "polka:terminal".into()
+        } else if self.torrents {
+            "polka:torrents".into()
         } else if self.usage {
             "polka:usage".into()
         } else if let Location::Steam(_) = self.loc {
@@ -1516,6 +1558,10 @@ pub struct App {
     pub clip: Option<Clip>,
     pub jobs: Vec<Arc<Job>>,
     pub toast: Option<(String, bool, Instant)>,
+    /// The torrent client (started when first needed).
+    pub torrents: Option<crate::torrents::Engine>,
+    /// The torrents page's cursor.
+    pub torrent_cursor: usize,
     pub msg_tx: Sender<Msg>,
     /// Started for a D-Bus request: its folder takes the first tab.
     pub dbus_fresh: bool,
@@ -1652,6 +1698,9 @@ impl App {
         let mut icons = Icons::new(cfg.icon_theme.clone(), move || icon_ctx.request_repaint());
         icons.folder_color = cfg.folder_color.clone();
         let home = dirs::home_dir().unwrap_or_else(|| "/".into());
+        // A magnet link or a torrent file to open: the window to add it
+        // (a file's folder shows behind).
+        let torrent = start.as_ref().and_then(|p| crate::torrents::Source::parse(&p.to_string_lossy()));
         let (start, focus) = start.and_then(|p| start_location(&p)).unwrap_or((Location::Local(home.clone()), None));
         let mut first = Pane::new(start, &cfg);
         if let Some(name) = focus {
@@ -1701,6 +1750,8 @@ impl App {
             clip: None,
             jobs: Vec::new(),
             toast: None,
+            torrents: None,
+            torrent_cursor: 0,
             msg_tx,
             dbus_fresh: false,
             msg_rx,
@@ -1763,6 +1814,10 @@ impl App {
         };
         app.refresh_sidebar();
         app.watch();
+        app.torrents_autostart();
+        if let Some(src) = torrent {
+            app.torrent_add(src);
+        }
         app
     }
 
@@ -1992,7 +2047,7 @@ impl App {
             }
             SpringAt::Side(i) => match self.side_items.get(i) {
                 // Unmounted drives and tools aren't folders yet.
-                Some(it) if !it.usage && !it.term && !it.offline() => it.loc.clone(),
+                Some(it) if !it.usage && !it.term && !it.torrents && !it.offline() => it.loc.clone(),
                 _ => return,
             },
             SpringAt::Entry(side, shown, name) => {
@@ -2017,12 +2072,7 @@ impl App {
             }
         };
         // The panes come back in front of a page.
-        if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
-            u.shown = false;
-        }
-        if let Some(t) = self.tabs[self.tab].term.as_deref_mut() {
-            t.shown = false;
-        }
+        self.tabs[self.tab].hide_pages();
         self.focus = Focus::Panes;
         self.pane_mut().navigate(loc, None, &cfg);
     }
@@ -2047,6 +2097,7 @@ impl App {
         self.remember_right_pane();
         self.tick_audio();
         self.tick_usage();
+        self.tick_torrents();
         self.tick_terminal();
         self.dnd_tick();
         self.convert_poll();
@@ -2249,6 +2300,7 @@ impl App {
             section,
             usage: false,
             term: false,
+            torrents: false,
             drive: None,
             net: None,
             phone: None,
@@ -2288,6 +2340,7 @@ impl App {
             section: "Places",
             usage: false,
             term: true,
+            torrents: false,
             drive: None,
             net: None,
             phone: None,
@@ -2309,7 +2362,7 @@ impl App {
         for d in &drives {
             let label = d.label.clone().unwrap_or_else(|| format!("{} {}", tr("Drive"), human_size(d.size)));
             let loc = Location::Local(d.mount.clone().unwrap_or_else(|| PathBuf::from(d.key())));
-            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, drive: Some(d.clone()), net: None, phone: None });
+            v.push(SideItem { label, icon: d.icon(), custom_icon: icon_for(&self.cfg, &d.key()), loc, pinned: false, section: "Drives", usage: false, term: false, torrents: false, drive: Some(d.clone()), net: None, phone: None });
         }
         for (dev, mnt) in mounts() {
             if drives.iter().any(|d| d.mount.as_ref() == Some(&mnt)) {
@@ -2336,6 +2389,7 @@ impl App {
                 section: "Network",
                 usage: false,
                 term: false,
+                torrents: false,
                 drive: None,
                 net: Some((c.id.clone(), at.is_some())),
                 phone: None,
@@ -2358,6 +2412,7 @@ impl App {
                 section: "Phones",
                 usage: false,
                 term: false,
+                torrents: false,
                 drive: None,
                 net: None,
                 phone: Some((p.key(), at.is_some())),
@@ -2372,10 +2427,27 @@ impl App {
             section: "Tools",
             usage: true,
             term: false,
+            torrents: false,
             drive: None,
             net: None,
             phone: None,
         });
+        if self.cfg.torrent.enabled {
+            v.push(SideItem {
+                label: tr("Torrents").into(),
+                icon: &["transmission", "qbittorrent", "ktorrent", "deluge", "folder-download", "emblem-downloads", "go-down"],
+                custom_icon: icon_for(&self.cfg, "polka:torrents"),
+                loc: Location::Local("/".into()),
+                pinned: false,
+                section: "Tools",
+                usage: false,
+                term: false,
+                torrents: true,
+                drive: None,
+                net: None,
+                phone: None,
+            });
+        }
         // In the order chosen, each within its section; then all of them
         // for the settings, and the ones shown.
         let rank = |it: &SideItem| self.cfg.side_order.iter().position(|k| *k == it.key()).unwrap_or(usize::MAX);
@@ -2474,6 +2546,9 @@ impl App {
         }
         if self.term_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.terminal_input(a);
+        }
+        if self.torrents_shown() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
+            return self.torrents_input(a);
         }
         let cfg = self.cfg.clone();
         let grid = cfg.view == ViewMode::Grid;
@@ -2704,6 +2779,11 @@ impl App {
                         self.focus = Focus::Sidebar;
                         return;
                     }
+                    if it.torrents {
+                        self.open_torrents();
+                        self.focus = Focus::Sidebar;
+                        return;
+                    }
                     // A drive not mounted yet: mount it, then open it.
                     if let Some(d) = it.drive.as_ref().filter(|d| d.mount.is_none()) {
                         return self.drive_op(d.clone(), crate::drives::Op::Mount);
@@ -2717,17 +2797,12 @@ impl App {
                     }
                     let cfg = self.cfg.clone();
                     // A place replaces the disk usage page (kept for later).
-                    if let Some(u) = self.tabs[self.tab].usage.as_deref_mut() {
-                        u.shown = false;
-                    }
-                    if let Some(t) = self.tabs[self.tab].term.as_deref_mut() {
-                        t.shown = false;
-                    }
+                    self.tabs[self.tab].hide_pages();
                     self.pane_mut().navigate(it.loc, None, &cfg);
                 }
             }
             Action::Actions => {
-                if let Some(it) = self.side_items.get(self.side_cursor).cloned().filter(|it| !it.usage) {
+                if let Some(it) = self.side_items.get(self.side_cursor).cloned().filter(|it| !it.usage && !it.torrents) {
                     self.side_menu(it);
                 }
             }
@@ -2830,6 +2905,7 @@ impl App {
             Overlay::OpenWith(_) => self.open_with_input(a),
             Overlay::Versions(_) => self.versions_input(a),
             Overlay::Places(_) => self.places_input(a),
+            Overlay::TorrentAdd(_) => self.torrent_add_input(a),
             Overlay::Toolbars => {
                 if matches!(a, Action::Back | Action::Accept | Action::Menu) {
                     self.overlay = None;
@@ -3048,6 +3124,14 @@ impl App {
         self.cfg.save();
     }
 
+    /// The settings again, on a row (after a field typed for it).
+    fn settings_at(&mut self, r: usize) {
+        self.run(Cmd::Settings);
+        if let Some(Overlay::Settings(st)) = self.overlay.as_mut() {
+            st.go_to_row(r);
+        }
+    }
+
     pub fn osk_cancel(&mut self) {
         if let Some(Overlay::Osk(k)) = self.overlay.take() {
             match k.purpose {
@@ -3060,6 +3144,7 @@ impl App {
                 OskPurpose::NetField { dlg, .. } => self.overlay = Some(Overlay::Net(dlg)),
                 OskPurpose::ConvertPassword { dlg } => self.overlay = Some(Overlay::Convert(dlg)),
                 OskPurpose::ConvertRows { dlg, group } => self.convert_rows_cancelled(dlg, group),
+                OskPurpose::TorrentFolder => self.settings_at(row::T_FOLDER),
                 _ => {}
             }
         }
@@ -3100,6 +3185,21 @@ impl App {
         }
         if matches!(k.purpose, OskPurpose::TermLive | OskPurpose::TermSave) {
             return self.term_osk(k.purpose, raw);
+        }
+        if let OskPurpose::TorrentMagnet = k.purpose {
+            return self.torrent_magnet_typed(&text);
+        }
+        if let OskPurpose::TorrentFolder = k.purpose {
+            let p = expand_tilde(&text);
+            if text.is_empty() {
+                self.cfg.torrent.folder = None;
+            } else if p.is_dir() {
+                self.cfg.torrent.folder = Some(p);
+            } else {
+                self.toast(format!("{}: {text}", tr("Not a folder")), true);
+            }
+            self.cfg.save();
+            return self.settings_at(row::T_FOLDER);
         }
         if text.is_empty() {
             return;
@@ -3267,7 +3367,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } | OskPurpose::ConvertRows { .. } => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } | OskPurpose::ConvertRows { .. } | OskPurpose::TorrentMagnet | OskPurpose::TorrentFolder => unreachable!(),
         }
     }
 
@@ -3303,7 +3403,9 @@ impl App {
                         return self.open_term_window(title, &dir, &cmd);
                     }
                 }
-                if vfs::is_archive_name(&e.name) {
+                if self.cfg.torrent.enabled && crate::torrents::is_torrent_file(&path) {
+                    self.torrent_add(crate::torrents::Source::File(path));
+                } else if vfs::is_archive_name(&e.name) {
                     self.pane_mut().navigate(vfs::archive_loc(path), None, &cfg);
                 } else if crate::viewer::kind_in(&path, &e.name, crate::viewer::OpenIn::from(&self.cfg)).is_some() {
                     self.view_current();
@@ -3767,6 +3869,7 @@ impl App {
             item(tr("Filter…"), Cmd::Filter),
             MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
             MenuItem { enabled: local, ..item(tr("Open terminal here"), Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
+            MenuItem { enabled: self.cfg.torrent.enabled, ..item(tr("Torrents"), Cmd::TorrentsOpen) },
             item(tr("Go to path…"), Cmd::GoTo),
             item(tr("Add network place…"), Cmd::NetAdd),
             item(tr("Select all"), Cmd::SelectAll),
@@ -3920,7 +4023,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4158,6 +4261,32 @@ impl App {
             }
             row::TYPE_FILTER => self.cfg.type_filter = !self.cfg.type_filter,
             row::TYPE_HOP => self.cfg.type_hop = !self.cfg.type_hop,
+            row::T_ON => {
+                self.cfg.torrent.enabled = !self.cfg.torrent.enabled;
+                // Off: the client stops (its torrents wait for next time).
+                if !self.cfg.torrent.enabled {
+                    self.torrents = None;
+                    for t in &mut self.tabs {
+                        t.torrents = false;
+                    }
+                }
+                self.cfg.save();
+                self.refresh_sidebar();
+                return;
+            }
+            row::T_FOLDER => {
+                if d == 0.0 {
+                    let now = self.cfg.torrent.folder().display().to_string();
+                    let mut k = Osk::new(tr("Downloads go to"), &now, OskPurpose::TorrentFolder);
+                    k.select_all = true;
+                    self.overlay = Some(Overlay::Osk(k));
+                }
+                return;
+            }
+            row::T_DOWN => self.cfg.torrent.down = crate::torrents::step_limit(self.cfg.torrent.down, if d < 0.0 { -1 } else { 1 }),
+            row::T_UP => self.cfg.torrent.up = crate::torrents::step_limit(self.cfg.torrent.up, if d < 0.0 { -1 } else { 1 }),
+            row::T_SEED => self.cfg.torrent.seed = !self.cfg.torrent.seed,
+            row::T_AUTO => self.cfg.torrent.autostart = !self.cfg.torrent.autostart,
             row::LENS => self.cfg.lens = if d < 0.0 { (self.cfg.lens + 2) % 3 } else { (self.cfg.lens + 1) % 3 },
             row::PLACES => {
                 self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None }));
@@ -4614,6 +4743,7 @@ impl App {
             | Cmd::UsageRescan
             | Cmd::UsageStart
             | Cmd::UsageClose => self.usage_cmd(cmd),
+            Cmd::TorrentsOpen | Cmd::TorrentsClose | Cmd::TorrentMagnet | Cmd::TorrentToggle(_) | Cmd::TorrentReveal(_) | Cmd::TorrentRemove(..) => self.torrents_cmd(cmd),
             Cmd::TermOpen(_)
             | Cmd::TermNew
             | Cmd::TermCloseTab(_)
