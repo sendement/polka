@@ -94,6 +94,7 @@ impl eframe::App for App {
         // (The documents' zoom buttons step aside for the pad.)
         let pad = self.pad_active;
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("pad-active"), pad));
+        crate::textfx::set(&ctx, crate::textfx::Fx { touch: self.touch.active, lens: self.cfg.lens, hop: self.cfg.type_hop, free: self.overlay.is_none() });
         self.keyboard(&ctx);
         self.tick();
         self.icons.trim(&ctx);
@@ -129,6 +130,9 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.draw_touch_hold(&ctx);
+        // Text being chosen, bigger; text handles: a finger drags them.
+        crate::textfx::draw_lens(&ctx);
+        self.touch.grips.extend(crate::textfx::take_grips(&ctx));
         if !self.cfg.system_titlebar && !full {
             crate::titlebar::resize_edges(&ctx);
         }
@@ -3612,7 +3616,7 @@ fn osk_field(ui: &mut Ui, field: Rect, k: &mut Osk, id: egui::Id, font: FontId, 
     let mut edit = egui::TextEdit::singleline(&mut s)
         .id(id)
         .frame(egui::Frame::NONE)
-        .font(font)
+        .font(font.clone())
         .hint_text(hint)
         .password(k.secret)
         .vertical_align(egui::Align::Center)
@@ -3622,8 +3626,72 @@ fn osk_field(ui: &mut Ui, field: Rect, k: &mut Osk, id: egui::Id, font: FontId, 
     if k.secret && hidden {
         edit = edit.text_color(Color32::TRANSPARENT);
     }
-    let out = edit.show(&mut ui.new_child(egui::UiBuilder::new().max_rect(field)));
-    let caret = out.cursor_range.map_or(s.chars().count(), |r| r.primary.index.into());
+    let before: Vec<char> = k.bar_seen.as_ref().map_or_else(|| k.text.clone(), |(t, _)| t.chars().collect());
+    let child = &mut ui.new_child(egui::UiBuilder::new().max_rect(field));
+    let out = edit.show(child);
+    let mut caret = out.cursor_range.map_or(s.chars().count(), |r| r.primary.index.into());
+    let fx = crate::textfx::get(ui.ctx());
+    let (galley, gpos) = (out.galley.clone(), out.galley_pos);
+    let row_h = galley.rows.first().map_or(font.size * 1.3, |r| r.height());
+    // On the screen: a letter's box, a caret's foot.
+    let cell = |i: usize| -> Option<Rect> {
+        let row = galley.rows.first()?;
+        Some(row.glyphs.get(i)?.logical_rect().translate(row.pos.to_vec2() + gpos.to_vec2()))
+    };
+    let foot = |i: usize| {
+        let r = galley.pos_from_cursor(egui::text::CCursor::new(i)).translate(gpos.to_vec2());
+        pos2(r.center().x, r.max.y)
+    };
+    // Letters typed: they hop in (a few at a time; a paste doesn't).
+    let now: Vec<char> = s.chars().collect();
+    let typed = if now.len() > before.len() && now.len() - before.len() <= 3 {
+        let pre = now.iter().zip(&before).take_while(|(a, b)| a == b).count();
+        let post = now.iter().rev().zip(before.iter().rev()).take(before.len() - pre).take_while(|(a, b)| a == b).count();
+        (pre + post == before.len()).then_some((pre, now.len() - before.len()))
+    } else {
+        None
+    };
+    if typed.is_none() && now != before {
+        crate::textfx::forget(ui.ctx(), id);
+    }
+    let hops = crate::textfx::typed(ui.ctx(), id, typed.map(|t| t.0), typed.map_or(0, |t| t.1));
+    if fx.hop && !(k.secret && hidden) {
+        let t = ui.input(|i| i.time);
+        let color = ui.visuals().text_color();
+        let bg = ui.visuals().extreme_bg_color;
+        let p = child.painter().clone();
+        for (i, at) in hops {
+            if let (Some(c), Some(g)) = (cell(i), galley.rows.first().and_then(|r| r.glyphs.get(i))) {
+                crate::textfx::paint_hop(&p, c, g.chr, &font, color, bg, (t - at) as f32);
+            }
+        }
+    }
+    // A finger: handles under the caret or the choice's ends.
+    if let Some(range) = out.cursor_range.filter(|_| out.response.response.has_focus() || focused) {
+        let (a, b): (usize, usize) = (range.primary.index.into(), range.secondary.index.into());
+        let (lo, hi) = (a.min(b), a.max(b));
+        let ends = if lo == hi { crate::textfx::Ends::Caret(foot(lo)) } else { crate::textfx::Ends::Range(foot(lo), foot(hi)) };
+        let color = ui.visuals().selection.bg_fill;
+        if let Some((which, at)) = crate::textfx::handles(ui.ctx(), id, ends, row_h, field, color, ui.layer_id()) {
+            let to: usize = galley.cursor_from_pos(at - gpos).index.into();
+            let (na, nb) = match which {
+                crate::textfx::Which::Caret => (to, to),
+                // (Dragged past the other end: they swap.)
+                crate::textfx::Which::Start => (hi, to),
+                crate::textfx::Which::End => (lo, to),
+            };
+            let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(na), egui::text::CCursor::new(nb))));
+            st.store(ui.ctx(), id);
+            caret = nb;
+        }
+    }
+    // The mouse choosing: the magnifier there, if set.
+    if out.response.response.dragged() {
+        if let Some(p) = ui.ctx().pointer_latest_pos() {
+            crate::textfx::mouse_lens(ui.ctx(), ui.layer_id(), pos2(p.x, field.center().y), row_h);
+        }
+    }
     if out.response.changed() || outside || caret != k.caret {
         k.text = s.chars().collect();
         k.caret = caret.min(k.text.len());
@@ -4275,6 +4343,29 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::TYPE_FILTER));
+                                    }
+                                }
+                                SItem::Row(row::TYPE_HOP) => {
+                                    // Typed letters hop in.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::TYPE_HOP, "type-hop");
+                                    row_label(ui, rect, tr("Letters hop as typed"), &label_font, v.text_color(), rect.max.x - 40.0);
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.type_hop {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::TYPE_HOP));
+                                    }
+                                }
+                                SItem::Row(row::LENS) => {
+                                    // The magnifier over text being chosen.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::LENS, "lens");
+                                    let shown = [tr("Off"), tr("Finger"), tr("Finger and mouse")][cfg.lens.min(2) as usize];
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, tr("Magnifier when choosing text"), &label_font, v.text_color(), left - 8.0);
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Step(row::LENS, 1.0));
                                     }
                                 }
                                 SItem::Row(row::PLACES) => {

@@ -530,6 +530,11 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
                 t.ed.anchor.get_or_insert(t.ed.caret);
                 t.ed.caret = at;
             }
+            // The mouse choosing: the magnifier there, if set.
+            if resp.dragged() {
+                let y = origin.y + ((p.y - origin.y) / row_h).floor() * row_h + row_h / 2.0;
+                crate::textfx::mouse_lens(ui.ctx(), ui.layer_id(), pos2(p.x, y), row_h);
+            }
             if let Some(f) = t.ed.find.as_mut() {
                 f.typing = false;
             }
@@ -597,6 +602,33 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
             let g = painter.layout_job(row_job(t, row, &font, theme, &colors));
             painter.galley(pos2(origin.x + gutter, y + (row_h - font_h) / 2.0), g, theme.fg);
         }
+        // Letters typed lately hop in.
+        if crate::textfx::get(ui.ctx()).hop && !t.ed.typed.is_empty() {
+            let hover_row = resp.hover_pos().map(|p| ((p.y - origin.y) / row_h).floor() as usize);
+            for (pos, at) in t.ed.typed.clone() {
+                let Some(chr) = t.doc.text.get(pos..).and_then(|s| s.chars().next()) else { continue };
+                let r = t.row_of(pos);
+                if !(first..last).contains(&r) {
+                    continue;
+                }
+                let base = t.doc.lines[t.rows[r].line as usize].0;
+                let (x0, x1) = (x_of(t, t.rows[r], pos - base), x_of(t, t.rows[r], pos + chr.len_utf8() - base));
+                let y = origin.y + r as f32 * row_h;
+                let cell = Rect::from_min_max(pos2(x0, y), pos2(x1, y + row_h));
+                // (Its place covered as it was: the line under the mouse
+                // tinted.)
+                let line_hl = hover_row.and_then(|h| t.rows.get(h)).is_some_and(|h| h.line == t.rows[r].line);
+                let p = painter.with_clip_rect(painter.clip_rect().intersect(cell.expand2(vec2(0.0, 6.0)).expand(row_h)));
+                let age = at.elapsed().as_secs_f32();
+                if crate::textfx::hop(age).is_some() {
+                    p.rect_filled(cell, 0.0, theme.bg);
+                    if line_hl {
+                        p.rect_filled(cell, 0.0, theme.line);
+                    }
+                }
+                crate::textfx::paint_hop(&p, cell, chr, &font, theme.fg, Color32::TRANSPARENT, age);
+            }
+        }
         // Caret.
         let crow = t.row_of(t.ed.caret);
         if (first..last).contains(&crow) {
@@ -622,6 +654,40 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
                 }
             }
             painter.vline(gx + gutter - 8.0, strip.y_range(), Stroke::new(1.0, theme.gutter.gamma_multiply(0.3)));
+        }
+        // A finger: handles under the choice's ends (or the caret, when the
+        // text can be changed); dragged, they move them.
+        let foot = |t: &TextState, at: usize| {
+            let r = t.row_of(at);
+            let base = t.doc.lines[t.rows[r].line as usize].0;
+            pos2(x_of(t, t.rows[r], at - base), origin.y + (r + 1) as f32 * row_h)
+        };
+        let ends = match t.ed.selection() {
+            Some(s) => Some(crate::textfx::Ends::Range(foot(t, s.start), foot(t, s.end))),
+            None if t.editable() => Some(crate::textfx::Ends::Caret(foot(t, t.ed.caret))),
+            None => None,
+        };
+        if let Some(ends) = ends.filter(|_| !t.rows.is_empty() && crate::textfx::get(ui.ctx()).free) {
+            let clip = ui.clip_rect();
+            let color = ui.visuals().selection.bg_fill;
+            if let Some((which, at)) = crate::textfx::handles(ui.ctx(), ui.id().with("text-handles"), ends, row_h, clip, color, ui.layer_id()) {
+                let to = at_pos(t, at);
+                let (lo, hi) = t.ed.selection().map_or((t.ed.caret, t.ed.caret), |s| (s.start, s.end));
+                match which {
+                    crate::textfx::Which::Caret => {
+                        t.ed.anchor = None;
+                        t.ed.caret = to;
+                    }
+                    crate::textfx::Which::Start => {
+                        t.ed.anchor = Some(hi);
+                        t.ed.caret = to;
+                    }
+                    crate::textfx::Which::End => {
+                        t.ed.anchor = Some(lo);
+                        t.ed.caret = to;
+                    }
+                }
+            }
         }
     });
     t.scroll = out.state.offset;

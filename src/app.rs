@@ -471,6 +471,13 @@ pub struct Tab {
     pub own: bool,
 }
 
+impl Tab {
+    /// Showing a page over the panes (a file, the terminal, disk usage).
+    pub fn page_shown(&self) -> bool {
+        self.viewer.is_some() || self.usage.as_ref().is_some_and(|u| u.shown) || self.term.as_ref().is_some_and(|t| t.shown)
+    }
+}
+
 /// Where a drag rests to open something: a crumb of a side's address
 /// (which folder), a sidebar place, a folder or archive in a side's list
 /// (the folder shown, the entry's name), or a tab.
@@ -1164,7 +1171,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
         1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
-        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
+        2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::TYPE_HOP, row::LENS, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
         3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
         4 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
@@ -1255,6 +1262,8 @@ pub mod row {
     pub const TOOLBARS: usize = 24;
     pub const PLACES: usize = 25;
     pub const TYPE_FILTER: usize = 26;
+    pub const LENS: usize = 27;
+    pub const TYPE_HOP: usize = 28;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1843,6 +1852,25 @@ impl App {
             std::mem::swap(&mut self.tab, &mut self.other_tab);
             self.other_tab = self.other_tab.min(self.tabs.len() - 1);
             self.side = side;
+            // A page that filled the window (the terminal, a file shown)
+            // steps aside: the side left goes back to a folder's tab, the
+            // nearest before it, so a click there doesn't bring it back.
+            let left = self.other_tab;
+            if self.tabs[left].page_shown() {
+                let plain = |k: usize| k != self.tab && !self.tabs[k].page_shown();
+                match (0..left).rev().find(|&k| plain(k)).or_else(|| (left + 1..self.tabs.len()).find(|&k| plain(k))) {
+                    Some(k) => self.other_tab = k,
+                    // None left: a new one at its folder, before it.
+                    None => {
+                        let t = Tab::new(Pane::new(self.tabs[left].pane.loc.clone(), &self.cfg));
+                        self.tabs.insert(left, t);
+                        if self.tab >= left {
+                            self.tab += 1;
+                        }
+                        self.other_tab = left;
+                    }
+                }
+            }
         }
     }
 
@@ -3892,7 +3920,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4129,6 +4157,8 @@ impl App {
                 return;
             }
             row::TYPE_FILTER => self.cfg.type_filter = !self.cfg.type_filter,
+            row::TYPE_HOP => self.cfg.type_hop = !self.cfg.type_hop,
+            row::LENS => self.cfg.lens = if d < 0.0 { (self.cfg.lens + 2) % 3 } else { (self.cfg.lens + 1) % 3 },
             row::PLACES => {
                 self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None }));
                 return;

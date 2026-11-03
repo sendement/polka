@@ -4328,6 +4328,24 @@ fn dual_tabs_screens() {
     assert_eq!(h.state().pane_at(1).loc, c, "the right pane moved");
     settle(&mut h);
     shot(&mut h, "dt1-shown-on-the-left");
+    // A file shown over both sides (a page of its own, like the terminal):
+    // the right side's tab clicked, the left goes back to its folder, and
+    // a click on it later doesn't bring the page back.
+    let t = h.state().tab;
+    let shown = h.state_mut().show_viewer(t, dir.join("B/B.txt"), "B.txt".into(), 0, vec![]);
+    assert!(h.state().cur_tab().page_shown());
+    let right = h.state().tab_of(1);
+    h.state_mut().pick_tab(right);
+    assert_eq!(h.state().side(), 1);
+    assert!(!h.state().tabs[h.state().tab_of(0)].page_shown(), "the left side still on the page's tab");
+    assert_eq!(h.state().pane_at(0).loc, b);
+    h.state_mut().set_side(0);
+    assert!(!h.state().cur_tab().page_shown(), "the page came back on a click on the left");
+    assert!(h.state().tabs[shown].viewer.is_some(), "the page's tab went");
+    // Its tab clicked: it's shown again.
+    h.state_mut().pick_tab(shown);
+    assert!(h.state().cur_tab().page_shown());
+    settle(&mut h);
     // Back to two tabs: the right side on its own one, at B.
     while h.state().tabs.len() > 1 {
         let n = h.state().tabs.len();
@@ -7362,4 +7380,195 @@ fn narrow_screens() {
     fits(&mut h, "tags");
     h.state_mut().run(Cmd::IconThemes);
     fits(&mut h, "themes");
+}
+
+/// Text by finger: handles under the caret and a choice's ends drag them,
+/// the magnifier shows the place; typed letters hop in (a field, the
+/// editor).
+#[test]
+#[ignore]
+fn textfx_screens() {
+    use crate::app::{Cmd, Overlay, OskKey};
+    use crate::touch::finger;
+    use egui::{Event, Rect, TouchPhase};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("textfx");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("words.txt"), "hello brave new world\nsecond line here\n").unwrap();
+    let mut h = harness_with(dir.clone(), [960.0, 600.0], "");
+    settle(&mut h);
+    h.state_mut().cfg.lens = 1;
+    h.state_mut().cfg.type_hop = true;
+    let hops = |h: &Harness<'static, App>| h.ctx.data(|d| d.get_temp::<u32>(egui::Id::new("hops-drawn"))).unwrap_or(0);
+    let lens = |h: &Harness<'static, App>| h.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new("lens-drawn")));
+    let feed = |h: &mut Harness<'static, App>, evs: Vec<Event>| {
+        // egui-winit makes a mouse of the first finger too.
+        let mut all = Vec::new();
+        for e in evs {
+            if let Event::Touch { phase, pos, .. } = &e {
+                let (phase, pos) = (*phase, *pos);
+                all.push(e);
+                match phase {
+                    TouchPhase::Start => {
+                        all.push(Event::PointerMoved(pos));
+                        all.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+                    }
+                    TouchPhase::Move => all.push(Event::PointerMoved(pos)),
+                    _ => {
+                        all.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+                        all.push(Event::PointerGone);
+                    }
+                }
+            }
+        }
+        let out = h.state_mut().touch_feed(all);
+        for e in out {
+            h.event(e);
+        }
+        h.step();
+    };
+    // The handles' boxes (the sidebar's edge is thin).
+    let handles = |h: &Harness<'static, App>| -> Vec<Rect> {
+        let mut v: Vec<Rect> = h.state().touch.grips.iter().filter(|g| g.width() > 30.0).copied().collect();
+        v.sort_by(|a, b| a.min.x.total_cmp(&b.min.x));
+        v
+    };
+    let drag = |h: &mut Harness<'static, App>, from: egui::Pos2, dx: f32, mid: &str| {
+        feed(h, vec![finger(1, TouchPhase::Start, from.x, from.y)]);
+        for k in 1..=6 {
+            feed(h, vec![finger(1, TouchPhase::Move, from.x + dx * k as f32 / 6.0, from.y)]);
+        }
+        if !mid.is_empty() {
+            shot(h, mid);
+        }
+        feed(h, vec![finger(1, TouchPhase::End, from.x + dx, from.y)]);
+        for _ in 0..3 {
+            feed(h, vec![]);
+        }
+    };
+    let caret = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Osk(k)) => (k.string(), k.caret),
+        _ => panic!("no keyboard"),
+    };
+
+    // A field: letters typed hop in.
+    h.state_mut().run(Cmd::NewFolder);
+    settle(&mut h);
+    let before = hops(&h);
+    for c in "hello world".chars() {
+        h.state_mut().osk_key(OskKey::Char(c));
+        h.step();
+    }
+    assert!(hops(&h) > before, "no letter hopped");
+    shot(&mut h, "fx0-hopping");
+    settle(&mut h);
+    // Off: none.
+    h.state_mut().cfg.type_hop = false;
+    let before = hops(&h);
+    h.state_mut().osk_key(OskKey::Char('!'));
+    h.step();
+    h.step();
+    assert_eq!(hops(&h), before, "hopped while off");
+    h.state_mut().osk_key(OskKey::Backspace);
+    h.state_mut().cfg.type_hop = true;
+    settle(&mut h);
+    assert!(handles(&h).is_empty(), "handles for the mouse");
+    // The screen touched: a handle under the caret; dragged left, the
+    // caret goes with it and the magnifier shows where.
+    h.state_mut().touch.active = true;
+    settle(&mut h);
+    let hs = handles(&h);
+    assert_eq!(hs.len(), 1, "{hs:?}");
+    let (text, at) = caret(&h);
+    assert_eq!((text.as_str(), at), ("hello world", 11));
+    let from = hs[0].center();
+    feed(&mut h, vec![finger(1, TouchPhase::Start, from.x, from.y)]);
+    for k in 1..=6 {
+        feed(&mut h, vec![finger(1, TouchPhase::Move, from.x - 8.0 * k as f32, from.y)]);
+    }
+    assert!(lens(&h).is_some(), "no magnifier");
+    shot(&mut h, "fx1-caret-dragged");
+    feed(&mut h, vec![finger(1, TouchPhase::End, from.x - 48.0, from.y)]);
+    settle(&mut h);
+    let (_, at) = caret(&h);
+    assert!((5..=9).contains(&at), "caret at {at}");
+    assert!(lens(&h).is_none(), "the magnifier stayed");
+    // All chosen: two handles; the end's dragged left, less is chosen.
+    if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        k.select_all = true;
+    }
+    settle(&mut h);
+    let hs = handles(&h);
+    assert_eq!(hs.len(), 2, "{hs:?}");
+    drag(&mut h, hs[1].center(), -40.0, "fx2-end-dragged");
+    settle(&mut h);
+    let (_, at) = caret(&h);
+    assert!((6..11).contains(&at), "end at {at}");
+    // Magnifier off: none while dragging.
+    h.state_mut().cfg.lens = 0;
+    settle(&mut h);
+    let hs = handles(&h);
+    let from = hs[0].center();
+    feed(&mut h, vec![finger(1, TouchPhase::Start, from.x, from.y)]);
+    feed(&mut h, vec![finger(1, TouchPhase::Move, from.x + 20.0, from.y)]);
+    feed(&mut h, vec![finger(1, TouchPhase::Move, from.x + 30.0, from.y)]);
+    assert!(lens(&h).is_none(), "a magnifier while off");
+    feed(&mut h, vec![finger(1, TouchPhase::End, from.x + 30.0, from.y)]);
+    h.state_mut().cfg.lens = 1;
+    h.state_mut().overlay = None;
+    settle(&mut h);
+
+    // The editor: a choice's handles drag its ends; letters hop.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "words.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(&mut h, &[Action::Accept]);
+    settle(&mut h);
+    if let Some(t) = h.state_mut().text_mut() {
+        t.ed.anchor = Some(6);
+        t.ed.caret = 11;
+    }
+    h.state_mut().touch.active = true;
+    settle(&mut h);
+    let hs = handles(&h);
+    assert_eq!(hs.len(), 2, "{hs:?}");
+    shot(&mut h, "fx3-editor-chosen");
+    drag(&mut h, hs[1].center(), 50.0, "fx4-editor-dragging");
+    let sel = h.state_mut().text_mut().and_then(|t| t.ed.selection());
+    assert!(sel.as_ref().is_some_and(|s| s.start == 6 && s.end > 13), "{sel:?}");
+    let hs = handles(&h);
+    drag(&mut h, hs[0].center(), -40.0, "");
+    let sel = h.state_mut().text_mut().and_then(|t| t.ed.selection());
+    assert!(sel.as_ref().is_some_and(|s| s.start < 4), "{sel:?}");
+    // Typed in the editor: it hops.
+    if let Some(t) = h.state_mut().text_mut() {
+        t.ed.anchor = None;
+        t.ed.caret = 5;
+    }
+    let before = hops(&h);
+    h.state_mut().text_mut().unwrap().insert("X");
+    h.step();
+    assert!(hops(&h) > before, "no hop in the editor");
+    shot(&mut h, "fx5-editor-hop");
+    // The mouse: a drag choosing text shows the magnifier when set so.
+    h.state_mut().touch.active = false;
+    h.state_mut().cfg.lens = 2;
+    settle(&mut h);
+    // (On the first line: just above where its handle hung.)
+    let start = egui::pos2(hs[0].center().x + 10.0, hs[0].min.y - 8.0);
+    h.event(Event::PointerMoved(start));
+    h.event(Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+    h.step();
+    for k in 1..=5 {
+        h.event(Event::PointerMoved(start + egui::vec2(20.0 * k as f32, 0.0)));
+        h.step();
+    }
+    assert!(lens(&h).is_some(), "no magnifier for the mouse");
+    shot(&mut h, "fx6-mouse-lens");
+    h.event(Event::PointerButton { pos: start + egui::vec2(100.0, 0.0), button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    settle(&mut h);
+    h.state_mut().cfg.lens = 1;
+    h.state_mut().cfg.save();
+    h.state_mut().run(Cmd::CloseViewer);
+    settle(&mut h);
 }

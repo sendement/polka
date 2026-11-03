@@ -115,6 +115,11 @@ pub struct Config {
     pub side_hidden: Vec<String>,
     /// Typing in the file list starts the filter.
     pub type_filter: bool,
+    /// The magnifier over text being chosen: 0 never, 1 for a finger, 2
+    /// for the mouse too.
+    pub lens: u8,
+    /// A typed letter grows a little and hops as it comes.
+    pub type_hop: bool,
     pub side_order: Vec<String>,
     /// The status bar's figures.
     pub status: crate::status::Shown,
@@ -292,6 +297,8 @@ impl Default for Config {
             toolbars: Default::default(),
             side_hidden: Vec::new(),
             type_filter: true,
+            lens: 1,
+            type_hop: true,
             side_order: Vec::new(),
             pad_hints: PadHints::Auto,
             status: crate::status::Shown::default(),

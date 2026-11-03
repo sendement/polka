@@ -35,6 +35,7 @@ mod tags_ui;
 mod steam;
 mod steam_add;
 mod terminal;
+mod textfx;
 mod thumbs;
 mod titlebar;
 mod toolbar;

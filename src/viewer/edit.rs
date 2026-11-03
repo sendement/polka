@@ -35,6 +35,8 @@ pub struct Editor {
     /// Scroll the caret into view on the next frame.
     pub reveal: bool,
     pub find: Option<Find>,
+    /// Letters typed lately (where, when): they hop in.
+    pub typed: Vec<(usize, Instant)>,
 }
 
 #[derive(Default, Clone)]
@@ -382,6 +384,7 @@ impl TextState {
 
     fn apply(&mut self, range: Range<usize>, with: &str, record: bool) {
         let removed = self.doc.text[range.clone()].to_string();
+        let letter = record && removed.is_empty() && with.chars().count() == 1 && !with.contains(['\n', '\r', '\t']);
         let caret_before = self.ed.caret;
         self.doc.replace(range.clone(), with);
         let caret_after = range.start + with.len();
@@ -411,6 +414,17 @@ impl TextState {
                 }
             }
             self.ed.redo.clear();
+        }
+        // A letter typed: it hops in (the others after it move on).
+        if letter {
+            let now = Instant::now();
+            self.ed.typed.retain(|(_, t)| now.duration_since(*t).as_secs_f32() < crate::textfx::HOP);
+            for (p, _) in self.ed.typed.iter_mut().filter(|(p, _)| *p >= range.start) {
+                *p += with.len();
+            }
+            self.ed.typed.push((range.start, now));
+        } else {
+            self.ed.typed.clear();
         }
         self.ed.anchor = None;
         self.ed.caret = caret_after;
