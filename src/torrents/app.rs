@@ -23,14 +23,31 @@ pub struct AddDlg {
     pub error: Option<String>,
     /// 0: where it goes; then the files.
     pub cursor: usize,
-    /// The folder the panes show (another place to put it), and whether
-    /// it's chosen.
-    pub here: Option<PathBuf>,
-    pub to_here: bool,
+    /// Places it can go (the downloads folder, the one the panes show, one
+    /// typed), and the one chosen.
+    pub dests: Vec<PathBuf>,
+    pub dest: usize,
     pub scrolled: Option<usize>,
+    /// Tiles a line (as last drawn), for ↑ ↓.
+    pub per_line: usize,
 }
 
 impl AddDlg {
+    pub fn dest_folder(&self) -> &std::path::Path {
+        &self.dests[self.dest.min(self.dests.len() - 1)]
+    }
+
+    /// A place typed: chosen (offered from then on).
+    pub fn set_dest(&mut self, p: PathBuf) {
+        match self.dests.iter().position(|d| *d == p) {
+            Some(i) => self.dest = i,
+            None => {
+                self.dests.push(p);
+                self.dest = self.dests.len() - 1;
+            }
+        }
+    }
+
     pub fn ready(&self) -> bool {
         !self.bytes.is_empty()
     }
@@ -58,7 +75,11 @@ impl AddDlg {
 pub enum AddEv {
     Toggle(usize),
     All,
+    /// The next place offered (or the one before).
     Dest,
+    DestBack,
+    /// A folder to type.
+    Other,
     Download,
     Cancel,
 }
@@ -132,9 +153,12 @@ impl App {
             Source::Magnet(_) => (tr("Magnet link").to_string(), true),
             Source::Bytes(_) => (tr("Torrent").to_string(), false),
         };
-        let here = self.pane().loc.local_path().map(|p| p.to_path_buf()).filter(|p| *p != self.cfg.torrent.folder());
+        let mut dests = vec![self.cfg.torrent.folder()];
+        if let Some(here) = self.pane().loc.local_path().map(|p| p.to_path_buf()).filter(|p| !dests.contains(p)) {
+            dests.push(here);
+        }
         let peek = self.torrent_engine().peek(src);
-        self.overlay = Some(Overlay::TorrentAdd(Box::new(AddDlg { peek, title, magnet, name: String::new(), files: Vec::new(), bytes: Vec::new(), error: None, cursor: 0, here, to_here: false, scrolled: None })));
+        self.overlay = Some(Overlay::TorrentAdd(Box::new(AddDlg { peek, title, magnet, name: String::new(), files: Vec::new(), bytes: Vec::new(), error: None, cursor: 0, dests, dest: 0, scrolled: None, per_line: 1 })));
     }
 
     /// Each frame: what the engine found, finished, or failed.
@@ -166,6 +190,27 @@ impl App {
                 }
             }
         }
+        // A move that ended without them (cancelled, failed): on again.
+        if !self.torrent_moving.is_empty() && !self.jobs.iter().any(|j| j.finished_at.lock().unwrap().is_none()) {
+            for (id, paused) in std::mem::take(&mut self.torrent_moving) {
+                if !paused {
+                    e.resume(id);
+                }
+            }
+        }
+        // What isn't here whole yet, and how much of it is: the panes show
+        // it on the files.
+        let mut progress = std::collections::HashMap::new();
+        for t in e.items().iter().filter(|t| !t.finished() && !matches!(t.state, State::Error(_))) {
+            progress.insert(t.root(), t.fraction());
+            if t.files.len() > 1 {
+                for f in t.files.iter().filter(|f| f.wanted && f.done < f.len) {
+                    progress.insert(t.folder.join(&f.path), if f.len == 0 { 1.0 } else { f.done as f32 / f.len as f32 });
+                }
+            }
+        }
+        let progress = std::sync::Arc::new(progress);
+        self.ctx.data_mut(|d| d.insert_temp(egui::Id::new("torrent-progress"), progress));
         let (finished, failed) = e.take_news();
         for n in finished {
             self.toast(format!("{}: {n}", tr("Downloaded")), false);
@@ -175,6 +220,33 @@ impl App {
         }
         if self.torrents_shown() {
             self.ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+
+    /// Files about to be moved: the torrents downloading into them pause.
+    pub fn torrents_before_move(&mut self, paths: &[PathBuf]) {
+        let Some(e) = self.torrents.as_ref() else { return };
+        for t in e.items() {
+            let root = t.root();
+            if paths.iter().any(|p| root.starts_with(p)) && !self.torrent_moving.contains_key(&t.id) {
+                let paused = matches!(t.state, State::Paused | State::Done);
+                if !paused {
+                    e.pause(t.id);
+                }
+                self.torrent_moving.insert(t.id, paused);
+            }
+        }
+    }
+
+    /// Files moved (`from` → `to`): torrents downloading into them go on
+    /// from the new place.
+    pub fn torrents_moved(&mut self, moved: &[(PathBuf, PathBuf)]) {
+        let Some(e) = self.torrents.as_ref() else { return };
+        for t in e.items() {
+            let root = t.root();
+            let Some(to) = moved.iter().find_map(|(from, to)| root.strip_prefix(from).ok().map(|rest| if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) })) else { continue };
+            let was_paused = self.torrent_moving.remove(&t.id).unwrap_or(matches!(t.state, State::Paused | State::Done));
+            e.relocate(t.id, t.folder_for(&to), was_paused);
         }
     }
 
@@ -268,6 +340,20 @@ impl App {
         }
     }
 
+    /// A folder typed for the add window: chosen there (made if need be).
+    pub fn torrent_dest_typed(&mut self, mut dlg: Box<AddDlg>, text: &str) {
+        let p = crate::app::expand_tilde(text.trim());
+        if !text.trim().is_empty() {
+            if p.is_absolute() && std::fs::create_dir_all(&p).is_ok() {
+                dlg.set_dest(p);
+            } else {
+                self.toast(format!("{}: {}", tr("Not a folder"), text.trim()), true);
+            }
+        }
+        dlg.cursor = 0;
+        self.overlay = Some(Overlay::TorrentAdd(dlg));
+    }
+
     /// A magnet link typed or pasted.
     pub fn torrent_magnet_typed(&mut self, text: &str) {
         match Source::parse(text) {
@@ -281,13 +367,21 @@ impl App {
     pub fn torrent_add_input(&mut self, a: Action) {
         let Some(Overlay::TorrentAdd(d)) = self.overlay.as_mut() else { return };
         let n = d.files.len();
+        let line = d.per_line.max(1);
+        // 0 is where it goes; the files, a grid below it.
+        let c = d.cursor;
         match a {
-            Action::Up => d.cursor = d.cursor.saturating_sub(1),
-            Action::Down => d.cursor = (d.cursor + 1).min(n),
+            Action::Left if c == 0 => self.torrent_add_ev(AddEv::DestBack),
+            Action::Right if c == 0 => self.torrent_add_ev(AddEv::Dest),
+            Action::Accept if c == 0 => self.torrent_add_ev(AddEv::Other),
+            Action::Down if c == 0 => d.cursor = usize::from(n > 0),
+            Action::Up if c <= line => d.cursor = 0,
+            Action::Up => d.cursor = c - line,
+            Action::Down => d.cursor = (c + line).min(n),
+            Action::Left => d.cursor = (c - 1).max(1),
+            Action::Right => d.cursor = (c + 1).min(n),
             Action::Home => d.cursor = 0,
             Action::End => d.cursor = n,
-            Action::Accept if d.cursor == 0 => self.torrent_add_ev(AddEv::Dest),
-            Action::Left | Action::Right if d.cursor == 0 => self.torrent_add_ev(AddEv::Dest),
             Action::Accept => {
                 let i = d.cursor - 1;
                 self.torrent_add_ev(AddEv::Toggle(i));
@@ -307,11 +401,17 @@ impl App {
                 d.toggle(i);
             }
             AddEv::All => d.all_or_none(),
-            AddEv::Dest => {
+            AddEv::Dest | AddEv::DestBack => {
                 d.cursor = 0;
-                if d.here.is_some() {
-                    d.to_here = !d.to_here;
-                }
+                let k = d.dests.len();
+                d.dest = if matches!(ev, AddEv::Dest) { (d.dest + 1) % k } else { (d.dest + k - 1) % k };
+            }
+            AddEv::Other => {
+                let Some(Overlay::TorrentAdd(d)) = self.overlay.take() else { return };
+                let now = d.dest_folder().display().to_string();
+                let mut k = Osk::new(tr("Save to"), &now, OskPurpose::TorrentDest { dlg: d });
+                k.select_all = true;
+                self.overlay = Some(Overlay::Osk(k));
             }
             AddEv::Cancel => {
                 let peek = d.peek;
@@ -325,11 +425,7 @@ impl App {
                     return;
                 }
                 let Some(Overlay::TorrentAdd(d)) = self.overlay.take() else { return };
-                let base = match (&d.here, d.to_here) {
-                    (Some(h), true) => h.clone(),
-                    _ => self.cfg.torrent.folder(),
-                };
-                let folder = super::target_folder(&base, &d.name, d.files.len());
+                let folder = super::target_folder(d.dest_folder(), &d.name, d.files.len());
                 let only = (!d.files.iter().all(|f| f.2)).then(|| d.files.iter().enumerate().filter(|(_, f)| f.2).map(|(i, _)| i).collect());
                 let bytes = d.bytes;
                 self.torrent_engine().add(bytes, folder, only);

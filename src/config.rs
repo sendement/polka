@@ -177,9 +177,9 @@ impl Default for TorrentPrefs {
 }
 
 impl TorrentPrefs {
-    /// Where downloads go.
+    /// Where downloads go (by default: Downloads/torrents).
     pub fn folder(&self) -> std::path::PathBuf {
-        self.folder.clone().or_else(dirs::download_dir).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| "/".into()).join("Downloads"))
+        self.folder.clone().unwrap_or_else(|| dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| "/".into()).join("Downloads")).join("torrents"))
     }
 }
 

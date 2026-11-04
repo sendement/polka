@@ -7646,33 +7646,81 @@ fn torrents_screens() {
         }
         _ => panic!("the window went"),
     };
-    // Its own folder is offered too (the panes show another one).
-    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.here.is_some()));
-    // The notes not wanted: ↓ to them, ✕.
+    // Offered: the downloads folder, and the one the panes show.
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.dests.len() == 2 && d.dests[0] == dir.join("dl")));
+    // ✕ on where it goes: a folder of one's own, typed.
+    press(&mut h, &[Action::Accept]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(_))), "no field for the folder");
+    if let Some(Overlay::Osk(k)) = h.state_mut().overlay.as_mut() {
+        k.text = dir.join("chosen").to_string_lossy().chars().collect();
+        k.caret = k.text.len();
+    }
+    h.state_mut().osk_submit();
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.dest_folder() == dir.join("chosen")), "not chosen");
+    settle(&mut h);
+    // The notes not wanted: ↓ into the tiles, → to them, ✕.
     let notes = names.iter().position(|n| n == "notes.txt").unwrap();
-    for _ in 0..=notes {
-        press(&mut h, &[Action::Down]);
+    press(&mut h, &[Action::Down]);
+    for _ in 0..notes {
+        press(&mut h, &[Action::Right]);
     }
     press(&mut h, &[Action::Accept]);
     assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if !d.files[notes].2 && d.chosen().0 == 1));
+    // ↑ from the first line: back on where it goes; ◀ ▶ through the places.
+    press(&mut h, &[Action::Up]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.cursor == 0));
+    press(&mut h, &[Action::Right]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.dest == 0));
+    press(&mut h, &[Action::Left]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.dest_folder() == dir.join("chosen")));
     settle(&mut h);
     shot(&mut h, "tr0-add");
-    // ≡: downloading, the page shows it.
+    // Slowly (to see it under way): ≡, downloading, the page shows it.
+    h.state_mut().cfg.torrent.down = 128;
     press(&mut h, &[Action::Menu]);
     assert!(h.state().overlay.is_none());
     assert!(h.state().torrents_shown(), "no page");
-    let mut done = false;
+    let first = dir.join("chosen/Holiday photos");
+    let progress = |h: &Harness<'static, App>, p: &std::path::Path| -> Option<f32> {
+        h.ctx.data(|d| d.get_temp::<std::sync::Arc<std::collections::HashMap<PathBuf, f32>>>(egui::Id::new("torrent-progress"))).and_then(|m| m.get(p).copied())
+    };
+    let mut under_way = false;
     for _ in 0..200 {
         settle(&mut h);
-        if h.state().torrent_items().first().is_some_and(|t| t.finished()) {
+        if progress(&h, &first).is_some_and(|f| f > 0.0 && f < 1.0) {
+            under_way = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    assert!(under_way, "no progress under way: {:?}", h.state().torrent_items());
+    // In the panes: how far along, on the folder and on the file.
+    let cfg = h.state().cfg.clone();
+    let t = h.state().tab;
+    h.state_mut().tabs[t].hide_pages();
+    h.state_mut().pane_mut().navigate(Location::Local(dir.join("chosen")), None, &cfg);
+    settle(&mut h);
+    shot(&mut h, "tr1-progress");
+    assert!(progress(&h, &first.join("beach.jpg")).is_some_and(|f| f < 1.0));
+    // Moved elsewhere in Polka meanwhile: it goes on there.
+    std::fs::create_dir_all(dir.join("moved")).unwrap();
+    h.state_mut().start(crate::ops::Op::Move { sources: vec![Location::Local(first.clone())], dest: crate::vfs::Dest::Dir(dir.join("moved")), policy: crate::ops::Conflict::Rename });
+    h.state_mut().cfg.torrent.down = 0;
+    let got = dir.join("moved/Holiday photos");
+    let mut done = false;
+    for _ in 0..300 {
+        settle(&mut h);
+        if h.state().torrent_items().first().is_some_and(|t| t.finished() && t.folder == got) {
             done = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(done, "not downloaded: {:?}", h.state().torrent_items());
-    let got = dir.join("dl/Holiday photos");
+    assert!(done, "not downloaded where it went: {:?}", h.state().torrent_items());
+    assert!(!first.exists(), "left behind");
     assert_eq!(std::fs::read(got.join("beach.jpg")).unwrap(), a);
+    assert!(progress(&h, &got).is_none(), "still shown as under way");
+    h.state_mut().open_torrents();
     settle(&mut h);
     shot(&mut h, "tr1-page");
     assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("Holiday photos")), "not said: {:?}", h.state().toast);

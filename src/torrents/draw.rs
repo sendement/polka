@@ -166,10 +166,15 @@ fn tilde(p: &std::path::Path) -> String {
     }
 }
 
-/// The window adding a torrent: where it goes, its files to choose.
-pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, folder: &std::path::Path) -> Option<AddEv> {
+/// A file's tile in the add window.
+const TILE: Vec2 = vec2(116.0, 112.0);
+
+/// The window adding a torrent: where it goes (◀ ▶ through the places
+/// offered, "Other folder…" to type one), its files as tiles to tick.
+pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) -> Option<AddEv> {
     let mut ev = None;
-    ui.set_width(crate::view::dialog_w().min(560.0));
+    let width = crate::view::dialog_w().min(620.0);
+    ui.set_width(width);
     let v = ui.visuals().clone();
     ui.label(egui::RichText::new(tr("Download a torrent")).strong().size(18.0));
     let head = if d.name.is_empty() { d.title.clone() } else { d.name.clone() };
@@ -184,12 +189,11 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, folder: &std::path::Path) -> Option
         });
     } else {
         // Where it goes.
-        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
-        let place = match (&d.here, d.to_here) {
-            (Some(h), true) => h.clone(),
-            _ => folder.to_path_buf(),
-        };
-        let target = super::target_folder(&place, &d.name, d.files.len());
+        let other_w = ui.painter().layout_no_wrap(tr("Other folder…").to_string(), FontId::proportional(14.0), v.text_color()).size().x + 24.0;
+        let (row, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+        let rect = Rect::from_min_max(row.min, pos2(row.max.x - other_w - 8.0, row.max.y));
+        let r = ui.interact(rect, ui.id().with("torrent-dest"), Sense::click());
+        let target = super::target_folder(d.dest_folder(), &d.name, d.files.len());
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("Save to")));
         if d.cursor == 0 {
             ui.painter().rect(rect, 6.0, crate::view::tint(&v, 0.3), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
@@ -197,17 +201,27 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, folder: &std::path::Path) -> Option
             ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill);
         }
         let lw = ui.painter().text(pos2(rect.min.x + 10.0, rect.center().y), Align2::LEFT_CENTER, tr("Save to"), FontId::proportional(14.0), v.text_color()).width();
-        let arrows = if d.here.is_some() { "◀ ▶" } else { "" };
-        let aw = if arrows.is_empty() { 0.0 } else { 40.0 };
-        ui.painter().text(pos2(rect.max.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, arrows, FontId::proportional(14.0), v.strong_text_color());
+        let many = d.dests.len() > 1;
+        let aw = if many { 40.0 } else { 0.0 };
+        if many {
+            ui.painter().text(pos2(rect.max.x - 10.0, rect.center().y), Align2::RIGHT_CENTER, "◀ ▶", FontId::proportional(14.0), v.strong_text_color());
+        }
         let lx = rect.min.x + 10.0 + lw + 12.0;
         let g = elided_text(ui, &tilde(&target), FontId::proportional(14.0), v.strong_text_color(), rect.max.x - lx - 14.0 - aw);
         ui.painter().galley(pos2(lx, rect.center().y - g.size().y / 2.0), g, v.strong_text_color());
         if r.clicked() {
             ev = Some(AddEv::Dest);
         }
+        let ob = Rect::from_min_max(pos2(row.max.x - other_w, row.min.y + 4.0), pos2(row.max.x, row.max.y - 4.0));
+        let or = ui.interact(ob, ui.id().with("torrent-other"), Sense::click());
+        or.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("Other folder…")));
+        ui.painter().rect_filled(ob, 6.0, if or.hovered() { v.widgets.hovered.weak_bg_fill } else { v.widgets.inactive.weak_bg_fill });
+        ui.painter().text(ob.center(), Align2::CENTER_CENTER, tr("Other folder…"), FontId::proportional(14.0), v.text_color());
+        if or.clicked() {
+            ev = Some(AddEv::Other);
+        }
         ui.add_space(4.0);
-        // Its files.
+        // Its files, as tiles to tick.
         let (n, size) = d.chosen();
         ui.horizontal(|ui| {
             ui.label(format!("{}: {n} / {} · {}", tr("Files"), d.files.len(), human_size(size)));
@@ -215,31 +229,47 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, folder: &std::path::Path) -> Option
                 ev = Some(AddEv::All);
             }
         });
-        let max_h = (ui.ctx().content_rect().height() - 300.0).max(140.0);
+        let per_line = ((width - 14.0) / TILE.x).floor().max(1.0) as usize;
+        d.per_line = per_line;
+        let lines = d.files.len().div_ceil(per_line);
+        let max_h = (ui.ctx().content_rect().height() - 320.0).max(TILE.y + 8.0);
         let scroll = d.scrolled != Some(d.cursor);
         egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+            let (room, _) = ui.allocate_exact_size(vec2(width - 14.0, lines as f32 * TILE.y), Sense::hover());
             for (i, (path, len, on)) in d.files.iter().enumerate() {
-                let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                let at = room.min + vec2((i % per_line) as f32 * TILE.x, (i / per_line) as f32 * TILE.y);
+                let cell = Rect::from_min_size(at, TILE).shrink(3.0);
+                let r = ui.interact(cell, ui.id().with(("torrent-file", i)), Sense::click());
                 r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, path));
                 if d.cursor == i + 1 {
-                    ui.painter().rect(rect, 6.0, crate::view::tint(&v, 0.3), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
+                    ui.painter().rect(cell, 8.0, crate::view::tint(&v, 0.3), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
                     if scroll {
-                        r.scroll_to_me(None);
+                        ui.scroll_to_rect(cell, None);
                     }
                 } else if r.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, v.widgets.hovered.weak_bg_fill);
+                    ui.painter().rect_filled(cell, 8.0, v.widgets.hovered.weak_bg_fill);
                 }
-                let b = Rect::from_center_size(pos2(rect.min.x + 16.0, rect.center().y), Vec2::splat(16.0));
-                ui.painter().rect_stroke(b, 3.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
-                if *on {
-                    ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(13.0), v.strong_text_color());
+                // Its icon (by its name), dimmed when not taken.
+                let name = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                let e = crate::vfs::Entry { name: name.clone(), is_dir: false, is_link: false, size: *len, mtime: None, mode: 0o644, tags: Vec::new() };
+                let ir = Rect::from_center_size(pos2(cell.center().x, cell.min.y + 28.0), Vec2::splat(40.0));
+                if let Some(u) = icons.for_entry(&e, None, crate::view::lookup_px(ui, 40.0)) {
+                    egui::Image::new(u).tint(if *on { Color32::WHITE } else { Color32::from_white_alpha(90) }).paint_at(ui, ir);
                 }
-                let sz = human_size(*len);
-                let sw = ui.painter().layout_no_wrap(sz.clone(), FontId::proportional(13.0), v.weak_text_color()).size().x;
-                ui.painter().text(pos2(rect.max.x - 8.0, rect.center().y), Align2::RIGHT_CENTER, sz, FontId::proportional(13.0), v.weak_text_color());
                 let c = if *on { v.text_color() } else { v.weak_text_color() };
-                let g = elided_text(ui, path, FontId::proportional(14.0), c, rect.width() - 50.0 - sw - 16.0);
-                ui.painter().galley(pos2(rect.min.x + 34.0, rect.center().y - g.size().y / 2.0), g, c);
+                let g = crate::view::elided_centered(ui, &name, FontId::proportional(12.5), c, cell.width() - 6.0, 2);
+                let gh = g.size().y;
+                ui.painter().galley(pos2(cell.center().x, ir.max.y + 4.0), g, c);
+                ui.painter().text(pos2(cell.center().x, ir.max.y + 6.0 + gh), Align2::CENTER_TOP, human_size(*len), FontId::proportional(11.0), v.weak_text_color());
+                // The tick, top left.
+                let b = Rect::from_min_size(cell.min + vec2(6.0, 6.0), Vec2::splat(18.0));
+                ui.painter().rect_filled(b, 4.0, if *on { v.selection.bg_fill } else { v.extreme_bg_color });
+                ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, if *on { v.selection.bg_fill } else { v.weak_text_color() }), StrokeKind::Inside);
+                if *on {
+                    ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(13.0), Color32::WHITE);
+                }
+                // (A file in a folder of the torrent: its whole path.)
+                let r = if path.contains('/') { r.on_hover_text(path) } else { r };
                 if r.clicked() {
                     ev = Some(AddEv::Toggle(i));
                 }

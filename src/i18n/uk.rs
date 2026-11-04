@@ -591,6 +591,7 @@ pub const T: &[(&str, &str)] = &[
     ("Slide show", "Показ слайдів"),
     ("End the slide show", "Завершити показ"),
     ("Filter by typing", "Фільтр набором"),
+    ("Other folder…", "Інша тека…"),
     ("Auto", "Авто"),
     ("Mouse", "Миша"),
     ("Touch", "Дотик"),

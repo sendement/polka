@@ -591,6 +591,7 @@ pub const T: &[(&str, &str)] = &[
     ("Slide show", "Slayd-shou"),
     ("End the slide show", "Namoyishni tugatish"),
     ("Filter by typing", "Yozish orqali saralash"),
+    ("Other folder…", "Boshqa jild…"),
     ("Auto", "Avto"),
     ("Mouse", "Sichqoncha"),
     ("Touch", "Sensor"),

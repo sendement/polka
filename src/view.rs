@@ -1216,6 +1216,7 @@ impl App {
             Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
             Some(Overlay::Versions(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Install")), (Action::Back, tr("Close"))],
             Some(Overlay::Places(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Show or hide")), (Action::PrevTab, tr("Reorder")), (Action::Back, tr("Close"))],
+            Some(Overlay::TorrentAdd(d)) if d.cursor == 0 => vec![(Action::Left, tr("Save to")), (Action::Accept, tr("Other folder…")), (Action::Select, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
             Some(Overlay::TorrentAdd(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Choose")), (Action::Select, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
             Some(Overlay::OpenWith(_)) => vec![
                 (Action::Up, tr("Move")),
@@ -1906,7 +1907,6 @@ impl App {
         let mut pal_ev = None;
         let mut places = None;
         let mut tadd_ev = None;
-        let torrent_folder = self.cfg.torrent.folder();
         let mut viewer_ev: Option<(usize, isize)> = None;
         let mut term_set_ev: Option<(usize, isize)> = None;
         let mut qkey_ev: Option<(usize, bool)> = None;
@@ -1970,7 +1970,7 @@ impl App {
                     Some(Overlay::OpenWith(d)) => ow_ev = crate::openwith::draw(ui, d, icons),
                     Some(Overlay::Versions(d)) => ver_ev = crate::updates::draw(ui, d),
                     Some(Overlay::Toolbars) => pal_ev = crate::toolbar::draw_palette(ui, icons, cfg),
-                    Some(Overlay::TorrentAdd(d)) => tadd_ev = crate::torrents::draw::draw_add(ui, d, &torrent_folder),
+                    Some(Overlay::TorrentAdd(d)) => tadd_ev = crate::torrents::draw::draw_add(ui, d, icons),
                     Some(Overlay::Places(d)) => places = Some(crate::sidebar::draw_places(ui, d, &self.side_all, &cfg.side_hidden, self.side_drag.as_ref().map(|(k, _)| k.as_str()), icons)),
                     Some(Overlay::Settings(st)) => {
                         // Taller than small windows: scroll.
@@ -2321,6 +2321,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     paint_icon(ui, big(ir), icon, thumb, alpha);
                     lock_badge(ui, ir, e, path.as_deref());
                     package_badge(ui, ir, e, path.as_deref());
+                    torrent_badge(ui, ir, path.as_deref());
                     tag_dots(ui, &e.tags, pos2(ir.min.x + 4.0, ir.max.y - 4.0));
                     let g = elided_centered(ui, label, FontId::proportional(grid_font), text_c, rect.width() - 6.0, 2);
                     hot = ir.union(Rect::from_center_size(pos2(rect.center().x, ir.max.y + 4.0 + g.size().y / 2.0), g.size()));
@@ -2353,6 +2354,8 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                     let name_end = rect.min.x + name_x + g.size().x;
                     hot = Rect::from_min_max(rect.min, pos2(name_end + 12.0, rect.max.y));
                     ui.painter().galley(pos2(rect.min.x + name_x, rect.center().y - g.size().y / 2.0), g, text_c);
+                    // A torrent still on it: how far, after the name.
+                    torrent_pill(ui, pos2(name_end + 10.0, rect.center().y), (list_font - 2.0).max(10.0), path.as_deref());
                     if let Some(f) = folded {
                         stack_tag(ui, f.2.len(), pos2(name_end + 10.0, rect.center().y), Align2::LEFT_CENTER, tag_font.clone(), vol_c);
                     } else if let Some(m) = vol {
@@ -2633,6 +2636,40 @@ fn volume_tag(ui: &Ui, m: &crate::volumes::Member, archive: Option<&str>, at: Po
 
 /// Installable packages show their format: a tag under a big icon, a dot
 /// with an arrow on a small one.
+/// How far a torrent has got with a file (None: it isn't downloading it).
+fn torrent_progress(ui: &Ui, path: Option<&std::path::Path>) -> Option<f32> {
+    let map: Option<std::sync::Arc<std::collections::HashMap<std::path::PathBuf, f32>>> = ui.ctx().data(|d| d.get_temp(egui::Id::new("torrent-progress")));
+    map.and_then(|m| m.get(path?).copied())
+}
+
+/// The same in the list: a pill with a bar and the percent, at `at` (its
+/// left middle).
+fn torrent_pill(ui: &Ui, at: Pos2, font: f32, path: Option<&std::path::Path>) {
+    let Some(f) = torrent_progress(ui, path) else { return };
+    let v = ui.visuals();
+    let text = format!("↓ {:.0}%", f * 100.0);
+    let g = ui.painter().layout_no_wrap(text, FontId::proportional(font), v.strong_text_color());
+    let pill = Rect::from_min_size(pos2(at.x, at.y - (g.size().y + 4.0) / 2.0), vec2(g.size().x + 14.0, g.size().y + 4.0));
+    ui.painter().rect_filled(pill, pill.height() / 2.0, v.extreme_bg_color);
+    let fill = Rect::from_min_size(pill.min, vec2(pill.width() * f.clamp(0.0, 1.0), pill.height()));
+    ui.painter().rect_filled(fill, pill.height() / 2.0, v.selection.bg_fill.gamma_multiply(0.7));
+    ui.painter().galley(pos2(pill.min.x + 7.0, pill.min.y + 2.0), g, v.strong_text_color());
+}
+
+/// A file a torrent is still downloading: how much of it is here, a bar
+/// over the foot of its icon (the grid).
+fn torrent_badge(ui: &Ui, ir: Rect, path: Option<&std::path::Path>) {
+    let Some(f) = torrent_progress(ui, path) else { return };
+    let v = ui.visuals();
+    let h = (ir.height() * 0.32).clamp(10.0, 16.0);
+    let w = ir.width().max(36.0);
+    let bar = Rect::from_center_size(pos2(ir.center().x, ir.max.y - h / 2.0), vec2(w, h));
+    ui.painter().rect_filled(bar, h / 2.0, Color32::from_black_alpha(190));
+    let fill = Rect::from_min_size(bar.min, vec2(bar.width() * f.clamp(0.0, 1.0), bar.height()));
+    ui.painter().rect_filled(fill, h / 2.0, v.selection.bg_fill.gamma_multiply(0.9));
+    ui.painter().text(bar.center(), Align2::CENTER_CENTER, format!("{:.0}%", f * 100.0), FontId::proportional(h * 0.72), Color32::WHITE);
+}
+
 fn package_badge(ui: &Ui, icon: Rect, e: &crate::vfs::Entry, path: Option<&std::path::Path>) {
     let (Some(path), Some(mtime)) = (path, e.mtime) else { return };
     if e.is_dir {

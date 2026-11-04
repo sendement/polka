@@ -116,6 +116,19 @@ impl Item {
         matches!(self.state, State::Seeding | State::Done)
     }
 
+    /// What it downloads into: the folder of many files, or the one file.
+    pub fn root(&self) -> PathBuf {
+        match &self.files[..] {
+            [one] => self.folder.join(&one.path),
+            _ => self.folder.clone(),
+        }
+    }
+
+    /// Where its files go when `root` has been moved to `to`.
+    pub fn folder_for(&self, to: &Path) -> PathBuf {
+        if self.files.len() == 1 { to.parent().map_or_else(|| to.to_path_buf(), Path::to_path_buf) } else { to.to_path_buf() }
+    }
+
     /// Where its files are seen in the panes: the folder of many files, or
     /// the folder holding a single one (and its name).
     pub fn reveal(&self) -> (PathBuf, Option<String>) {
@@ -159,6 +172,8 @@ enum Req {
     Pause(usize),
     Resume(usize),
     Remove(usize, bool),
+    /// Its files moved: on from `folder` (paused still, or not).
+    Relocate(usize, PathBuf, bool),
     Set(Settings),
     Stop,
 }
@@ -228,6 +243,12 @@ impl Engine {
     /// Off the list; with `files`, what it downloaded goes too.
     pub fn remove(&self, id: usize, files: bool) {
         let _ = self.tx.send(Req::Remove(id, files));
+    }
+
+    /// Its files were moved to `folder`: it goes on there (or stays
+    /// paused).
+    pub fn relocate(&self, id: usize, folder: PathBuf, paused: bool) {
+        let _ = self.tx.send(Req::Relocate(id, folder, paused));
     }
 
     pub fn set(&mut self, s: Settings) {
@@ -366,6 +387,29 @@ async fn run(set: Settings, rx: Receiver<Req>, snap: Arc<Mutex<Snapshot>>, wake:
                         if let Err(e) = session.unpause(&h).await {
                             snap.lock().unwrap().failed.push(format!("{e:#}"));
                         }
+                    }
+                }
+                Req::Relocate(id, folder, paused) => {
+                    // Off the list (its files stay), on again from the new
+                    // place: what's there is checked, the rest comes.
+                    let Some(h) = session.get(id.into()) else { continue };
+                    let Ok(bytes) = h.with_metadata(|m| m.torrent_bytes.clone()) else { continue };
+                    let only = h.only_files();
+                    let done = was_done.remove(&id);
+                    if let Err(e) = session.delete(id.into(), false).await {
+                        snap.lock().unwrap().failed.push(format!("{e:#}"));
+                        continue;
+                    }
+                    let initial_peers = (!peers.is_empty()).then(|| peers.clone());
+                    let opts = AddTorrentOptions { output_folder: Some(folder.to_string_lossy().into_owned()), only_files: only, overwrite: true, paused, initial_peers, ..Default::default() };
+                    match session.add_torrent(AddTorrent::from_bytes(bytes), Some(opts)).await {
+                        // (Done already: not news again.)
+                        Ok(r) => {
+                            if let (Some(d), Some(h)) = (done, r.into_handle()) {
+                                was_done.insert(h.id(), d);
+                            }
+                        }
+                        Err(e) => snap.lock().unwrap().failed.push(format!("{e:#}")),
                     }
                 }
                 Req::Remove(id, files) => {

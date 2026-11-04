@@ -591,6 +591,7 @@ pub const T: &[(&str, &str)] = &[
     ("Slide show", "幻灯片放映"),
     ("End the slide show", "结束放映"),
     ("Filter by typing", "输入即筛选"),
+    ("Other folder…", "其他文件夹…"),
     ("Auto", "自动"),
     ("Mouse", "鼠标"),
     ("Touch", "触控"),

@@ -872,6 +872,8 @@ pub enum OskPurpose {
     TorrentMagnet,
     /// The folder downloads go to (settings).
     TorrentFolder,
+    /// Where a torrent being added goes (its window comes back).
+    TorrentDest { dlg: Box<crate::torrents::app::AddDlg> },
 }
 
 /// What to do again once an archive password is entered.
@@ -1587,6 +1589,9 @@ pub struct App {
     pub torrents: Option<crate::torrents::Engine>,
     /// The torrents page's cursor.
     pub torrent_cursor: usize,
+    /// Torrents paused while their files are moved (and whether they
+    /// were paused already).
+    pub torrent_moving: std::collections::HashMap<usize, bool>,
     pub msg_tx: Sender<Msg>,
     /// Started for a D-Bus request: its folder takes the first tab.
     pub dbus_fresh: bool,
@@ -1777,6 +1782,7 @@ impl App {
             toast: None,
             torrents: None,
             torrent_cursor: 0,
+            torrent_moving: Default::default(),
             msg_tx,
             dbus_fresh: false,
             msg_rx,
@@ -2122,7 +2128,6 @@ impl App {
         self.remember_right_pane();
         self.tick_audio();
         self.tick_usage();
-        self.tick_torrents();
         self.tick_terminal();
         self.dnd_tick();
         self.convert_poll();
@@ -2213,6 +2218,12 @@ impl App {
             }
         });
         for (step, how) in steps {
+            // Torrents whose files were moved go on from there.
+            let moved: Vec<(PathBuf, PathBuf)> = match how {
+                crate::ops::History::Undone => step.moved.iter().map(|(a, b)| (b.clone(), a.clone())).collect(),
+                _ => step.moved.clone(),
+            };
+            self.torrents_moved(&moved);
             match how {
                 crate::ops::History::New => self.remember(step),
                 crate::ops::History::Undone => self.redo_steps.push(step),
@@ -2253,6 +2264,8 @@ impl App {
             self.refresh_sidebar();
         }
         self.check_folders();
+        // (After the jobs: a move that ended has moved its torrents.)
+        self.tick_torrents();
         if let Some((_, _, at)) = &self.toast {
             if at.elapsed() > Duration::from_secs(4) {
                 self.toast = None;
@@ -3170,6 +3183,7 @@ impl App {
                 OskPurpose::ConvertPassword { dlg } => self.overlay = Some(Overlay::Convert(dlg)),
                 OskPurpose::ConvertRows { dlg, group } => self.convert_rows_cancelled(dlg, group),
                 OskPurpose::TorrentFolder => self.settings_at(row::T_FOLDER),
+                OskPurpose::TorrentDest { dlg } => self.overlay = Some(Overlay::TorrentAdd(dlg)),
                 _ => {}
             }
         }
@@ -3211,6 +3225,9 @@ impl App {
         if matches!(k.purpose, OskPurpose::TermLive | OskPurpose::TermSave) {
             return self.term_osk(k.purpose, raw);
         }
+        if let OskPurpose::TorrentDest { dlg } = k.purpose {
+            return self.torrent_dest_typed(dlg, &raw);
+        }
         if let OskPurpose::TorrentMagnet = k.purpose {
             return self.torrent_magnet_typed(&text);
         }
@@ -3246,6 +3263,7 @@ impl App {
                 match std::fs::rename(&old, &new) {
                     Ok(()) => {
                         self.remember(crate::ops::Undo { label: tr("Rename").into(), moved: vec![(old.clone(), new.clone())], ..Default::default() });
+                        self.torrents_moved(&[(old.clone(), new.clone())]);
                         let p = self.pane_mut();
                         p.selected.clear();
                         p.reload(&cfg);
@@ -3392,7 +3410,7 @@ impl App {
                     self.toast(format!("{}: {text}", tr("Failed")), true);
                 }
             }
-            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } | OskPurpose::ConvertRows { .. } | OskPurpose::TorrentMagnet | OskPurpose::TorrentFolder => unreachable!(),
+            OskPurpose::CompressField { .. } | OskPurpose::ViewerInsert | OskPurpose::ViewerFind | OskPurpose::ViewerReplace | OskPurpose::TermLive | OskPurpose::TermSave | OskPurpose::Sudo { .. } | OskPurpose::NewTag { .. } | OskPurpose::NetField { .. } | OskPurpose::NetPassword { .. } | OskPurpose::ConvertPassword { .. } | OskPurpose::ConvertRows { .. } | OskPurpose::TorrentMagnet | OskPurpose::TorrentFolder | OskPurpose::TorrentDest { .. } => unreachable!(),
         }
     }
 
@@ -4503,6 +4521,11 @@ impl App {
     }
 
     pub(crate) fn start(&mut self, op: Op) {
+        // Torrents downloading into what's moved wait for it.
+        if let Op::Move { sources, .. } = &op {
+            let paths: Vec<PathBuf> = sources.iter().filter_map(|s| s.local_path().map(|p| p.to_path_buf())).collect();
+            self.torrents_before_move(&paths);
+        }
         let j = ops::spawn(op, self.wake());
         self.jobs.push(j);
     }
@@ -5220,7 +5243,7 @@ fn store_icon(image: &Path) -> std::io::Result<PathBuf> {
     Ok(out)
 }
 
-fn expand_tilde(s: &str) -> PathBuf {
+pub(crate) fn expand_tilde(s: &str) -> PathBuf {
     if let (Some(rest), Some(h)) = (s.strip_prefix('~'), dirs::home_dir()) {
         return h.join(rest.trim_start_matches('/'));
     }
