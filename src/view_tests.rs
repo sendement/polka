@@ -7597,7 +7597,8 @@ fn torrents_screens() {
     std::fs::write(src.join("beach.jpg"), &a).unwrap();
     std::fs::write(src.join("notes.txt"), vec![b'n'; 40_000]).unwrap();
     std::fs::create_dir_all(src.join("extra")).unwrap();
-    std::fs::write(src.join("extra/a.txt"), vec![b'a'; 20_000]).unwrap();
+    // (A long name: it stays within its tile.)
+    std::fs::write(src.join("extra/Evening on the beach, the whole family together at last.txt"), vec![b'a'; 20_000]).unwrap();
     std::fs::write(src.join("extra/b.txt"), vec![b'b'; 20_000]).unwrap();
     std::fs::create_dir_all(dir.join("files")).unwrap();
     // The other side shares them.

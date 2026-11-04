@@ -261,8 +261,8 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) ->
                 let (name, ticked, info) = match node {
                     Node::Up => ("..".to_string(), None, String::new()),
                     Node::Dir(p, n) => {
-                        let (t, count, sz) = d.dir_state(p);
-                        (n.clone(), Some(t), format!("{} · {}", crate::i18n::trn("%n files", count), human_size(sz)))
+                        let (t, _, sz) = d.dir_state(p);
+                        (n.clone(), Some(t), human_size(sz))
                     }
                     Node::File(i) => {
                         let (path, len, on) = &d.files[*i];
@@ -299,11 +299,23 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) ->
                 if let Some(u) = icon {
                     egui::Image::new(u).tint(if on { Color32::WHITE } else { Color32::from_white_alpha(90) }).paint_at(ui, ir);
                 }
+                // A folder: how many files in it, on its icon.
+                if let Node::Dir(p, _) = node {
+                    let count = d.under(p).len();
+                    let g = ui.painter().layout_no_wrap(count.to_string(), FontId::proportional(11.0), Color32::WHITE);
+                    let pill = Rect::from_center_size(ir.right_bottom() - vec2(2.0, 4.0), vec2(g.size().x + 10.0, g.size().y + 3.0));
+                    ui.painter().rect_filled(pill, pill.height() / 2.0, v.selection.bg_fill);
+                    ui.painter().galley(pill.center() - g.size() / 2.0, g, Color32::WHITE);
+                    let _ = ui.interact(pill, ui.id().with(("torrent-dir-count", p)), Sense::hover()).on_hover_text(crate::i18n::trn("%n files", count));
+                }
                 let c = if on { v.text_color() } else { v.weak_text_color() };
-                let g = crate::view::elided_centered(ui, &name, FontId::proportional(12.5), c, cell.width() - 6.0, 2);
+                // (All of it within the tile: cut short, never over the next.)
+                let p = ui.painter().with_clip_rect(cell.intersect(ui.clip_rect()));
+                let g = crate::view::elided_centered(ui, &name, FontId::proportional(12.5), c, cell.width() - 10.0, 2);
                 let gh = g.size().y;
-                ui.painter().galley(pos2(cell.center().x, ir.max.y + 4.0), g, c);
-                ui.painter().text(pos2(cell.center().x, ir.max.y + 6.0 + gh), Align2::CENTER_TOP, info, FontId::proportional(11.0), v.weak_text_color());
+                p.galley(pos2(cell.center().x, ir.max.y + 4.0), g, c);
+                let g = crate::view::elided_centered(ui, &info, FontId::proportional(11.0), v.weak_text_color(), cell.width() - 10.0, 1);
+                p.galley(pos2(cell.center().x, ir.max.y + 6.0 + gh), g, v.weak_text_color());
                 // The tick, top left: ✔ all, – some (a folder), empty none.
                 let mut on_tick = false;
                 if let Some(t) = ticked {
