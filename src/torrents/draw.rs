@@ -2,7 +2,7 @@
 
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
-use super::app::{AddDlg, AddEv};
+use super::app::{AddDlg, AddEv, Node, Ticked};
 use super::{Item, State};
 use crate::app::human_size;
 use crate::i18n::tr;
@@ -221,7 +221,7 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) ->
             ev = Some(AddEv::Other);
         }
         ui.add_space(4.0);
-        // Its files, as tiles to tick.
+        // Its files and folders, as tiles to tick; a folder opens.
         let (n, size) = d.chosen();
         ui.horizontal(|ui| {
             ui.label(format!("{}: {n} / {} · {}", tr("Files"), d.files.len(), human_size(size)));
@@ -229,19 +229,54 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) ->
                 ev = Some(AddEv::All);
             }
         });
+        // Inside a folder: where (each part a way back up).
+        if !d.dir.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let parts: Vec<&str> = d.dir.split('/').collect();
+                if ui.link(&d.name).clicked() {
+                    ev = Some(AddEv::Open(String::new()));
+                }
+                for (k, p) in parts.iter().enumerate() {
+                    ui.label(egui::RichText::new(" › ").weak());
+                    if k + 1 == parts.len() {
+                        ui.label(egui::RichText::new(*p).strong());
+                    } else if ui.link(*p).clicked() {
+                        ev = Some(AddEv::Open(parts[..=k].join("/")));
+                    }
+                }
+            });
+        }
+        let list = d.listing();
         let per_line = ((width - 14.0) / TILE.x).floor().max(1.0) as usize;
         d.per_line = per_line;
-        let lines = d.files.len().div_ceil(per_line);
+        let lines = list.len().div_ceil(per_line);
         let max_h = (ui.ctx().content_rect().height() - 320.0).max(TILE.y + 8.0);
         let scroll = d.scrolled != Some(d.cursor);
-        egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(("torrent-tiles", d.dir.clone())).max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
             let (room, _) = ui.allocate_exact_size(vec2(width - 14.0, lines as f32 * TILE.y), Sense::hover());
-            for (i, (path, len, on)) in d.files.iter().enumerate() {
-                let at = room.min + vec2((i % per_line) as f32 * TILE.x, (i / per_line) as f32 * TILE.y);
+            for (k, node) in list.iter().enumerate() {
+                let at = room.min + vec2((k % per_line) as f32 * TILE.x, (k / per_line) as f32 * TILE.y);
                 let cell = Rect::from_min_size(at, TILE).shrink(3.0);
-                let r = ui.interact(cell, ui.id().with(("torrent-file", i)), Sense::click());
-                r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *on, path));
-                if d.cursor == i + 1 {
+                let (name, ticked, info) = match node {
+                    Node::Up => ("..".to_string(), None, String::new()),
+                    Node::Dir(p, n) => {
+                        let (t, count, sz) = d.dir_state(p);
+                        (n.clone(), Some(t), format!("{} · {}", crate::i18n::trn("%n files", count), human_size(sz)))
+                    }
+                    Node::File(i) => {
+                        let (path, len, on) = &d.files[*i];
+                        let n = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                        (n, Some(if *on { Ticked::All } else { Ticked::None }), human_size(*len))
+                    }
+                };
+                let r = ui.interact(cell, ui.id().with(("torrent-tile", d.dir.clone(), k)), Sense::click());
+                let on = ticked != Some(Ticked::None);
+                match node {
+                    Node::File(_) => r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, &name)),
+                    _ => r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name)),
+                }
+                if d.cursor == k + 1 {
                     ui.painter().rect(cell, 8.0, crate::view::tint(&v, 0.3), Stroke::new(1.5, v.selection.bg_fill), StrokeKind::Inside);
                     if scroll {
                         ui.scroll_to_rect(cell, None);
@@ -249,29 +284,64 @@ pub fn draw_add(ui: &mut Ui, d: &mut AddDlg, icons: &mut crate::icons::Icons) ->
                 } else if r.hovered() {
                     ui.painter().rect_filled(cell, 8.0, v.widgets.hovered.weak_bg_fill);
                 }
-                // Its icon (by its name), dimmed when not taken.
-                let name = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-                let e = crate::vfs::Entry { name: name.clone(), is_dir: false, is_link: false, size: *len, mtime: None, mode: 0o644, tags: Vec::new() };
+                // Its icon (a folder's, or by the file's name), dimmed when
+                // nothing in it is taken.
                 let ir = Rect::from_center_size(pos2(cell.center().x, cell.min.y + 28.0), Vec2::splat(40.0));
-                if let Some(u) = icons.for_entry(&e, None, crate::view::lookup_px(ui, 40.0)) {
-                    egui::Image::new(u).tint(if *on { Color32::WHITE } else { Color32::from_white_alpha(90) }).paint_at(ui, ir);
+                let px = crate::view::lookup_px(ui, 40.0);
+                let icon = match node {
+                    Node::Up => icons.named(&["go-up", "folder-open", "folder"], px),
+                    Node::Dir(..) => icons.named(&["folder", "inode-directory"], px),
+                    Node::File(_) => {
+                        let e = crate::vfs::Entry { name: name.clone(), is_dir: false, is_link: false, size: 0, mtime: None, mode: 0o644, tags: Vec::new() };
+                        icons.for_entry(&e, None, px)
+                    }
+                };
+                if let Some(u) = icon {
+                    egui::Image::new(u).tint(if on { Color32::WHITE } else { Color32::from_white_alpha(90) }).paint_at(ui, ir);
                 }
-                let c = if *on { v.text_color() } else { v.weak_text_color() };
+                let c = if on { v.text_color() } else { v.weak_text_color() };
                 let g = crate::view::elided_centered(ui, &name, FontId::proportional(12.5), c, cell.width() - 6.0, 2);
                 let gh = g.size().y;
                 ui.painter().galley(pos2(cell.center().x, ir.max.y + 4.0), g, c);
-                ui.painter().text(pos2(cell.center().x, ir.max.y + 6.0 + gh), Align2::CENTER_TOP, human_size(*len), FontId::proportional(11.0), v.weak_text_color());
-                // The tick, top left.
-                let b = Rect::from_min_size(cell.min + vec2(6.0, 6.0), Vec2::splat(18.0));
-                ui.painter().rect_filled(b, 4.0, if *on { v.selection.bg_fill } else { v.extreme_bg_color });
-                ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, if *on { v.selection.bg_fill } else { v.weak_text_color() }), StrokeKind::Inside);
-                if *on {
-                    ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(13.0), Color32::WHITE);
+                ui.painter().text(pos2(cell.center().x, ir.max.y + 6.0 + gh), Align2::CENTER_TOP, info, FontId::proportional(11.0), v.weak_text_color());
+                // The tick, top left: ✔ all, – some (a folder), empty none.
+                let mut on_tick = false;
+                if let Some(t) = ticked {
+                    let b = Rect::from_min_size(cell.min + vec2(6.0, 6.0), Vec2::splat(18.0));
+                    let hit = b.expand(6.0);
+                    on_tick = ui.input(|i| i.pointer.interact_pos()).is_some_and(|p| hit.contains(p));
+                    let full = t != Ticked::None;
+                    ui.painter().rect_filled(b, 4.0, if full { v.selection.bg_fill } else { v.extreme_bg_color });
+                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, if full { v.selection.bg_fill } else { v.weak_text_color() }), StrokeKind::Inside);
+                    match t {
+                        Ticked::All => {
+                            ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(13.0), Color32::WHITE);
+                        }
+                        Ticked::Some => {
+                            ui.painter().line_segment([b.center() - vec2(4.5, 0.0), b.center() + vec2(4.5, 0.0)], Stroke::new(2.0, Color32::WHITE));
+                        }
+                        Ticked::None => {}
+                    }
+                    if let Node::Dir(p, _) = node {
+                        // (The tick itself: all of it in or out.)
+                        let tr_ = ui.interact(hit, ui.id().with(("torrent-dir-tick", p)), Sense::click());
+                        tr_.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, t == Ticked::All, &name));
+                        if tr_.clicked() {
+                            ev = Some(AddEv::ToggleDir(p.clone()));
+                        }
+                    }
                 }
                 // (A file in a folder of the torrent: its whole path.)
-                let r = if path.contains('/') { r.on_hover_text(path) } else { r };
-                if r.clicked() {
-                    ev = Some(AddEv::Toggle(i));
+                let r = match node {
+                    Node::File(i) if d.files[*i].0.contains('/') => r.on_hover_text(&d.files[*i].0),
+                    _ => r,
+                };
+                if r.clicked() && !(on_tick && matches!(node, Node::Dir(..))) {
+                    ev = Some(match node {
+                        Node::Up => AddEv::Up,
+                        Node::Dir(p, _) => AddEv::Open(p.clone()),
+                        Node::File(i) => AddEv::Toggle(*i),
+                    });
                 }
             }
         });

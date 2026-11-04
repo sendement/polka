@@ -7596,6 +7596,9 @@ fn torrents_screens() {
     let a: Vec<u8> = (0..400_000u32).map(|i| (i * 13 % 251) as u8).collect();
     std::fs::write(src.join("beach.jpg"), &a).unwrap();
     std::fs::write(src.join("notes.txt"), vec![b'n'; 40_000]).unwrap();
+    std::fs::create_dir_all(src.join("extra")).unwrap();
+    std::fs::write(src.join("extra/a.txt"), vec![b'a'; 20_000]).unwrap();
+    std::fs::write(src.join("extra/b.txt"), vec![b'b'; 20_000]).unwrap();
     std::fs::create_dir_all(dir.join("files")).unwrap();
     // The other side shares them.
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -7658,10 +7661,38 @@ fn torrents_screens() {
     h.state_mut().osk_submit();
     assert!(matches!(&h.state().overlay, Some(Overlay::TorrentAdd(d)) if d.dest_folder() == dir.join("chosen")), "not chosen");
     settle(&mut h);
-    // The notes not wanted: ↓ into the tiles, → to them, ✕.
+    use crate::torrents::app::{Node, Ticked};
+    let add = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::TorrentAdd(d)) => (d.listing(), d.cursor, d.dir.clone(), d.dir_state("extra").0, d.chosen().0),
+        _ => panic!("the window went"),
+    };
+    // Its folder first, then its files.
     let notes = names.iter().position(|n| n == "notes.txt").unwrap();
-    press(&mut h, &[Action::Down]);
-    for _ in 0..notes {
+    let list = add(&h).0;
+    assert_eq!(list[0], Node::Dir("extra".into(), "extra".into()));
+    assert_eq!(list.len(), 3, "{list:?}");
+    // ↓ into the tiles: on the folder; □ takes all of it out.
+    press(&mut h, &[Action::Down, Action::Select]);
+    assert_eq!(add(&h).3, Ticked::None);
+    // ✕ opens it: up, and its two files; one back in: the folder's "some".
+    press(&mut h, &[Action::Accept]);
+    let (list, cursor, inside, ..) = add(&h);
+    assert_eq!((list.len(), cursor, inside.as_str()), (3, 1, "extra"));
+    assert_eq!(list[0], Node::Up);
+    press(&mut h, &[Action::Right, Action::Accept]);
+    assert_eq!(add(&h).3, Ticked::Some);
+    settle(&mut h);
+    shot(&mut h, "tr0-folder");
+    // ○ up again (on the folder); its tick clicked: all in, then out.
+    press(&mut h, &[Action::Back]);
+    assert_eq!((add(&h).1, add(&h).2.as_str()), (1, ""));
+    press(&mut h, &[Action::Select]);
+    assert_eq!(add(&h).3, Ticked::All);
+    press(&mut h, &[Action::Select]);
+    assert_eq!(add(&h).3, Ticked::None);
+    // The notes not wanted: → to them, ✕.
+    let at = add(&h).0.iter().position(|n| *n == Node::File(notes)).unwrap() + 1;
+    for _ in 1..at {
         press(&mut h, &[Action::Right]);
     }
     press(&mut h, &[Action::Accept]);

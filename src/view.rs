@@ -1216,8 +1216,16 @@ impl App {
             Some(Overlay::Help) => vec![(Action::Up, tr("Scroll")), (Action::Back, tr("Close"))],
             Some(Overlay::Versions(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Install")), (Action::Back, tr("Close"))],
             Some(Overlay::Places(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Show or hide")), (Action::PrevTab, tr("Reorder")), (Action::Back, tr("Close"))],
-            Some(Overlay::TorrentAdd(d)) if d.cursor == 0 => vec![(Action::Left, tr("Save to")), (Action::Accept, tr("Other folder…")), (Action::Select, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
-            Some(Overlay::TorrentAdd(_)) => vec![(Action::Up, tr("Move")), (Action::Accept, tr("Choose")), (Action::Select, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
+            Some(Overlay::TorrentAdd(d)) if d.cursor == 0 => vec![(Action::Left, tr("Save to")), (Action::Accept, tr("Other folder…")), (Action::Actions, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, tr("Cancel"))],
+            Some(Overlay::TorrentAdd(d)) => {
+                let folder = matches!(d.listing().get(d.cursor - 1), Some(crate::torrents::app::Node::Dir(..)));
+                let mut v = vec![(Action::Up, tr("Move")), (Action::Accept, if folder { tr("Open") } else { tr("Choose") })];
+                if folder {
+                    v.push((Action::Select, tr("Choose")));
+                }
+                v.extend([(Action::Actions, tr("All / none")), (Action::Menu, tr("Download")), (Action::Back, if d.dir.is_empty() { tr("Cancel") } else { tr("Up a level") })]);
+                v
+            }
             Some(Overlay::OpenWith(_)) => vec![
                 (Action::Up, tr("Move")),
                 (Action::Accept, tr("Open")),

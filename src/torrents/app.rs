@@ -30,6 +30,25 @@ pub struct AddDlg {
     pub scrolled: Option<usize>,
     /// Tiles a line (as last drawn), for ↑ ↓.
     pub per_line: usize,
+    /// The folder of the torrent shown ("": its top).
+    pub dir: String,
+}
+
+/// A tile of the add window: up a level, a folder of the torrent (its
+/// path in it, and name), a file (its number).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Node {
+    Up,
+    Dir(String, String),
+    File(usize),
+}
+
+/// How much of a folder is chosen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ticked {
+    All,
+    Some,
+    None,
 }
 
 impl AddDlg {
@@ -56,25 +75,85 @@ impl AddDlg {
         self.files.iter().filter(|f| f.2).fold((0, 0), |(n, s), f| (n + 1, s + f.1))
     }
 
-    /// All chosen, or none if all were.
-    pub fn all_or_none(&mut self) {
-        let all = self.files.iter().all(|f| f.2);
-        for f in &mut self.files {
-            f.2 = !all;
-        }
-    }
-
     pub fn toggle(&mut self, i: usize) {
         if let Some(f) = self.files.get_mut(i) {
             f.2 = !f.2;
         }
+    }
+
+    /// The files within folder `dir` of the torrent ("": all of them).
+    pub fn under(&self, dir: &str) -> Vec<usize> {
+        (0..self.files.len()).filter(|&i| dir.is_empty() || self.files[i].0.strip_prefix(dir).is_some_and(|r| r.starts_with('/'))).collect()
+    }
+
+    /// What the folder shown holds: up a level (inside one), its folders
+    /// (by name), its files (in the torrent's order).
+    pub fn listing(&self) -> Vec<Node> {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files = Vec::new();
+        for i in self.under(&self.dir) {
+            let rest = if self.dir.is_empty() { self.files[i].0.as_str() } else { &self.files[i].0[self.dir.len() + 1..] };
+            match rest.split_once('/') {
+                Some((d, _)) if !dirs.iter().any(|x| x == d) => dirs.push(d.to_string()),
+                Some(_) => {}
+                None => files.push(Node::File(i)),
+            }
+        }
+        dirs.sort_by_key(|d| d.to_lowercase());
+        let mut v = Vec::new();
+        if !self.dir.is_empty() {
+            v.push(Node::Up);
+        }
+        v.extend(dirs.into_iter().map(|d| Node::Dir(if self.dir.is_empty() { d.clone() } else { format!("{}/{d}", self.dir) }, d)));
+        v.extend(files);
+        v
+    }
+
+    /// How much of a folder is chosen; its files' count and size.
+    pub fn dir_state(&self, dir: &str) -> (Ticked, usize, u64) {
+        let idx = self.under(dir);
+        let on = idx.iter().filter(|&&i| self.files[i].2).count();
+        let size = idx.iter().map(|&i| self.files[i].1).sum();
+        let t = if on == 0 { Ticked::None } else if on == idx.len() { Ticked::All } else { Ticked::Some };
+        (t, idx.len(), size)
+    }
+
+    /// A folder's files all chosen, or none if all were (`""`: the
+    /// whole torrent).
+    pub fn toggle_dir(&mut self, dir: &str) {
+        let all = self.dir_state(dir).0 == Ticked::All;
+        for i in self.under(dir) {
+            self.files[i].2 = !all;
+        }
+    }
+
+    /// Into a folder (or up out of one).
+    pub fn open(&mut self, dir: String) {
+        self.dir = dir;
+        self.cursor = 1;
+        self.scrolled = None;
+    }
+
+    pub fn up(&mut self) {
+        let was = self.dir.clone();
+        self.dir = self.dir.rsplit_once('/').map_or(String::new(), |(p, _)| p.to_string());
+        // Back on the folder come out of.
+        let at = self.listing().iter().position(|n| matches!(n, Node::Dir(p, _) if *p == was));
+        self.cursor = at.map_or(1, |i| i + 1);
+        self.scrolled = None;
     }
 }
 
 /// What a click on the add window asks.
 pub enum AddEv {
     Toggle(usize),
+    /// All of the folder shown chosen, or none.
     All,
+    /// A folder's tick: all of it, or none.
+    ToggleDir(String),
+    /// Into a folder; up out of one.
+    Open(String),
+    Up,
     /// The next place offered (or the one before).
     Dest,
     DestBack,
@@ -158,7 +237,7 @@ impl App {
             dests.push(here);
         }
         let peek = self.torrent_engine().peek(src);
-        self.overlay = Some(Overlay::TorrentAdd(Box::new(AddDlg { peek, title, magnet, name: String::new(), files: Vec::new(), bytes: Vec::new(), error: None, cursor: 0, dests, dest: 0, scrolled: None, per_line: 1 })));
+        self.overlay = Some(Overlay::TorrentAdd(Box::new(AddDlg { peek, title, magnet, name: String::new(), files: Vec::new(), bytes: Vec::new(), error: None, cursor: 0, dests, dest: 0, scrolled: None, per_line: 1, dir: String::new() })));
     }
 
     /// Each frame: what the engine found, finished, or failed.
@@ -366,10 +445,12 @@ impl App {
     /// The pad in the add window.
     pub fn torrent_add_input(&mut self, a: Action) {
         let Some(Overlay::TorrentAdd(d)) = self.overlay.as_mut() else { return };
-        let n = d.files.len();
+        let list = d.listing();
+        let n = list.len();
         let line = d.per_line.max(1);
-        // 0 is where it goes; the files, a grid below it.
+        // 0 is where it goes; the tiles, a grid below it.
         let c = d.cursor;
+        let here = c.checked_sub(1).and_then(|i| list.get(i).cloned());
         match a {
             Action::Left if c == 0 => self.torrent_add_ev(AddEv::DestBack),
             Action::Right if c == 0 => self.torrent_add_ev(AddEv::Dest),
@@ -382,12 +463,19 @@ impl App {
             Action::Right => d.cursor = (c + 1).min(n),
             Action::Home => d.cursor = 0,
             Action::End => d.cursor = n,
-            Action::Accept => {
-                let i = d.cursor - 1;
-                self.torrent_add_ev(AddEv::Toggle(i));
-            }
-            Action::Select => self.torrent_add_ev(AddEv::All),
+            // ✕: a file ticked, a folder opened; □: the tick of what's
+            // under the cursor; △: all of the folder shown.
+            Action::Accept | Action::Select => match here {
+                Some(Node::File(i)) => self.torrent_add_ev(AddEv::Toggle(i)),
+                Some(Node::Dir(p, _)) if a == Action::Accept => self.torrent_add_ev(AddEv::Open(p)),
+                Some(Node::Dir(p, _)) => self.torrent_add_ev(AddEv::ToggleDir(p)),
+                Some(Node::Up) => self.torrent_add_ev(AddEv::Up),
+                None => {}
+            },
+            Action::Actions => self.torrent_add_ev(AddEv::All),
             Action::Menu => self.torrent_add_ev(AddEv::Download),
+            // ○ inside a folder: up out of it; at the top: no torrent.
+            Action::Back if !d.dir.is_empty() => self.torrent_add_ev(AddEv::Up),
             Action::Back => self.torrent_add_ev(AddEv::Cancel),
             _ => {}
         }
@@ -397,10 +485,23 @@ impl App {
         let Some(Overlay::TorrentAdd(d)) = self.overlay.as_mut() else { return };
         match ev {
             AddEv::Toggle(i) => {
-                d.cursor = i + 1;
+                if let Some(k) = d.listing().iter().position(|n| *n == Node::File(i)) {
+                    d.cursor = k + 1;
+                }
                 d.toggle(i);
             }
-            AddEv::All => d.all_or_none(),
+            AddEv::All => {
+                let dir = d.dir.clone();
+                d.toggle_dir(&dir);
+            }
+            AddEv::ToggleDir(p) => {
+                if let Some(k) = d.listing().iter().position(|n| matches!(n, Node::Dir(x, _) if *x == p)) {
+                    d.cursor = k + 1;
+                }
+                d.toggle_dir(&p);
+            }
+            AddEv::Open(p) => d.open(p),
+            AddEv::Up => d.up(),
             AddEv::Dest | AddEv::DestBack => {
                 d.cursor = 0;
                 let k = d.dests.len();
@@ -448,5 +549,58 @@ impl App {
         v.push((Action::Select, tr("Magnet link")));
         v.push((Action::Back, tr("Close")));
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dlg(files: &[&str]) -> AddDlg {
+        AddDlg {
+            peek: 0,
+            title: String::new(),
+            magnet: false,
+            name: "T".into(),
+            files: files.iter().map(|f| (f.to_string(), 10, true)).collect(),
+            bytes: vec![1],
+            error: None,
+            cursor: 0,
+            dests: vec!["/d".into()],
+            dest: 0,
+            scrolled: None,
+            per_line: 3,
+            dir: String::new(),
+        }
+    }
+
+    #[test]
+    fn folders_list_tick_and_open() {
+        let mut d = dlg(&["a.txt", "CD2/x.mp3", "CD1/y.mp3", "CD1/deep/z.mp3", "b.txt"]);
+        // Folders first (by name), then the files in the torrent's order.
+        assert_eq!(d.listing(), vec![Node::Dir("CD1".into(), "CD1".into()), Node::Dir("CD2".into(), "CD2".into()), Node::File(0), Node::File(4)]);
+        assert_eq!(d.dir_state("CD1"), (Ticked::All, 2, 20));
+        // A folder's tick: all of it out (the deeper one too), then in.
+        d.toggle_dir("CD1");
+        assert_eq!(d.dir_state("CD1").0, Ticked::None);
+        assert_eq!(d.dir_state("CD1/deep").0, Ticked::None);
+        assert_eq!(d.dir_state("").0, Ticked::Some);
+        assert!(d.files[1].2, "another folder's file went");
+        d.toggle(3);
+        assert_eq!(d.dir_state("CD1").0, Ticked::Some);
+        d.toggle_dir("CD1");
+        assert_eq!(d.dir_state("CD1").0, Ticked::All);
+        // Inside: up first, its folder, its file; up again lands on it.
+        d.open("CD1".into());
+        assert_eq!(d.listing(), vec![Node::Up, Node::Dir("CD1/deep".into(), "deep".into()), Node::File(2)]);
+        d.open("CD1/deep".into());
+        assert_eq!(d.listing(), vec![Node::Up, Node::File(3)]);
+        d.up();
+        assert_eq!((d.dir.as_str(), d.cursor), ("CD1", 2));
+        d.up();
+        assert_eq!((d.dir.as_str(), d.cursor), ("", 1));
+        // ("CD" isn't within "CD1".)
+        let d = dlg(&["CD1/a", "CD/b"]);
+        assert_eq!(d.under("CD"), vec![1]);
     }
 }
