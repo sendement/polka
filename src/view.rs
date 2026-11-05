@@ -8,7 +8,7 @@ use egui::{
 };
 
 use crate::app::{
-    App, Cmd, Focus, Menu, Osk, OskKey, Overlay, Pane, Props, fmt_time, human_size,
+    App, Cmd, Focus, Menu, Osk, OskKey, Overlay, Pane, fmt_time, human_size,
 };
 use crate::config::{Config, SortKey, ViewMode};
 use crate::i18n::tr;
@@ -98,6 +98,15 @@ impl eframe::App for App {
         self.keyboard(&ctx);
         self.tick();
         self.icons.trim(&ctx);
+        // A right click beside a menu, given on once a frame has gone by
+        // without the menu's backdrop (egui finds what's hit by the last
+        // frame's places).
+        if let Some(p) = self.reclick.take() {
+            for pressed in [true, false] {
+                self.dnd_inject.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+            }
+            ctx.request_repaint();
+        }
 
         // A video full screen: the window too, and no chrome around it.
         let full = self.video_full();
@@ -1687,8 +1696,9 @@ impl App {
                 }
             }
         }
-        let usage = self.tabs[tab].usage.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].term.as_ref().is_some_and(|u| u.shown) || self.tabs[tab].torrents;
-        let divider = if self.tabs[tab].viewer.is_some() || usage { self.divider_x } else { divider };
+        // (The tab may be gone: its page closed by its own ✕ just now.)
+        let page = self.tabs.get(tab).is_none_or(|t| t.usage.as_ref().is_some_and(|u| u.shown) || t.term.as_ref().is_some_and(|u| u.shown) || t.torrents || t.viewer.is_some());
+        let divider = if page { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
             self.divider_x = divider;
@@ -1899,6 +1909,7 @@ impl App {
         let toolbars = matches!(self.overlay, Some(Overlay::Toolbars));
         let side = live || matches!(self.overlay, Some(Overlay::ViewerSettings(_) | Overlay::TermSettings(_) | Overlay::TermKeys(_)));
         let bottom = live || matches!(self.overlay, Some(Overlay::TermKeys(_)));
+        let mut reclick = None;
         egui::Area::new("backdrop".into()).order(Order::Middle).fixed_pos(screen.min).show(ctx, |ui| {
             if in_bar || toolbars {
                 return;
@@ -1907,7 +1918,16 @@ impl App {
             // (A menu beside its item: nothing dims.)
             ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(if side || menu_place.is_some() { 0 } else { 140 }));
             close = resp.clicked();
+            reclick = resp.secondary_clicked().then(|| resp.interact_pointer_pos()).flatten();
         });
+        // A right click beside a menu: that one goes, the click goes on to
+        // what's under it (its own menu there, as on other desktops).
+        if let Some(p) = reclick.filter(|_| matches!(self.overlay, Some(Overlay::Menu(_)))) {
+            self.overlay = None;
+            self.reclick = Some(p);
+            ctx.request_repaint();
+            return;
+        }
         if close {
             self.overlay = None;
             return;
@@ -1983,7 +2003,7 @@ impl App {
                     match overlay.as_mut() {
                     Some(Overlay::Menu(m)) => menu_click = draw_menu_cascade(ui, m),
                     Some(Overlay::Osk(k)) => osk_key = draw_osk(ui, k, cfg.password_hidden, osk_scale(screen, k.live() || k.in_bar()), auto_keys),
-                    Some(Overlay::Props(p)) => dismiss = draw_props(ui, p),
+                    Some(Overlay::Props(p)) => dismiss = crate::props::draw(ui, p),
                     Some(Overlay::Help) => dismiss = draw_help(ui, pad, self.help_scroll.take()),
                     Some(Overlay::Themes(t)) => run = draw_themes(ui, t, icons),
                     Some(Overlay::Tags(ed)) => tag_ev = crate::tags_ui::draw(ui, ed),
@@ -3280,26 +3300,6 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
         });
     });
     run
-}
-
-fn draw_props(ui: &mut Ui, p: &Props) -> bool {
-    ui.set_min_width(dialog_w().min(420.0));
-    ui.horizontal(|ui| {
-        if let Some(u) = &p.icon {
-            ui.add(egui::Image::new(u.clone()).fit_to_exact_size(Vec2::splat(64.0)));
-        }
-        ui.label(egui::RichText::new(tr("Properties")).strong().size(18.0));
-    });
-    ui.add_space(8.0);
-    egui::Grid::new("props").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-        for (k, v) in &p.rows {
-            ui.label(egui::RichText::new(k).weak());
-            ui.add(egui::Label::new(v).wrap());
-            ui.end_row();
-        }
-    });
-    ui.add_space(8.0);
-    ui.button(tr("Close")).clicked()
 }
 
 fn draw_help(ui: &mut Ui, pad: PadKind, scroll: Option<f32>) -> bool {

@@ -8125,6 +8125,27 @@ fn editor_paste_menu_screens() {
     };
     assert!(placed.and_then(|p| p.1).is_some(), "not beside the click: {placed:?}");
     shot(&mut h, "ed-menu");
+    // Right-clicked again elsewhere: that menu goes, one opens there.
+    let p2 = p + egui::vec2(-200.0, 60.0);
+    h.event(Event::PointerMoved(p2));
+    h.event(Event::PointerButton { pos: p2, button: PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(Event::PointerButton { pos: p2, button: PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    for _ in 0..3 {
+        let evs = std::mem::take(&mut h.state_mut().dnd_inject);
+        for e in evs {
+            h.event(e);
+        }
+        h.step();
+    }
+    settle(&mut h);
+    let placed = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.place.and_then(|p| p.1),
+        _ => None,
+    };
+    assert_eq!(placed.map(|r| r.min), Some(p2), "no menu where clicked again");
+    shot(&mut h, "ed-menu-again");
     menu_pick(&mut h, tr("Select all"));
     // Chosen: cut it out, then the menu pastes it back.
     click(&mut h, PointerButton::Secondary);
@@ -8140,4 +8161,99 @@ fn editor_paste_menu_screens() {
     click(&mut h, PointerButton::Secondary);
     menu_pick(&mut h, tr("Undo"));
     assert_eq!(text(&h), "");
+}
+
+#[test]
+#[ignore]
+/// Disk usage opened from the toolbar, closed by its own ✕ (with the mouse):
+/// its tab goes, nothing falls over.
+fn usage_close_screens() {
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("usageclose");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("a/b")).unwrap();
+    std::fs::write(dir.join("a/b/f.bin"), vec![0u8; 100000]).unwrap();
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    settle(&mut h);
+    h.state_mut().pad_active = false;
+    h.state_mut().run_tool(crate::toolbar::Tool::Usage);
+    for _ in 0..10 {
+        settle(&mut h);
+    }
+    assert_eq!(h.state().tabs.len(), 2);
+    assert!(h.state().cur_tab().usage.is_some());
+    let p = egui::pos2(1076.0, 115.0);
+    h.event(egui::Event::PointerMoved(p));
+    h.step();
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.step();
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    h.step();
+    for _ in 0..5 {
+        settle(&mut h);
+    }
+    assert_eq!(h.state().tabs.len(), 1, "its tab stayed");
+    assert!(h.state().cur_tab().usage.is_none());
+}
+
+/// Properties: a folder's size, its space on the disk and what's in it
+/// (counted on another thread); several chosen: the sum, then each one.
+#[test]
+#[ignore]
+fn props_screens() {
+    use crate::app::{Cmd, Overlay};
+    use egui_kittest::kittest::Queryable;
+    use std::sync::atomic::Ordering::Relaxed;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("props");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("box/inner/deep")).unwrap();
+    std::fs::write(dir.join("box/a.bin"), vec![1u8; 5000]).unwrap();
+    std::fs::write(dir.join("box/inner/b.bin"), vec![2u8; 3000]).unwrap();
+    std::fs::write(dir.join("box/inner/deep/c.txt"), "hello").unwrap();
+    // (A hard link counts once.)
+    std::fs::hard_link(dir.join("box/a.bin"), dir.join("box/inner/a-link.bin")).unwrap();
+    std::fs::write(dir.join("note.txt"), "twelve bytes").unwrap();
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    settle(&mut h);
+    let wait = |h: &mut Harness<'static, App>| {
+        for _ in 0..100 {
+            settle(h);
+            if matches!(&h.state().overlay, Some(Overlay::Props(p)) if p.total.done.load(Relaxed)) {
+                break;
+            }
+        }
+    };
+    let i = h.state().pane().entries.iter().position(|e| e.name == "box").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().run(Cmd::Properties);
+    wait(&mut h);
+    {
+        let Some(Overlay::Props(p)) = &h.state().overlay else { panic!("no properties") };
+        assert!(p.is_dir && p.items.is_empty());
+        assert_eq!(p.total.size.load(Relaxed), 8005);
+        assert_eq!((p.total.files.load(Relaxed), p.total.dirs.load(Relaxed)), (3, 2));
+        assert!(p.total.disk.load(Relaxed) >= 8005, "on disk {}", p.total.disk.load(Relaxed));
+    }
+    assert!(h.query_by_label_contains(&crate::i18n::trn("%n files", 3)).is_some(), "contents not shown");
+    shot(&mut h, "pr0-folder");
+    h.state_mut().overlay = None;
+    // Both: the sum, then each.
+    h.state_mut().pane_mut().selected.insert("box".into());
+    h.state_mut().pane_mut().selected.insert("note.txt".into());
+    h.state_mut().run(Cmd::Properties);
+    wait(&mut h);
+    {
+        let Some(Overlay::Props(p)) = &h.state().overlay else { panic!("no properties") };
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(p.total.size.load(Relaxed), 8017);
+        let note = p.items.iter().find(|it| it.name == "note.txt").unwrap();
+        assert_eq!(note.m.size.load(Relaxed), 12);
+        let b = p.items.iter().find(|it| it.name == "box").unwrap();
+        assert_eq!(b.m.files.load(Relaxed), 3);
+    }
+    assert!(h.query_by_label_contains("note.txt").is_some());
+    shot(&mut h, "pr1-several");
 }

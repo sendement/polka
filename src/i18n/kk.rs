@@ -531,6 +531,8 @@ pub const T: &[(&str, &str)] = &[
     ("Tools", "Құралдар"),
     ("Disk usage", "Бос емес орын"),
     ("%n files", "Файлдар: %n"),
+    ("%n folders", "Қалталар: %n"),
+    ("On disk", "Дискте"),
     ("%n folders unreadable", "Оқылмаған бумалар: %n"),
     ("%n small files", "Шағын файлдар: %n"),
     ("Folder, %n files", "Бума, файлдар: %n"),

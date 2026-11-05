@@ -1012,15 +1012,10 @@ impl Osk {
     }
 }
 
-pub struct Props {
-    pub rows: Vec<(String, String)>,
-    pub icon: Option<String>,
-}
-
 pub enum Overlay {
     Menu(Menu),
     Osk(Osk),
-    Props(Props),
+    Props(crate::props::Props),
     Help,
     Themes(ThemePicker),
     Settings(Settings),
@@ -1686,6 +1681,8 @@ pub struct App {
     /// Drag and drop with other programs (Wayland), and what it feeds egui.
     pub dnd: Option<crate::dnd::Dnd>,
     pub dnd_inject: Vec<egui::Event>,
+    /// A right click beside an open menu, to be given on (see view.rs).
+    pub reclick: Option<egui::Pos2>,
     pub dnd_pos: Option<egui::Pos2>,
     /// Our drag went out to the system / one came in from it / was dropped here.
     pub dnd_out: bool,
@@ -1838,6 +1835,7 @@ impl App {
             zoom_applied: 0.0,
             dnd: None,
             dnd_inject: Vec::new(),
+            reclick: None,
             dnd_pos: None,
             dnd_out: false,
             dnd_in: false,
@@ -5153,44 +5151,48 @@ impl App {
     }
 
     fn open_props(&mut self) {
+        use crate::props::{Item, Measure, Props, Target};
+        use std::sync::Arc;
         let p = self.pane();
         let targets = p.targets();
+        let loc = p.loc.display();
+        let kind_of = |e: &Entry| {
+            let kind = if e.is_dir { tr("Folder").to_string() } else { mime_guess::from_path(&e.name).first_raw().map(str::to_string).unwrap_or_else(|| tr("File").into()) };
+            if e.is_link { format!("{kind} ({})", tr("Link")) } else { kind }
+        };
+        let found: Vec<(Entry, Option<PathBuf>)> = targets.iter().map(|e| (e.clone(), p.entry_path(e))).collect();
+        let total = Arc::new(Measure::default());
         let mut rows = Vec::new();
         let mut icon = None;
-        if targets.len() == 1 {
-            let e = &targets[0];
-            let path = p.entry_path(e);
+        let mut items = Vec::new();
+        let mut measured = Vec::new();
+        if let [(e, path)] = found.as_slice() {
             rows.push((tr("Name").to_string(), e.name.clone()));
-            let kind = if e.is_dir { tr("Folder").to_string() } else {
-                mime_guess::from_path(&e.name).first_raw().map(str::to_string).unwrap_or_else(|| tr("File").into())
-            };
-            rows.push((tr("Type").into(), if e.is_link { format!("{kind} ({})", tr("Link")) } else { kind }));
-            rows.push((tr("Location").into(), p.loc.display()));
-            if e.is_dir {
-                if let Ok(es) = vfs::list(&p.entry_loc(e)) {
-                    rows.push((tr("Contents").into(), format!("{} {}", es.len(), tr("items"))));
-                }
-            } else {
-                rows.push((tr("Size").into(), format!("{} ({} B)", human_size(e.size), e.size)));
-            }
+            rows.push((tr("Type").into(), kind_of(e)));
+            rows.push((tr("Location").into(), loc));
             if let Some(t) = e.mtime {
                 rows.push((tr("Modified").into(), fmt_time(t)));
             }
             rows.push((tr("Permissions").into(), fmt_mode(e.mode)));
-            if let Some(pp) = &path {
+            if let Some(pp) = path {
                 if let Ok(target) = std::fs::read_link(pp) {
                     rows.push(("→".into(), target.display().to_string()));
                 }
             }
-            let e = e.clone();
-            icon = self.icons.for_entry(&e, path.as_deref(), 64);
+            icon = self.icons.for_entry(e, path.as_deref(), 64);
+            measured.push((Target { path: path.clone(), loc: Some(self.pane().entry_loc(e)), size: e.size, is_dir: e.is_dir }, Arc::new(Measure::default())));
         } else {
-            let total: u64 = targets.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
-            rows.push((tr("selected").into(), targets.len().to_string()));
-            rows.push((tr("Size").into(), human_size(total)));
-            rows.push((tr("Location").into(), p.loc.display()));
+            rows.push((tr("selected").into(), found.len().to_string()));
+            rows.push((tr("Location").into(), loc));
+            for (e, path) in &found {
+                let m = Arc::new(Measure::default());
+                items.push(Item { name: e.name.clone(), icon: self.icons.for_entry(e, path.as_deref(), 32), kind: kind_of(e), is_dir: e.is_dir, mtime: e.mtime, m: m.clone() });
+                measured.push((Target { path: path.clone(), loc: Some(self.pane().entry_loc(e)), size: e.size, is_dir: e.is_dir }, m));
+            }
         }
-        self.overlay = Some(Overlay::Props(Props { rows, icon }));
+        let is_dir = found.len() == 1 && found[0].0.is_dir;
+        crate::props::measure(measured, total.clone(), self.ctx.clone());
+        self.overlay = Some(Overlay::Props(Props { rows, icon, is_dir, total, items }));
     }
 }
 

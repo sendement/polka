@@ -575,10 +575,10 @@ impl Dispatch<WlDataDevice, ()> for State {
                 let ours = id.as_ref().is_some_and(|o| o.data::<Mimes>().is_some_and(|m| m.lock().unwrap().iter().any(|m| m == OURS)));
                 // (Not one sent just before ours was set, still on its way.)
                 let settled = st.clip_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_millis(500));
+                // (Its text only: the source goes when it's cancelled, which
+                // may be on its way already; destroyed twice it crashes.)
                 if !ours && settled {
-                    if let Some((src, _)) = st.clip.take() {
-                        src.destroy();
-                    }
+                    st.clip = None;
                 }
                 if let Some(old) = std::mem::replace(&mut st.selection, id) {
                     old.destroy();
@@ -628,7 +628,10 @@ impl Dispatch<WlDataSource, Source> for State {
                 if st.clip.as_ref().is_some_and(|(s, _)| s == src) {
                     st.clip = None;
                 }
-                src.destroy();
+                // (Not if replaced and destroyed meanwhile.)
+                if src.is_alive() {
+                    src.destroy();
+                }
             }
             _ => {}
         }

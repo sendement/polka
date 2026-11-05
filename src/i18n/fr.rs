@@ -531,6 +531,8 @@ pub const T: &[(&str, &str)] = &[
     ("Tools", "Outils"),
     ("Disk usage", "Utilisation du disque"),
     ("%n files", "%n fichiers"),
+    ("%n folders", "%n dossiers"),
+    ("On disk", "Sur le disque"),
     ("%n folders unreadable", "%n dossiers illisibles"),
     ("%n small files", "%n petits fichiers"),
     ("Folder, %n files", "Dossier, %n fichiers"),

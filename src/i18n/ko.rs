@@ -531,6 +531,8 @@ pub const T: &[(&str, &str)] = &[
     ("Tools", "도구"),
     ("Disk usage", "디스크 사용량"),
     ("%n files", "파일 %n개"),
+    ("%n folders", "폴더 %n개"),
+    ("On disk", "디스크 사용량"),
     ("%n folders unreadable", "읽을 수 없는 폴더 %n개"),
     ("%n small files", "작은 파일 %n개"),
     ("Folder, %n files", "폴더, 파일 %n개"),

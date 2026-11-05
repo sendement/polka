@@ -20,6 +20,7 @@ mod locks;
 mod mouse;
 mod ops;
 mod packages;
+mod props;
 mod sandbox;
 mod schemes;
 mod sidebar;

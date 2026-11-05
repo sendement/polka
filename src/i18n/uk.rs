@@ -531,6 +531,8 @@ pub const T: &[(&str, &str)] = &[
     ("Tools", "Інструменти"),
     ("Disk usage", "Зайняте місце"),
     ("%n files", "Файлів: %n"),
+    ("%n folders", "Папок: %n"),
+    ("On disk", "На диску"),
     ("%n folders unreadable", "Не прочитано тек: %n"),
     ("%n small files", "Дрібні файли: %n"),
     ("Folder, %n files", "Тека, файлів: %n"),

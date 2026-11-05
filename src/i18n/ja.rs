@@ -531,6 +531,8 @@ pub const T: &[(&str, &str)] = &[
     ("Tools", "ツール"),
     ("Disk usage", "ディスク使用量"),
     ("%n files", "%n 個のファイル"),
+    ("%n folders", "%n 個のフォルダー"),
+    ("On disk", "ディスク上"),
     ("%n folders unreadable", "%n 個のフォルダを読めませんでした"),
     ("%n small files", "%n 個の小さなファイル"),
     ("Folder, %n files", "フォルダ、%n 個のファイル"),
