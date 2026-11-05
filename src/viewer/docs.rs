@@ -6,10 +6,11 @@
 //! ones (doc, ppt, rtf) go through LibreOffice to PDF when there's one.
 //! The gamepad scrolls, pages and zooms; the mouse selects and copies.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Condvar, Mutex};
 
 use egui::text::LayoutJob;
 use egui::{Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, TextFormat, Ui, Vec2, pos2, vec2};
@@ -124,6 +125,12 @@ impl DocState {
                 self.body = r.unwrap_or_else(Body::Failed);
             }
         }
+    }
+
+    /// Has page `i` its picture yet (a PDF's).
+    #[cfg(test)]
+    pub fn drawn(&self, i: usize) -> bool {
+        matches!(&self.body, Body::Pdf(p) if p.textures.contains_key(&i))
     }
 
     pub fn pages(&self) -> usize {
@@ -473,10 +480,26 @@ pub struct Pdf {
     pub sizes: Vec<Vec2>,
     textures: HashMap<usize, (f32, egui::TextureHandle)>,
     pub lines: HashMap<usize, Vec<Line>>,
-    asked: HashSet<usize>,
     failed: HashMap<usize, String>,
-    ask: Sender<(usize, f32, bool)>,
+    jobs: Arc<(Mutex<Jobs>, Condvar)>,
     got: Receiver<Drawn>,
+}
+
+/// What the drawer's asked for: only the pages in view now, nearest
+/// first (a long scroll by the wheel mustn't leave a queue of the pages
+/// it passed), and the one it's on.
+#[derive(Default)]
+struct Jobs {
+    want: Vec<(usize, f32, bool)>,
+    doing: Option<usize>,
+    closed: bool,
+}
+
+impl Drop for Pdf {
+    fn drop(&mut self) {
+        self.jobs.0.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        self.jobs.1.notify_all();
+    }
 }
 
 impl Pdf {
@@ -492,30 +515,44 @@ impl Pdf {
             return Err(if err.is_empty() { tr("No pages").to_string() } else { err });
         }
         // One drawer, pages one after another as they're asked for.
-        let (ask, asks) = channel::<(usize, f32, bool)>();
+        let jobs = Arc::new((Mutex::new(Jobs::default()), Condvar::new()));
         let (send, got) = channel();
-        let file = path.to_path_buf();
+        let (file, js) = (path.to_path_buf(), jobs.clone());
         std::thread::spawn(move || {
             let Ok(dir) = work_dir() else { return };
-            while let Ok((page, dpi, text)) = asks.recv() {
+            loop {
+                let (page, dpi, text) = {
+                    let mut j = js.0.lock().unwrap_or_else(|e| e.into_inner());
+                    while j.want.is_empty() && !j.closed {
+                        j = js.1.wait(j).unwrap_or_else(|e| e.into_inner());
+                    }
+                    if j.closed {
+                        return;
+                    }
+                    let job = j.want.remove(0);
+                    j.doing = Some(job.0);
+                    job
+                };
                 let r = match render(&file, page, dpi, &dir) {
                     Ok(image) => Drawn::Page { page, dpi, image, lines: text.then(|| page_text(&file, page, &dir)) },
                     Err(error) => Drawn::Failed { page, error },
                 };
-                if send.send(r).is_err() {
+                // (Sent before it's let go: else asked for again meanwhile.)
+                let gone = send.send(r).is_err();
+                js.0.lock().unwrap_or_else(|e| e.into_inner()).doing = None;
+                if gone {
                     return;
                 }
                 ctx.request_repaint();
             }
         });
-        Ok(Pdf { path: path.to_path_buf(), sizes, textures: HashMap::new(), lines: HashMap::new(), asked: HashSet::new(), failed: HashMap::new(), ask, got })
+        Ok(Pdf { path: path.to_path_buf(), sizes, textures: HashMap::new(), lines: HashMap::new(), failed: HashMap::new(), jobs, got })
     }
 
     fn take(&mut self, ctx: &egui::Context) {
         while let Ok(d) = self.got.try_recv() {
             match d {
                 Drawn::Page { page, dpi, image, lines } => {
-                    self.asked.remove(&page);
                     let t = ctx.load_texture(format!("pdf-{}-{page}", self.path.display()), image, egui::TextureOptions::LINEAR);
                     self.textures.insert(page, (dpi, t));
                     if let Some(l) = lines {
@@ -523,7 +560,6 @@ impl Pdf {
                     }
                 }
                 Drawn::Failed { page, error } => {
-                    self.asked.remove(&page);
                     self.failed.insert(page, error);
                 }
             }
@@ -536,6 +572,8 @@ impl Pdf {
         let top0 = ui.min_rect().top();
         ui.add_space(GAP);
         let mut visible = Vec::new();
+        let mut wanted = Vec::new();
+        let middle = ui.clip_rect().center().y;
         for (i, size) in self.sizes.clone().iter().enumerate() {
             let scale = width / size.x.max(1.0);
             let h = (size.y * scale).round();
@@ -560,9 +598,9 @@ impl Pdf {
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, format!("{}", i + 1), FontId::proportional(28.0), Color32::from_gray(200));
             }
             let stale = have.is_none_or(|d| want > d * 1.2 || want < d * 0.5);
-            if stale && !self.asked.contains(&i) && !self.failed.contains_key(&i) {
-                self.asked.insert(i);
-                let _ = self.ask.send((i, want.clamp(24.0, 600.0), !self.lines.contains_key(&i)));
+            if stale && !self.failed.contains_key(&i) {
+                let far = if ui.is_rect_visible(rect) { 0.0 } else { 1e6 } + (rect.center().y - middle).abs();
+                wanted.push((far, (i, want.clamp(24.0, 600.0), !self.lines.contains_key(&i))));
             }
             if let Some(lines) = self.lines.get(&i) {
                 let k = width / size.x.max(1.0);
@@ -572,6 +610,18 @@ impl Pdf {
                     let r = Rect::from_min_max(rect.min + l.rect.min.to_vec2() * k, rect.min + l.rect.max.to_vec2() * k);
                     ghost_text(&mut over, r, &l.text);
                 }
+            }
+        }
+        // In view first, then the ones just past its edges.
+        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let want: Vec<_> = wanted.into_iter().map(|w| w.1).collect();
+        {
+            let mut j = self.jobs.0.lock().unwrap_or_else(|e| e.into_inner());
+            let doing = j.doing;
+            let want: Vec<_> = want.into_iter().filter(|w| Some(w.0) != doing).collect();
+            if j.want != want {
+                j.want = want;
+                self.jobs.1.notify_all();
             }
         }
         // Far from view: let their pictures go.
@@ -2115,7 +2165,11 @@ pub mod fixtures {
 
     /// Two pages of Helvetica text.
     pub fn pdf(path: &Path) {
-        let pages = ["Hello PDF world", "Second page here"];
+        pdf_of(path, &["Hello PDF world".to_string(), "Second page here".to_string()]);
+    }
+
+    /// One line of Helvetica on each page.
+    pub fn pdf_of(path: &Path, pages: &[String]) {
         let mut objs: Vec<String> = vec!["<< /Type /Catalog /Pages 2 0 R >>".into(), String::new(), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into()];
         let mut kids = Vec::new();
         for t in pages {

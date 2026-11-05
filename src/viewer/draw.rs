@@ -512,7 +512,18 @@ fn draw_text(ui: &mut Ui, t: &mut TextState, prefs: &ViewerPrefs, theme: &Theme)
             let col = ((p.x - origin.x - gutter) / char_w).round().max(0.0) as usize;
             t.at_col(row, col)
         };
-        if let Some(p) = resp.interact_pointer_pos() {
+        // A right click: the usual menu, the caret there (unless it's in
+        // what's chosen, which the menu is then for).
+        if resp.secondary_clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let at = at_pos(t, p);
+                if !t.ed.selection().is_some_and(|s| s.contains(&at) || s.end == at) {
+                    t.ed.anchor = None;
+                    t.ed.caret = at;
+                }
+            }
+            t.ed.menu = true;
+        } else if let Some(p) = resp.interact_pointer_pos() {
             let at = at_pos(t, p);
             let shift = ui.input(|i| i.modifiers.shift);
             if resp.double_clicked() {

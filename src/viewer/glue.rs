@@ -200,6 +200,28 @@ impl App {
         self.overlay = Some(Overlay::Menu(Menu::new(&name, items)));
     }
 
+    /// A right click in the text: the usual edit menu, beside it. What
+    /// can't be done now shows greyed.
+    pub fn viewer_context_menu(&mut self) {
+        let Some(t) = self.text_mut() else { return };
+        t.ed.menu = false;
+        let (sel, edit) = (t.ed.selection().is_some(), t.editable());
+        let (undo, redo) = (t.ed.can_undo(), t.ed.can_redo());
+        let on = |i: crate::app::MenuItem, ok: bool| crate::app::MenuItem { enabled: ok, ..i };
+        let items = vec![
+            on(item(tr("Undo"), Cmd::ViewerUndo), edit && undo),
+            on(item(tr("Redo"), Cmd::ViewerRedo), edit && redo),
+            on(item(tr("Cut"), Cmd::ViewerCut), edit && sel),
+            on(item(tr("Copy"), Cmd::ViewerCopy), sel),
+            on(item(tr("Paste"), Cmd::ViewerPaste), edit),
+            on(item(tr("Delete"), Cmd::ViewerDelete), edit && sel),
+            item(tr("Select all"), Cmd::ViewerSelectAll),
+            item(tr("Find…"), Cmd::ViewerFindAsk),
+        ];
+        let name = self.tabs[self.tab].viewer.as_ref().map(|v| v.name.clone()).unwrap_or_default();
+        self.overlay = Some(Overlay::Menu(Menu::new(&name, items)));
+    }
+
     /// Text viewer commands.
     pub fn viewer_cmd(&mut self, cmd: Cmd) {
         let ctx = self.ctx.clone();
@@ -260,6 +282,12 @@ impl App {
                             self.read_only_toast();
                         }
                     }
+                }
+            }
+            Cmd::ViewerDelete => {
+                let Some(t) = self.text_mut() else { return };
+                if t.ed.selection().is_some() && !t.backspace(false) {
+                    self.read_only_toast();
                 }
             }
             Cmd::ViewerSelectAll => {
@@ -572,7 +600,13 @@ impl App {
                 true
             }
             Event::Paste(s) if !md => {
-                if t.insert(s) {
+                // The system's clipboard didn't answer: what was copied here.
+                let s = if s.is_empty() { self.text_clip.clone().unwrap_or_default() } else { s.clone() };
+                let Some(t) = self.text_mut() else { return true };
+                if s.is_empty() {
+                    return true;
+                }
+                if t.insert(&s) {
                     t.ed.editing = true;
                 } else {
                     self.read_only_toast();

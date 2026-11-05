@@ -32,6 +32,10 @@ const URIS: &str = "text/uri-list";
 /// Flatpak's Telegram, say) trades for paths it may open. (A plain path
 /// it can't reach reads as an empty file.) The older name too.
 const PORTAL: [&str; 2] = ["application/vnd.portal.filetransfer", "application/vnd.portal.files"];
+/// Offered with our own clipboard text: a selection that lacks it is
+/// someone else's, newer than ours (even if ours was never cancelled, as
+/// when the compositor turned it down).
+const OURS: &str = "application/x-polka-own-clipboard";
 /// Text kinds, the best first.
 const TEXT: [&str; 5] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
 
@@ -140,6 +144,7 @@ impl Dnd {
             out_files: Vec::new(),
             icon: None,
             clip: None,
+            clip_at: None,
         };
         conn.display().get_registry(&qh, ());
         queue.roundtrip(&mut st).ok()?;
@@ -255,6 +260,7 @@ struct State {
     icon: Option<(WlSurface, WlBuffer)>,
     /// Text we put on the clipboard.
     clip: Option<(WlDataSource, String)>,
+    clip_at: Option<std::time::Instant>,
 }
 
 impl State {
@@ -369,7 +375,9 @@ impl State {
         for t in TEXT {
             src.offer(t.into());
         }
+        src.offer(OURS.into());
         d.set_selection(Some(&src), self.serial);
+        self.clip_at = Some(std::time::Instant::now());
         if let Some((old, _)) = self.clip.replace((src, text)) {
             old.destroy();
         }
@@ -564,6 +572,14 @@ impl Dispatch<WlDataDevice, ()> for State {
                 }
             }
             wl_data_device::Event::Selection { id } => {
+                let ours = id.as_ref().is_some_and(|o| o.data::<Mimes>().is_some_and(|m| m.lock().unwrap().iter().any(|m| m == OURS)));
+                // (Not one sent just before ours was set, still on its way.)
+                let settled = st.clip_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_millis(500));
+                if !ours && settled {
+                    if let Some((src, _)) = st.clip.take() {
+                        src.destroy();
+                    }
+                }
                 if let Some(old) = std::mem::replace(&mut st.selection, id) {
                     old.destroy();
                 }

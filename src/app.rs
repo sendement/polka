@@ -621,6 +621,7 @@ pub enum Cmd {
     ViewerCut,
     ViewerPaste,
     ViewerSelectAll,
+    ViewerDelete,
     ViewerFindAsk,
     ViewerFindOpt(u8),
     ViewerReplaceAsk,
@@ -1690,6 +1691,8 @@ pub struct App {
     pub dnd_out: bool,
     pub dnd_in: bool,
     pub dnd_dropped: bool,
+    /// Files from inside an archive being unpacked to be dragged out.
+    pub dnd_unpack: Option<std::sync::mpsc::Receiver<Result<Vec<PathBuf>, String>>>,
     /// A drop's release is on its way to egui (keep the drag till then).
     pub dnd_release: Option<Instant>,
     /// Light/dark last set on the context.
@@ -1839,6 +1842,7 @@ impl App {
             dnd_out: false,
             dnd_in: false,
             dnd_dropped: false,
+            dnd_unpack: None,
             dnd_release: None,
             drag: None,
             templates: Vec::new(),
@@ -2783,6 +2787,16 @@ impl App {
         }
         if !(self.cfg.dual && t as usize == self.other_tab) {
             self.tab = t as usize;
+            self.own_tab_focus();
+        }
+    }
+
+    /// A tab of its own (a file shown, a page) brought up: the keys go to
+    /// it, not to the sidebar left by the one before (Esc held out of the
+    /// terminal, say), where Ctrl+V would paste files.
+    fn own_tab_focus(&mut self) {
+        if self.tabs.get(self.tab).is_some_and(|t| t.own) && self.overlay.is_none() {
+            self.focus = Focus::Panes;
         }
     }
 
@@ -2792,6 +2806,7 @@ impl App {
             self.set_side(1 - self.side());
         } else {
             self.tab = i;
+            self.own_tab_focus();
         }
     }
 
@@ -4744,6 +4759,7 @@ impl App {
             | Cmd::ViewerCut
             | Cmd::ViewerPaste
             | Cmd::ViewerSelectAll
+            | Cmd::ViewerDelete
             | Cmd::ViewerFindAsk
             | Cmd::ViewerFindOpt(_)
             | Cmd::ViewerReplaceAsk

@@ -290,6 +290,7 @@ impl App {
     /// behind and sways on a spring; letting go anywhere else drops nothing.
     pub fn draw_drag(&mut self, ctx: &egui::Context) {
         if self.drag.is_none() {
+            self.dnd_unpack = None;
             return;
         }
         // (One from elsewhere has its press handed to egui a frame later.)
@@ -323,11 +324,45 @@ impl App {
         };
         // Pulled out of the window: the system's drag takes the files on, to
         // other programs (and back here, if it returns).
-        if !self.dnd_out && !ctx.content_rect().contains(p) {
-            if let (Some(dnd), Some(d)) = (&self.dnd, &self.drag) {
-                let files: Vec<PathBuf> = d.sources.iter().filter_map(|l| l.local_path().map(|p| p.to_path_buf())).collect();
-                if d.from != EXTERNAL && files.len() == d.sources.len() {
-                    let icon = drag_icon(&pics_for_icon, d.sources.len(), accent, ctx.pixels_per_point());
+        if !self.dnd_out && !ctx.content_rect().contains(p) && self.dnd.is_some() {
+            if let Some(d) = self.drag.as_ref().filter(|d| d.from != EXTERNAL) {
+                let n = d.sources.len();
+                let local: Vec<PathBuf> = d.sources.iter().filter_map(|l| l.local_path().map(|p| p.to_path_buf())).collect();
+                let inside = d.sources.iter().any(|l| matches!(l, crate::vfs::Location::Archive { .. }));
+                // From inside an archive: unpacked first (the button still
+                // held meanwhile), then handed on.
+                let files = if local.len() == n {
+                    Some(local)
+                } else if !inside {
+                    None
+                } else if let Some(rx) = &self.dnd_unpack {
+                    match rx.try_recv() {
+                        Ok(Ok(f)) => Some(f),
+                        Ok(Err(e)) => {
+                            self.drag = None;
+                            self.dnd_unpack = None;
+                            self.toast(e, true);
+                            return;
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let (sources, c) = (d.sources.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let r = crate::vfs::unpack_for_drag(&sources).map_err(|e| match crate::vfs::need_password(&e) {
+                            Some(_) => crate::i18n::tr("Password required").to_string(),
+                            None => e.to_string(),
+                        });
+                        let _ = tx.send(r);
+                        c.request_repaint();
+                    });
+                    self.dnd_unpack = Some(rx);
+                    None
+                };
+                if let (Some(files), Some(dnd)) = (files, &self.dnd) {
+                    self.dnd_unpack = None;
+                    let icon = drag_icon(&pics_for_icon, n, accent, ctx.pixels_per_point());
                     dnd.start(files, icon);
                     self.dnd_out = true;
                     self.dnd_dropped = false;

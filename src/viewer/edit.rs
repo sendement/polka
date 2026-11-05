@@ -37,6 +37,8 @@ pub struct Editor {
     pub find: Option<Find>,
     /// Letters typed lately (where, when): they hop in.
     pub typed: Vec<(usize, Instant)>,
+    /// Right-clicked: its menu asked for.
+    pub menu: bool,
 }
 
 #[derive(Default, Clone)]
@@ -82,6 +84,14 @@ fn is_word(c: char) -> bool {
 impl Editor {
     pub fn new(text: &str) -> Self {
         Editor { saved: hash(text), ..Default::default() }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     pub fn selection(&self) -> Option<Range<usize>> {

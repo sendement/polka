@@ -3038,6 +3038,35 @@ fn other_programs(h: &mut Harness<'static, App>) {
     assert_eq!(labels[0], tr("Move here"));
     press(h, &[Action::Back]);
     assert!(h.state().drag.is_none());
+    // From inside an archive: unpacked first, then the system's drag gets
+    // the unpacked file (another program, another Polka, copies it).
+    std::fs::create_dir_all(base.join("dnd-src/pack")).unwrap();
+    std::fs::write(base.join("dnd-src/pack/inner.txt"), "from the archive\n").unwrap();
+    let ok = std::process::Command::new("tar").arg("czf").arg(dir.join("pack.tar.gz")).arg("-C").arg(base.join("dnd-src")).arg("pack").status().unwrap();
+    assert!(ok.success());
+    h.state_mut().pane_mut().navigate(Location::Archive { archive: dir.join("pack.tar.gz"), inner: "pack".into() }, None, &cfg);
+    settle(h);
+    let (_, hot) = rect_of(h, "inner.txt");
+    press_at(h, hot.center(), true);
+    move_to(h, hot.center() + vec2(8.0, 8.0));
+    move_to(h, hot.center() + vec2(100.0, 40.0));
+    let mut files = None;
+    for i in 0..100 {
+        move_to(h, pos2(1300.0 + (i % 2) as f32, 300.0));
+        if let Ok(f) = started.try_recv() {
+            files = Some(f);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let files = files.expect("no drag started from the archive");
+    assert_eq!(files.len(), 1);
+    assert!(files[0].ends_with("inner.txt") && !files[0].starts_with(&dir), "{files:?}");
+    assert_eq!(std::fs::read_to_string(&files[0]).unwrap(), "from the archive\n");
+    tx.send(Ev::OutEnded).unwrap();
+    feed(h);
+    assert!(h.state().drag.is_none());
+    let _ = std::fs::remove_dir_all(files[0].parent().unwrap().parent().unwrap());
     h.state_mut().dnd = None;
 }
 
@@ -6437,6 +6466,55 @@ fn settings_cats_screens() {
     h.state_mut().overlay = None;
 }
 
+/// A long PDF scrolled far with the wheel: the pages it lands on are drawn
+/// at once, not after every page it passed.
+#[test]
+#[ignore]
+fn pdf_long_scroll_screens() {
+    use crate::viewer::Content;
+    use crate::viewer::docs::{Body, fixtures};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("longpdf");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    fixtures::pdf_of(&dir.join("long.pdf"), &(1..=300).map(|i| format!("Page {i}")).collect::<Vec<_>>());
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    settle(&mut h);
+    fn doc<'a>(h: &'a Harness<'static, App>) -> &'a crate::viewer::docs::DocState {
+        match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+            Some(Content::Doc(d)) => d,
+            _ => panic!("not a document"),
+        }
+    }
+    press(&mut h, &[Action::Accept]);
+    for _ in 0..100 {
+        settle(&mut h);
+        if !matches!(doc(&h).body, Body::Loading(_)) {
+            break;
+        }
+    }
+    assert_eq!(doc(&h).pages(), 300);
+    // The wheel, fast, a frame at a time: past some 150 pages.
+    let mid = h.ctx.content_rect().center();
+    h.event(egui::Event::PointerMoved(mid));
+    for _ in 0..60 {
+        h.event(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -2500.0), phase: egui::TouchPhase::Move, modifiers: Default::default() });
+        h.step();
+    }
+    let at = doc(&h).page;
+    assert!(at > 100, "only to page {at}");
+    let start = std::time::Instant::now();
+    while !doc(&h).drawn(at) && start.elapsed() < std::time::Duration::from_secs(20) {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let took = start.elapsed();
+    assert!(doc(&h).drawn(at), "page {} never drawn", at + 1);
+    assert!(took < std::time::Duration::from_secs(3), "page {} drawn after {took:?}", at + 1);
+    shot(&mut h, "dc-long-pdf");
+}
+
 /// Documents in the viewer: a PDF (two pages, its text laid over them),
 /// Word and Writer files, PowerPoint and Impress slides, a workbook with
 /// two sheets. The pad scrolls, pages, zooms and changes sheets; the mouse
@@ -7955,4 +8033,111 @@ fn menu_style_screens() {
     assert_eq!(h.state().cfg.menu_style, 3);
     h.state_mut().cfg.menu_style = 0;
     h.state_mut().cfg.save();
+}
+
+/// The text editor and the keys after the terminal: Esc held out of it
+/// leaves the focus on the sidebar, yet the editor's tab, brought back,
+/// takes Ctrl+V (not the files' paste). A right click in the text: the
+/// usual menu beside it, greyed where nothing can be done.
+#[test]
+#[ignore]
+fn editor_paste_menu_screens() {
+    use crate::app::{Cmd, Focus, Overlay};
+    use egui::{Event, Key, Modifiers, PointerButton};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("pasteterm");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("doc.txt"), "hello world").unwrap();
+    let mut h = harness(dir.clone());
+    h.state_mut().cfg.dual = false;
+    // (Beside the click, as for the mouse.)
+    h.state_mut().cfg.menu_style = 2;
+    settle(&mut h);
+    let key = |h: &mut Harness<'static, App>, k: Key, m: Modifiers| {
+        h.event(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m });
+        h.event(Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: m });
+        h.step();
+    };
+    let text = |h: &Harness<'static, App>| match h.state().cur_tab().viewer.as_ref().map(|v| &v.content) {
+        Some(crate::viewer::Content::Text(t)) => t.doc.text.clone(),
+        _ => "<no editor>".into(),
+    };
+    press(&mut h, &[Action::Accept]);
+    let editor = h.state().tab;
+    assert_eq!(text(&h), "hello world");
+    h.event(Event::Paste("A".into()));
+    settle(&mut h);
+    assert_eq!(text(&h), "Ahello world");
+    // The terminal, left with Esc held: the sidebar has the focus.
+    h.state_mut().run(Cmd::TermOpen(Some(dir.clone())));
+    settle(&mut h);
+    h.state_mut().focus = Focus::Panes;
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    for _ in 0..20 {
+        h.step();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    h.event(Event::Key { key: Key::Escape, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+    assert!(h.state().focus == Focus::Sidebar);
+    key(&mut h, Key::ArrowLeft, Modifiers::COMMAND);
+    settle(&mut h);
+    assert_eq!(h.state().tab, editor);
+    assert!(h.state().focus == Focus::Panes, "the editor's tab didn't take the keys");
+    h.event(Event::Paste("B".into()));
+    settle(&mut h);
+    assert_eq!(text(&h), "ABhello world", "pasted elsewhere");
+    // Nothing from the system's clipboard: what was copied here.
+    h.state_mut().text_clip = Some("C".into());
+    h.event(Event::Paste(String::new()));
+    settle(&mut h);
+    assert_eq!(text(&h), "ABChello world");
+    // A click into the text takes the keys from the sidebar too.
+    h.state_mut().focus = Focus::Sidebar;
+    let area = h.ctx.content_rect();
+    let p = egui::pos2(area.center().x, area.min.y + 160.0);
+    let click = |h: &mut Harness<'static, App>, b: PointerButton| {
+        h.event(Event::PointerMoved(p));
+        h.event(Event::PointerButton { pos: p, button: b, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        h.event(Event::PointerButton { pos: p, button: b, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
+        settle(h);
+    };
+    click(&mut h, PointerButton::Primary);
+    assert!(h.state().focus == Focus::Panes, "a click didn't take the keys");
+    // The right click's menu: nothing chosen, so no cut, copy, delete.
+    let menu = |h: &Harness<'static, App>| match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| (i.label.clone(), i.enabled)).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    click(&mut h, PointerButton::Secondary);
+    let tr = crate::i18n::tr;
+    assert_eq!(
+        menu(&h),
+        [(tr("Undo"), true), (tr("Redo"), false), (tr("Cut"), false), (tr("Copy"), false), (tr("Paste"), true), (tr("Delete"), false), (tr("Select all"), true), (tr("Find…"), true)]
+            .map(|(l, e)| (l.to_string(), e))
+    );
+    let placed = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.place,
+        _ => None,
+    };
+    assert!(placed.and_then(|p| p.1).is_some(), "not beside the click: {placed:?}");
+    shot(&mut h, "ed-menu");
+    menu_pick(&mut h, tr("Select all"));
+    // Chosen: cut it out, then the menu pastes it back.
+    click(&mut h, PointerButton::Secondary);
+    assert!(menu(&h).iter().all(|(l, e)| *e == (l != tr("Redo"))), "{:?}", menu(&h));
+    shot(&mut h, "ed-menu-selected");
+    menu_pick(&mut h, tr("Cut"));
+    assert_eq!(text(&h), "");
+    assert_eq!(h.state().text_clip.as_deref(), Some("ABChello world"));
+    h.state_mut().sys_clip = None;
+    click(&mut h, PointerButton::Secondary);
+    menu_pick(&mut h, tr("Paste"));
+    assert_eq!(text(&h), "ABChello world");
+    click(&mut h, PointerButton::Secondary);
+    menu_pick(&mut h, tr("Undo"));
+    assert_eq!(text(&h), "");
 }

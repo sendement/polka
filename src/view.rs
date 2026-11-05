@@ -1570,6 +1570,7 @@ impl App {
         let mut usage_act = None;
         let mut term_act = None;
         let mut torrent_act = None;
+        let mut clicked_viewer = false;
         let full = self.video_full();
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -1579,7 +1580,10 @@ impl App {
             }
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
                 let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
+                let area = ui.available_rect_before_wrap();
                 viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                // A click into it: the keys go there (from the sidebar too).
+                clicked_viewer = ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p)));
                 return;
             }
             if self.tabs[tab].torrents {
@@ -1652,6 +1656,16 @@ impl App {
                 }
             }
         });
+        if clicked_viewer && self.overlay.is_none() {
+            self.focus = Focus::Panes;
+        }
+        if self.text_mut().is_some_and(|t| t.ed.menu) {
+            if self.overlay.is_none() {
+                self.viewer_context_menu();
+            } else if let Some(t) = self.text_mut() {
+                t.ed.menu = false;
+            }
+        }
         if let Some(a) = usage_act {
             self.usage_act(a);
         }

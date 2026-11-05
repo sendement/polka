@@ -790,6 +790,50 @@ pub fn extract_to_temp_fresh(archive: &Path, inner: &str) -> std::io::Result<Pat
     Ok(dir.join(normalize_inner(inner).rsplit('/').next().unwrap_or("file")))
 }
 
+/// Files dragged out of the window from inside archives: each unpacked
+/// where other programs (other Flatpaks too) can reach it, the user's
+/// cache (not the runtime folder, private in a Flatpak). The others stay
+/// where they are. A day's old leftovers go meanwhile.
+pub fn unpack_for_drag(sources: &[Location]) -> std::io::Result<Vec<PathBuf>> {
+    let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("polka/drag");
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() > 86400);
+            if old {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root = base.join(format!("{stamp}-{}", std::process::id()));
+    // One folder per archive (the same name may be in two of them).
+    let mut archives: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut out = Vec::new();
+    for l in sources {
+        match l {
+            Location::Archive { archive, inner } => {
+                let k = archives.iter().position(|(a, _)| a == archive).unwrap_or_else(|| {
+                    archives.push((archive.clone(), Vec::new()));
+                    archives.len() - 1
+                });
+                archives[k].1.push(inner.clone());
+                let name = normalize_inner(inner).rsplit('/').next().unwrap_or("file").to_string();
+                out.push(root.join(k.to_string()).join(name));
+            }
+            l => out.push(l.local_path().map(Path::to_path_buf).ok_or_else(|| std::io::Error::other("not a file"))?),
+        }
+    }
+    for (k, (archive, inners)) in archives.iter().enumerate() {
+        let dir = root.join(k.to_string());
+        std::fs::create_dir_all(&dir)?;
+        if let Err(e) = extract(archive, inners, &dir, |_| true) {
+            let _ = std::fs::remove_dir_all(&root);
+            return Err(e);
+        }
+    }
+    Ok(out)
+}
+
 pub fn temp_root() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
