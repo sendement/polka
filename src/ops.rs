@@ -168,6 +168,25 @@ pub struct Job {
     pub no_undo: AtomicBool,
     /// Done: the step for the history, and which way it went.
     pub history: Mutex<Option<(Undo, History)>>,
+    /// A move's every step so far, to be taken back if it's cancelled.
+    pub journal: Mutex<Vec<Step>>,
+    /// Cancelled: taking its steps back now (can't be cancelled).
+    pub rolling_back: AtomicBool,
+    /// Cancelled and all taken back.
+    pub rolled_back: AtomicBool,
+    /// Keeping the journal (moves only: a copy's would just grow).
+    pub journaling: AtomicBool,
+}
+
+/// One step of a move, for taking it back.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// Something new made (a copied file or folder).
+    Made(PathBuf),
+    /// Moved from, to.
+    Moved(PathBuf, PathBuf),
+    /// A folder emptied by the moves and deleted (merged into another).
+    Emptied(PathBuf),
 }
 
 /// A step that can be undone (and then redone): what was moved (from,
@@ -219,6 +238,10 @@ impl Job {
             did: Default::default(),
             no_undo: AtomicBool::new(false),
             history: Mutex::new(None),
+            journal: Default::default(),
+            rolling_back: AtomicBool::new(false),
+            rolled_back: AtomicBool::new(false),
+            journaling: AtomicBool::new(false),
         }
     }
 
@@ -254,7 +277,18 @@ impl Job {
     }
     fn tick(&self, n: u64) -> io::Result<()> {
         self.done.fetch_add(n, Ordering::Relaxed);
-        if self.cancel.load(Ordering::Relaxed) {
+        self.check()
+    }
+
+    fn note(&self, s: Step) {
+        if self.journaling.load(Ordering::Relaxed) {
+            self.journal.lock().unwrap().push(s);
+        }
+    }
+
+    /// Cancelled: stop (between files too, not only inside them).
+    fn check(&self) -> io::Result<()> {
+        if self.cancel.load(Ordering::Relaxed) && !self.rolling_back.load(Ordering::Relaxed) {
             Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
         } else {
             Ok(())
@@ -401,6 +435,10 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         did: Default::default(),
         no_undo: AtomicBool::new(false),
         history: Mutex::new(None),
+        journal: Default::default(),
+        rolling_back: AtomicBool::new(false),
+        rolled_back: AtomicBool::new(false),
+        journaling: AtomicBool::new(false),
     });
     let j = job.clone();
     std::thread::spawn(move || {
@@ -442,7 +480,14 @@ fn touched(sources: &[Location], dest: Option<&Dest>) -> Vec<Location> {
 fn run(op: Op, job: &Job) -> io::Result<()> {
     match op {
         Op::Copy { sources, dest, policy } => transfer(&sources, &dest, false, policy, job),
-        Op::Move { sources, dest, policy } => transfer(&sources, &dest, true, policy, job),
+        Op::Move { sources, dest, policy } => {
+            job.journaling.store(true, Ordering::Relaxed);
+            let r = transfer(&sources, &dest, true, policy, job);
+            if r.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::Interrupted) && job.cancel.load(Ordering::Relaxed) {
+                roll_back(job);
+            }
+            r
+        }
         Op::Trash { paths } => {
             job.items.store(true, Ordering::Relaxed);
             job.total.store(paths.len() as u64, Ordering::Relaxed);
@@ -645,6 +690,23 @@ pub fn split_ext(name: &str) -> (&str, &str) {
     }
 }
 
+/// `tree_size`, stopping when the job's cancelled (a huge folder takes a
+/// while just to count).
+fn tree_size_c(p: &Path, job: &Job) -> io::Result<u64> {
+    job.check()?;
+    let Ok(m) = p.symlink_metadata() else { return Ok(0) };
+    if !m.is_dir() {
+        return Ok(m.len());
+    }
+    let mut n = 0;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            n += tree_size_c(&e.path(), job)?;
+        }
+    }
+    Ok(n)
+}
+
 fn tree_size(p: &Path) -> u64 {
     let Ok(m) = p.symlink_metadata() else { return 0 };
     if m.is_dir() {
@@ -694,7 +756,7 @@ fn transfer(sources: &[Location], dest: &Dest, mv: bool, policy: Conflict, job: 
     let mut total = 0;
     for s in sources {
         total += match s {
-            Location::Local(p) => tree_size(p),
+            Location::Local(p) => tree_size_c(p, job)?,
             Location::Archive { archive, inner } => archive_subtree_size(archive, inner),
             Location::Search { .. } | Location::Steam(_) => 0,
         };
@@ -726,7 +788,7 @@ fn transfer_to_dir(sources: &[Location], dest: &Path, mv: bool, policy: Conflict
                     continue;
                 }
                 let Some(target) = resolve(dest, &name, policy) else {
-                    job.tick(tree_size(src))?;
+                    job.tick(tree_size_c(src, job)?)?;
                     continue;
                 };
                 // Replacing (or merging into) what was there can't be undone.
@@ -951,26 +1013,74 @@ fn undo_step(step: &Undo, back: bool, job: &Job) -> io::Result<()> {
 /// Move `src` to `dst`, merging into an existing folder and replacing
 /// existing files. Falls back to copy+delete across file systems.
 fn move_path(src: &Path, dst: &Path, job: &Job) -> io::Result<()> {
+    job.check()?;
     if let Ok(dm) = dst.symlink_metadata() {
         let sm = src.symlink_metadata()?;
         if sm.is_dir() && dm.is_dir() {
             for e in std::fs::read_dir(src)?.flatten() {
                 move_path(&e.path(), &dst.join(e.file_name()), job)?;
             }
-            return std::fs::remove_dir(src);
+            // (Emptied by the moves: taken back, they bring it back.)
+            return match std::fs::remove_dir(src) {
+                Ok(()) => {
+                    job.note(Step::Emptied(src.to_path_buf()));
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            };
         }
         remove_any(dst)?;
     }
-    let size = tree_size(src);
     match std::fs::rename(src, dst) {
-        Ok(()) => job.tick(size),
+        Ok(()) => {
+            job.note(Step::Moved(src.to_path_buf(), dst.to_path_buf()));
+            job.tick(tree_size_c(dst, job)?)
+        }
         Err(e) if e.raw_os_error() == Some(18) => {
-            // EXDEV
+            // EXDEV: copied, then the original deleted. Cancelled while
+            // copying: what was made goes (the original's untouched).
+            let from = job.journal.lock().unwrap().len();
             copy_tree(src, dst, job)?;
-            remove_any(src)
+            remove_any(src)?;
+            job.journal.lock().unwrap().truncate(from);
+            job.note(Step::Moved(src.to_path_buf(), dst.to_path_buf()));
+            Ok(())
         }
         Err(e) => Err(e),
     }
+}
+
+/// A cancelled move taken back, last step first: what was moved goes
+/// back, what was made (half a copy) goes. Counted in steps.
+fn roll_back(job: &Job) {
+    job.rolling_back.store(true, Ordering::Relaxed);
+    let steps = std::mem::take(&mut *job.journal.lock().unwrap());
+    job.items.store(true, Ordering::Relaxed);
+    job.done.store(0, Ordering::Relaxed);
+    job.total.store(steps.len() as u64, Ordering::Relaxed);
+    let quiet = Job::detached();
+    let mut ok = true;
+    for s in steps.iter().rev() {
+        match s {
+            Step::Made(p) => {
+                job.now_on(p);
+                // (Already gone: a file cut off midway removes itself.)
+                let r = match p.symlink_metadata() {
+                    Ok(m) if m.is_dir() => std::fs::remove_dir(p),
+                    Ok(_) => std::fs::remove_file(p),
+                    Err(_) => Ok(()),
+                };
+                ok &= r.is_ok();
+            }
+            Step::Emptied(p) => ok &= std::fs::create_dir_all(p).is_ok(),
+            Step::Moved(from, to) => {
+                job.now_on(from);
+                ok &= move_path(to, from, &quiet).is_ok();
+            }
+        }
+        job.done.fetch_add(1, Ordering::Relaxed);
+    }
+    job.rolled_back.store(ok, Ordering::Relaxed);
 }
 
 fn archive_subtree_size(archive: &Path, inner: &str) -> u64 {
@@ -996,12 +1106,19 @@ fn archive_subtree_size(archive: &Path, inner: &str) -> u64 {
 /// Copy a file or tree. An existing `dst` is merged into (folders) or
 /// replaced (everything else).
 fn copy_tree(src: &Path, dst: &Path, job: &Job) -> io::Result<()> {
+    job.check()?;
     let m = src.symlink_metadata()?;
     let ft = m.file_type();
-    if let Ok(dm) = dst.symlink_metadata() {
-        if !(ft.is_dir() && dm.is_dir()) {
+    let existed = match dst.symlink_metadata() {
+        Ok(dm) if ft.is_dir() && dm.is_dir() => true,
+        Ok(_) => {
             remove_any(dst)?;
+            false
         }
+        Err(_) => false,
+    };
+    if !existed {
+        job.note(Step::Made(dst.to_path_buf()));
     }
     if ft.is_symlink() {
         let target = std::fs::read_link(src)?;
@@ -1334,6 +1451,75 @@ mod tests {
 
     fn run_op(op: Op) {
         wait(&spawn(op, || {})).unwrap();
+    }
+
+    /// Every file under `root` with its bytes, to compare before and after.
+    fn snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut v = Vec::new();
+        fn go(root: &Path, p: &Path, v: &mut Vec<(String, Vec<u8>)>) {
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            if p.is_dir() {
+                v.push((rel + "/", Vec::new()));
+                for e in std::fs::read_dir(p).unwrap().flatten() {
+                    go(root, &e.path(), v);
+                }
+            } else {
+                v.push((rel, std::fs::read(p).unwrap()));
+            }
+        }
+        go(root, root, &mut v);
+        v.sort();
+        v
+    }
+
+    /// A folder of many files, nested.
+    fn many(root: &Path) {
+        for d in 0..6 {
+            let sub = root.join(format!("d{d}/inner"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for f in 0..40 {
+                std::fs::write(sub.join(format!("f{f}.bin")), vec![(d * 40 + f) as u8; 64 * 1024]).unwrap();
+            }
+            std::fs::write(root.join(format!("d{d}/empty.txt")), "").unwrap();
+        }
+    }
+
+    /// Cancelled midway (by the ✕, from another thread): a move between
+    /// file systems (copy, then delete) and one merging into a folder on
+    /// the same one are taken back; everything's as it was.
+    #[test]
+    fn cancelled_move_rolls_back() {
+        // (Here on the disk, and in /tmp: tmpfs, another file system.)
+        let disk = std::env::current_dir().unwrap().join("target/test-rollback");
+        let other = std::env::temp_dir().join(format!("polka-rollback-{}", std::process::id()));
+        for (src_root, dst_root, merge) in [(disk.join("a"), other.clone(), false), (disk.join("b"), disk.join("b-dest"), true)] {
+            let _ = std::fs::remove_dir_all(&src_root);
+            let _ = std::fs::remove_dir_all(&dst_root);
+            many(&src_root.join("big"));
+            std::fs::create_dir_all(&dst_root).unwrap();
+            if merge {
+                // Merged into: moved file by file, and what was there stays.
+                std::fs::create_dir_all(dst_root.join("big/d0")).unwrap();
+                std::fs::write(dst_root.join("big/d0/keep.txt"), "mine").unwrap();
+            }
+            let (src_before, dst_before) = (snapshot(&src_root), snapshot(&dst_root));
+            let job = spawn(Op::Move { sources: vec![Location::Local(src_root.join("big"))], dest: Dest::Dir(dst_root.clone()), policy: Conflict::Overwrite }, || {});
+            // Cancelled once a part's done.
+            while job.finished_at.lock().unwrap().is_none() && job.done.load(Ordering::Relaxed) < 3 << 20 && job.journal.lock().unwrap().len() < 60 {
+                std::thread::yield_now();
+            }
+            job.cancel.store(true, Ordering::Relaxed);
+            let r = wait(&job);
+            assert!(r.is_err(), "finished before the cancel ({})", if merge { "merge" } else { "other fs" });
+            assert!(job.rolled_back.load(Ordering::Relaxed), "not rolled back");
+            // (Something to take back: cancelled midway, not before it began.)
+            let steps = job.total.load(Ordering::Relaxed);
+            assert!(steps > 0, "cancelled before anything was done");
+            assert_eq!(snapshot(&src_root), src_before, "the source isn't as it was");
+            assert_eq!(snapshot(&dst_root), dst_before, "the destination isn't as it was");
+            let _ = std::fs::remove_dir_all(&src_root);
+            let _ = std::fs::remove_dir_all(&dst_root);
+        }
     }
 
     fn names(loc: &Location) -> Vec<String> {

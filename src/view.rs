@@ -1124,10 +1124,23 @@ impl App {
                     let (done, total) = (j.done.load(Ordering::Relaxed), j.total.load(Ordering::Relaxed));
                     let items = j.items.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
-                        let title = if j.target.is_empty() { j.label.clone() } else { format!("{} → {}", j.label, j.target) };
-                        ui.add(egui::Label::new(egui::RichText::new(title).strong()).truncate());
+                        // Cancelled: its steps taken back, plainly so.
+                        let back = j.rolling_back.load(Ordering::Relaxed);
+                        let title = if back {
+                            tr("Rolling back the move").to_string()
+                        } else if j.target.is_empty() {
+                            j.label.clone()
+                        } else {
+                            format!("{} → {}", j.label, j.target)
+                        };
+                        let text = egui::RichText::new(title).strong();
+                        ui.add(egui::Label::new(if back { text.color(v.warn_fg_color) } else { text }).truncate());
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("✖").on_hover_text(tr("Cancel")).clicked() {
+                            if back {
+                                // (Nothing to cancel: it's the cancelling.)
+                            } else if j.cancel.load(Ordering::Relaxed) {
+                                ui.add(egui::Spinner::new().size(12.0)).on_hover_text(tr("Cancelling…"));
+                            } else if ui.small_button("✖").on_hover_text(tr("Cancel")).clicked() {
                                 cancel = Some(i);
                             }
                             if total > 0 {
@@ -1154,7 +1167,8 @@ impl App {
                     if !items && done > 0 && secs > 0.5 {
                         line += &format!(" · {}/{}", human_size((done as f64 / secs) as u64), tr("sec"));
                     }
-                    if total > done && done > 0 && secs > 1.0 {
+                    // (Not while taking back: the time so far was the move's.)
+                    if total > done && done > 0 && secs > 1.0 && !j.rolling_back.load(Ordering::Relaxed) {
                         let left = ((total - done) as f64 * secs / done as f64) as u64;
                         line += &format!(" · {} {}", tr("left"), if left >= 3600 { format!("{}:{:02}:{:02}", left / 3600, left / 60 % 60, left % 60) } else { format!("{}:{:02}", left / 60, left % 60) });
                     }

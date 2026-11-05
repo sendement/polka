@@ -2355,7 +2355,17 @@ fn sidebar_more(h: &mut Harness<'static, App>) {
     // Operations under way show their progress.
     h.state_mut().jobs.push(std::sync::Arc::new(crate::ops::Job::shown(tr("Copying"), "Music", 1_400_000_000, 3_600_000_000, "album/03 - Track.flac", 20)));
     h.state_mut().jobs.push(std::sync::Arc::new(crate::ops::Job::shown(tr("Deleting"), "", 0, 0, "", 2)));
+    // A cancelled move being taken back: said plainly, no ✖.
+    let back = crate::ops::Job::shown(tr("Moving"), "Videos", 12, 40, "film.mkv", 30);
+    back.rolling_back.store(true, std::sync::atomic::Ordering::Relaxed);
+    back.items.store(true, std::sync::atomic::Ordering::Relaxed);
+    h.state_mut().jobs.push(std::sync::Arc::new(back));
     settle(h);
+    {
+        use egui_kittest::kittest::Queryable;
+        assert!(h.query_by_label(tr("Rolling back the move")).is_some(), "rollback not shown");
+        assert_eq!(h.query_all_by_label("✖").count(), 2, "the rollback has a ✖");
+    }
     shot(h, "c7-progress");
     h.state_mut().jobs.clear();
 

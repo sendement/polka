@@ -2201,6 +2201,7 @@ impl App {
         let mut ask = Vec::new();
         let mut ended = Vec::new();
         let mut steps = Vec::new();
+        let mut rolled = Vec::new();
         self.jobs.retain(|j| {
             let fin = *j.finished_at.lock().unwrap();
             match fin {
@@ -2210,7 +2211,12 @@ impl App {
                     if let (Some((a, wrong)), Some(op)) = (j.need_password.lock().unwrap().take(), j.op.clone()) {
                         ask.push((a, wrong, op));
                     } else if let (Some(r), Some(op)) = (j.result.lock().unwrap().clone(), j.op.clone()) {
-                        ended.push((op, r, j.denied.load(std::sync::atomic::Ordering::Relaxed), j.label.clone()));
+                        // Cancelled and taken back: said so, not as an error.
+                        if j.rolled_back.load(std::sync::atomic::Ordering::Relaxed) {
+                            rolled.push(());
+                        } else {
+                            ended.push((op, r, j.denied.load(std::sync::atomic::Ordering::Relaxed), j.label.clone()));
+                        }
                     }
                     if let Some(h) = j.history.lock().unwrap().take() {
                         steps.push(h);
@@ -2242,6 +2248,9 @@ impl App {
         }
         for r in report {
             self.toast(r, true);
+        }
+        if !rolled.is_empty() {
+            self.toast(tr("Move cancelled: everything is back in place"), false);
         }
         for (a, wrong, op) in ask {
             self.ask_password(a, wrong, Retry::Op(op));
