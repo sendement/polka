@@ -1238,15 +1238,21 @@ impl App {
             ],
             // (No keys shown: only OK and Cancel.)
             Some(Overlay::Osk(k)) if !(self.pad_active || self.touch.active || k.keys_open) => vec![(Action::Menu, tr("OK")), (Action::Back, tr("Cancel"))],
-            Some(Overlay::Osk(_)) => vec![
-                (Action::Accept, "⌨"),
-                (Action::Select, tr("Backspace")),
-                (Action::Actions, tr("Space")),
-                (Action::LeftTrigger, tr("Shift")),
-                (Action::View, tr("Layout")),
-                (Action::Menu, tr("OK")),
-                (Action::Back, tr("Cancel")),
-            ],
+            Some(Overlay::Osk(k)) => {
+                let mut v = vec![
+                    (Action::Accept, "⌨"),
+                    (Action::Select, tr("Backspace")),
+                    (Action::Actions, tr("Space")),
+                    (Action::LeftTrigger, tr("Shift")),
+                    (Action::View, tr("Layout")),
+                ];
+                // The filter or a search: L3 ticks "In subfolders".
+                if matches!(k.purpose, crate::app::OskPurpose::Filter { .. } | crate::app::OskPurpose::Search { .. }) && self.pane().loc.local_path().is_some() {
+                    v.push((Action::LeftStick, tr("In subfolders")));
+                }
+                v.extend([(Action::Menu, tr("OK")), (Action::Back, tr("Cancel"))]);
+                v
+            }
             Some(Overlay::Settings(st)) if st.editor.is_some() => {
                 vec![(Action::Left, tr("Adjust")), (Action::Accept, tr("OK")), (Action::Back, tr("Cancel"))]
             }

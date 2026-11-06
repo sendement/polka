@@ -8478,21 +8478,27 @@ fn fan_screens() {
     press(&mut h, &[crate::input::Action::Accept]);
     assert_eq!(h.state().fan.levels.len(), 2);
     assert_eq!(labels(&h).last().map(|l| l.as_str()), Some(tr("Quit")), "not the tail");
-    let view = find(&h, tr("View")).expect("no View in More…");
+    // ○ back out; View and sorting from there, a further fan.
+    press(&mut h, &[crate::input::Action::Back]);
+    assert_eq!(h.state().fan.levels.len(), 1);
+    let view = find(&h, tr("View and sorting")).expect("no View and sorting");
     point(&mut h, view);
     press(&mut h, &[crate::input::Action::Accept]);
-    assert_eq!(h.state().fan.levels.len(), 3);
+    assert_eq!(h.state().fan.levels.len(), 2);
     h.state_mut().cfg.fan.size = 1.0;
     let grid = find(&h, tr("Grid")).unwrap();
     point(&mut h, grid);
     shot(&mut h, "fan3-submenu");
     press(&mut h, &[crate::input::Action::Accept]);
     assert_eq!(h.state().cfg.view, crate::config::ViewMode::Grid);
-    assert!(h.state().fan.shown && h.state().fan.levels.len() == 3, "a toggle closed it");
-    assert!(h.state().fan.levels[2].menu.items[grid].checked == Some(true), "its tick didn't follow");
+    assert!(h.state().fan.shown && h.state().fan.levels.len() == 2, "a toggle closed it");
+    assert!(h.state().fan.levels[1].menu.items[grid].checked == Some(true), "its tick didn't follow");
+    // View and sorting in one: the sort keys are there too.
+    let all: Vec<String> = h.state().build_submenu(crate::app::SubMenu::View).items.iter().map(|i| i.label.clone()).collect();
+    assert!(all.iter().any(|l| l == tr("By date")) && all.iter().any(|l| l == tr("Folders first")), "{all:?}");
     // ○: a level back out; in the middle: gone, back to the item's menu.
     press(&mut h, &[crate::input::Action::Back]);
-    assert_eq!(h.state().fan.levels.len(), 2);
+    assert_eq!(h.state().fan.levels.len(), 1);
     stick(&mut h, 0.0, 0.0);
     assert!(!h.state().fan.shown);
     h.state_mut().cfg.view = crate::config::ViewMode::List;
@@ -8680,4 +8686,45 @@ fn strip_screens() {
     h.state_mut().cfg.viewer.strip_size = 1;
     h.state_mut().cfg.save();
     h.state_mut().run(Cmd::CloseViewer);
+}
+
+/// Polka's menu: no Torrents or Versions, View and sorting in one, the
+/// filter and the search one "Find…" (L3 on the pad ticks "In
+/// subfolders").
+#[test]
+#[ignore]
+fn app_menu_screens() {
+    use crate::app::{Cmd, Overlay, OskPurpose};
+    use crate::i18n::tr;
+    use crate::input::Action;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    h.state_mut().open_app_menu();
+    settle(&mut h);
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => panic!("no menu"),
+    };
+    shot(&mut h, "am0-menu");
+    for gone in [tr("Torrents"), tr("Versions and updates…"), tr("Sorting"), tr("Filter…"), tr("Search…")] {
+        assert!(!labels.iter().any(|l| l == gone), "{gone} still there: {labels:?}");
+    }
+    assert!(labels.iter().any(|l| l == tr("View and sorting")) && labels.iter().any(|l| l == tr("Find…")), "{labels:?}");
+    h.state_mut().overlay = None;
+    // Find…: the filter or the search as the box was left; L3 ticks it.
+    h.state_mut().cfg.search_subfolders = false;
+    h.state_mut().run(Cmd::FindOrFilter);
+    settle(&mut h);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if matches!(k.purpose, OskPurpose::Filter { .. })));
+    press(&mut h, &[Action::LeftStick]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if matches!(k.purpose, OskPurpose::Search { .. })), "L3 didn't tick In subfolders");
+    assert!(h.state().cfg.search_subfolders);
+    shot(&mut h, "am1-search");
+    press(&mut h, &[Action::LeftStick]);
+    assert!(matches!(&h.state().overlay, Some(Overlay::Osk(k)) if matches!(k.purpose, OskPurpose::Filter { .. })));
+    press(&mut h, &[Action::Back]);
+    h.state_mut().cfg.search_subfolders = true;
+    h.state_mut().cfg.save();
 }

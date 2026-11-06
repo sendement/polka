@@ -33,6 +33,8 @@ pub struct Level {
     more: Option<Menu>,
     /// The item gone into from here (a submenu, "More…").
     chosen: Option<usize>,
+    /// The submenu it's (part of), to rebuild after a toggle.
+    src: Option<crate::app::SubMenu>,
 }
 
 /// The fan's height either way from the middle, in a window this high.
@@ -41,11 +43,13 @@ fn radius_y(height: f32, s: f32) -> f32 {
 }
 
 /// How many items fit in one fan.
-fn most(theme: Theme, height: f32, s: f32) -> usize {
+fn most(theme: Theme, height: f32, s: f32, stretch: f32) -> usize {
     let n = if theme.round() {
-        // (Along the ring's middle, a row's height apart.)
-        let mid = (56.0 * s + 10.0 * s + radius_y(height, s)) / 2.0;
-        2.0 * ROUND_SPREAD.to_radians() * mid / (ROUND_ROW * s)
+        // (Along the ring's middle, a row's height apart; petals need
+        // room either side of their text, and their gaps.)
+        let mid = (56.0 * s + 10.0 * s + radius_y(height, s)) / 2.0 * (1.0 + stretch.max(1.0)) / 2.0;
+        let row = if matches!(theme, Theme::Petals | Theme::Daisy) { PETAL_ROW } else { ROUND_ROW };
+        2.0 * ROUND_SPREAD.to_radians() * mid / (row * s)
     } else {
         2.0 * radius_y(height, s) * SPREAD.to_radians().sin() / (ROW * s)
     };
@@ -54,6 +58,7 @@ fn most(theme: Theme, height: f32, s: f32) -> usize {
 
 impl Level {
     fn new(mut menu: Menu, most: usize) -> Self {
+        let src = menu.kind;
         let more = (menu.items.len() > most).then(|| {
             let rest = menu.items.split_off(most - 1);
             Menu { kind: None, ..Menu::new(tr("More…"), rest) }
@@ -63,7 +68,7 @@ impl Level {
             // (Its toggles can't be rebuilt in place once split.)
             menu.kind = None;
         }
-        Level { menu, more, chosen: None }
+        Level { menu, more, chosen: None, src }
     }
 
     fn is_more(&self, i: usize) -> bool {
@@ -148,6 +153,7 @@ const ROUND_SPREAD: f32 = 80.0;
 /// Round ones: items no closer than this along the ring's middle; their
 /// text this much bigger than on an arc.
 const ROUND_ROW: f32 = 34.0;
+const PETAL_ROW: f32 = 44.0;
 const ROUND_TEXT: f32 = 1.12;
 
 /// Where the items of a fan of `n` sit: their angles (degrees, up
@@ -175,7 +181,7 @@ pub fn pointed(theme: Theme, n: usize, angle: f32) -> Option<usize> {
 
 impl App {
     fn fan_level(&self, menu: Menu) -> Level {
-        Level::new(menu, most(Theme::of(self.cfg.fan.theme), self.ctx.content_rect().height(), self.cfg.fan.size))
+        Level::new(menu, most(Theme::of(self.cfg.fan.theme), self.ctx.content_rect().height(), self.cfg.fan.size, self.cfg.fan.length))
     }
 
     /// Nothing else open the fan would cover or take keys from.
@@ -312,10 +318,12 @@ impl App {
         if level.is_more(i) {
             let more = level.more.as_ref().map(|m| Menu { kind: None, ..Menu::new(&m.title, m.items.clone()) });
             if let Some(m) = more {
+                let src = level.src;
                 if let Some(cur) = self.fan.levels.last_mut() {
                     cur.chosen = Some(i);
                 }
-                let l = self.fan_level(m);
+                let mut l = self.fan_level(m);
+                l.src = src;
                 self.fan.levels.push(l);
                 self.fan.hot = None;
                 self.slide(Slide::In);
@@ -323,7 +331,7 @@ impl App {
             return true;
         }
         let Some(it) = level.menu.items.get(i).filter(|it| it.enabled).cloned() else { return true };
-        let kind = level.menu.kind;
+        let src = level.src;
         match it.cmd {
             Cmd::Submenu(k) => {
                 let sub = self.build_submenu(k);
@@ -337,15 +345,20 @@ impl App {
             }
             cmd if it.keep_open => {
                 self.run(cmd);
-                // Rebuilt in place, so the ticks follow.
-                let fresh = match kind {
+                // Its menu again, so the ticks follow (its items matched
+                // by what they do: it may be split under "More…").
+                let fresh = match src {
                     Some(k) => Some(self.build_submenu(k)),
-                    None if self.fan.levels.len() == 1 => self.fan_menu(self.fan.global),
-                    None => None,
+                    None => self.fan_menu(self.fan.global),
                 };
                 if let (Some(m), Some(l)) = (fresh, self.fan.levels.last_mut()) {
-                    if m.items.len() == l.menu.items.len() {
-                        l.menu.items = m.items;
+                    for it in &mut l.menu.items {
+                        let what = format!("{:?}", it.cmd);
+                        if let Some(f) = m.items.iter().find(|f| format!("{:?}", f.cmd) == what) {
+                            it.checked = f.checked;
+                            it.enabled = f.enabled;
+                            it.label = f.label.clone();
+                        }
                     }
                 }
             }
@@ -567,7 +580,68 @@ fn fit(p: &egui::Painter, text: &str, font: &FontId, color: Color32, max: f32) -
             return g;
         }
     }
-    g
+    p.layout_no_wrap("…".into(), font.clone(), color)
+}
+
+/// Where text goes along a petal half as wide as `hw(radius)` from `r0`
+/// to `r1`: its size (at most `most`, smaller in a narrow one) and the
+/// stretch where the petal's wide enough for it with `pad` above and
+/// below.
+fn text_run(hw: impl Fn(f32) -> f32, r0: f32, r1: f32, most: f32, pad: f32) -> (f32, f32, f32) {
+    const N: usize = 48;
+    let at = |k: usize| r0 + (r1 - r0) * k as f32 / N as f32;
+    let widest = (0..=N).map(|k| hw(at(k))).fold(0.0, f32::max);
+    let size = most.min((widest * 0.9 - pad) / 0.65).max(9.0);
+    let need = size * 0.65 + pad;
+    // The longest stretch that wide.
+    let (mut best, mut start) = ((r0, r0), None);
+    for k in 0..=N {
+        match (hw(at(k)) >= need, start) {
+            (true, None) => start = Some(at(k)),
+            (false, Some(a)) => {
+                if at(k) - a > best.1 - best.0 {
+                    best = (a, at(k));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(a) = start {
+        if r1 - a > best.1 - best.0 {
+            best = (a, r1);
+        }
+    }
+    (size, best.0, best.1)
+}
+
+/// A shape along `u` from `r0` to `r1` out of `c`, half as wide as
+/// `hw(radius)` either side (filled strip by strip: it needn't be convex).
+#[allow(clippy::too_many_arguments)]
+fn petal(p: &egui::Painter, c: Pos2, u: Vec2, r0: f32, r1: f32, hw: impl Fn(f32) -> f32, fill: Color32, stroke: Stroke) {
+    const N: usize = 24;
+    let n = vec2(-u.y, u.x);
+    let pts: Vec<(Pos2, Pos2)> = (0..=N)
+        .map(|k| {
+            let r = r0 + (r1 - r0) * k as f32 / N as f32;
+            let w = hw(r).max(0.0);
+            (c + u * r + n * w, c + u * r - n * w)
+        })
+        .collect();
+    let mut mesh = egui::Mesh::default();
+    for (a, b) in &pts {
+        mesh.colored_vertex(*a, fill);
+        mesh.colored_vertex(*b, fill);
+    }
+    for k in 0..N as u32 {
+        let i = 2 * k;
+        mesh.add_triangle(i, i + 1, i + 2);
+        mesh.add_triangle(i + 1, i + 3, i + 2);
+    }
+    p.add(mesh);
+    let mut edge: Vec<Pos2> = pts.iter().map(|q| q.0).collect();
+    edge.extend(pts.iter().rev().map(|q| q.1));
+    p.add(egui::Shape::closed_line(edge, stroke));
 }
 
 /// Text along a ray at `angle` (degrees, up positive), from `from` out
@@ -643,6 +717,12 @@ fn shaded_sector(p: &egui::Painter, c: Pos2, r0: f32, r1: &dyn Fn(f32) -> f32, a
     p.add(mesh);
 }
 
+/// Round ones: how far out a slice `step` degrees wide has room for text
+/// `font` high with `pad` above and below.
+fn roomy(font: f32, pad: f32, step: f32) -> f32 {
+    (font * 0.65 + pad) / (step.to_radians() / 2.0).sin().max(0.01)
+}
+
 /// One level's items, the way the theme draws them.
 pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[Shown], v: &egui::Visuals) {
     let s = g.s;
@@ -706,9 +786,9 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 sector(p, g.anchor, r0, &r1, a - step / 2.0, a + step / 2.0, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
-                // (Out from the narrow middle, where they'd crowd; clear
-                // of the outer edge.)
-                let from = r0 + (r1(a) - r0) * 0.24;
+                // (Out from the narrow middle to where there's room above
+                // and below it; clear of the outer edge.)
+                let from = (r0 + (r1(a) - r0) * 0.24).max(roomy(g.font * ROUND_TEXT, 6.0 * s, step));
                 along(p, g.anchor, a, from, r1(a) - from - 26.0 * s, &it.label, &round_font, color, false);
             }
             Theme::Glow => {
@@ -743,7 +823,7 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                     p.line_segment([g.anchor + d * (r0 + 0.3 * span), g.anchor + d * (r0 + 0.7 * span)], edge);
                 }
                 let c = if lit { v.strong_text_color().gamma_multiply(alpha) } else { color };
-                let from = r0 + (r1(a) - r0) * 0.24;
+                let from = (r0 + (r1(a) - r0) * 0.24).max(roomy(g.font * ROUND_TEXT, 6.0 * s, step));
                 along(p, g.anchor, a, from, r1(a) - from - 26.0 * s, &it.label, &round_font, c, false);
             }
             Theme::Daisy => {
@@ -752,8 +832,8 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let r0 = g.outer + 8.0 * s;
                 let len = (g.ry * 0.94 - r0).max(60.0 * s) * l.grow;
                 let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
-                let w = ((r1 - 0.2 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.72).clamp(6.0 * s, 26.0 * s * g.stretch.sqrt());
-                let w0 = (w * 0.3).max(2.0 * s);
+                let w = ((r1 - 0.15 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.78).clamp(6.0 * s, 34.0 * s * g.stretch.sqrt());
+                let w0 = (w * 0.25).max(2.0 * s);
                 let cap = r1 - w;
                 let nrm = vec2(-u.y, u.x);
                 let mut pts = vec![g.anchor + u * r0 + nrm * w0, g.anchor + u * cap + nrm * w];
@@ -765,34 +845,37 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
-                let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
-                // (Well clear of both ends.)
-                along(p, g.anchor, a, r0 + (r1 - r0) * 0.26, (r1 - r0) * 0.56, &it.label, &f, color, true);
+                // The text where the petal's wide enough for it with room
+                // above and below (smaller in narrow ones), clear of the
+                // round end.
+                let hw = |r: f32| {
+                    if r <= cap {
+                        w0 + (w - w0) * ((r - r0) / (cap - r0).max(1.0)).clamp(0.0, 1.0)
+                    } else {
+                        (w * w - (r - cap).powi(2)).max(0.0).sqrt()
+                    }
+                };
+                let (fs, from, to) = text_run(hw, r0, r1, g.font * ROUND_TEXT, 5.0 * s);
+                along(p, g.anchor, a, from, (to - from - 4.0 * s).max(10.0), &it.label, &FontId::proportional(fs), color, true);
             }
             Theme::Petals => {
+                // Wider the further out (as their slice is), widest well
+                // out where the text goes; a gap between neighbours.
                 let r0 = g.outer + 6.0 * s;
                 let len = (g.ry * 0.92 - r0).max(60.0 * s) * l.grow;
                 let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
-                let mid = r0 + 0.55 * (r1 - r0);
-                // (A gap between neighbours.)
-                let w = (mid * (step.to_radians() / 2.0).sin() * 0.74).clamp(6.0 * s, 28.0 * s * g.stretch.sqrt());
-                let nrm = vec2(-u.y, u.x);
-                let mut pts: Vec<Pos2> = (0..=16)
-                    .map(|k| {
-                        let t = k as f32 / 16.0;
-                        g.anchor + u * (r0 + t * (r1 - r0)) + nrm * (w * (std::f32::consts::PI * t).sin())
-                    })
-                    .collect();
-                pts.extend((1..16).rev().map(|k| {
-                    let t = k as f32 / 16.0;
-                    g.anchor + u * (r0 + t * (r1 - r0)) - nrm * (w * (std::f32::consts::PI * t).sin())
-                }));
+                let half = (step.to_radians() / 2.0).sin();
+                let hw = |r: f32| {
+                    let t = ((r - r0) / (r1 - r0)).clamp(0.0, 1.0);
+                    0.78 * half * r * (std::f32::consts::PI * t.powf(1.5)).sin().max(0.0)
+                };
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
-                p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
-                let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
-                // (Well clear of both ends.)
-                along(p, g.anchor, a, r0 + (r1 - r0) * 0.24, (r1 - r0) * 0.56, &it.label, &f, color, true);
+                petal(p, g.anchor, u, r0, r1, hw, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
+                // The text where the petal's wide enough for it with room
+                // above and below (smaller in narrow ones).
+                let (fs, from, to) = text_run(hw, r0, r1, g.font * ROUND_TEXT, 5.0 * s);
+                along(p, g.anchor, a, from, (to - from).max(10.0), &it.label, &FontId::proportional(fs), color, true);
             }
         }
     }
@@ -806,7 +889,7 @@ mod tests {
     fn fan_points_at_the_nearest() {
         let a = angles(Theme::Lines, 5);
         assert!(a[0] > 40.0 && a[4] < -40.0 && a[2].abs() < 0.01, "{a:?}");
-        assert!(most(Theme::Lines, 680.0, 1.0) >= 17 && most(Theme::Lines, 400.0, 1.0) < most(Theme::Lines, 680.0, 1.0));
+        assert!(most(Theme::Lines, 680.0, 1.0, 1.0) >= 17 && most(Theme::Lines, 400.0, 1.0, 1.0) < most(Theme::Lines, 680.0, 1.0, 1.0));
         assert!(a.windows(2).all(|w| w[0] > w[1]));
         assert_eq!(pointed(Theme::Lines, 5, 0.0), Some(2));
         assert_eq!(pointed(Theme::Lines, 5, 89.0), Some(0));
@@ -821,7 +904,7 @@ mod tests {
         assert_eq!(angles(Theme::Daisy, 4), r);
         assert_eq!(angles(Theme::Glow, 4), r);
         // Round: roomier than on an arc.
-        assert!(most(Theme::Glow, 1000.0, 1.0) < most(Theme::Lines, 1000.0, 1.0));
+        assert!(most(Theme::Glow, 1000.0, 1.0, 1.0) < most(Theme::Lines, 1000.0, 1.0, 1.0) && most(Theme::Petals, 1000.0, 1.0, 1.0) < most(Theme::Glow, 1000.0, 1.0, 1.0) && most(Theme::Petals, 1000.0, 1.0, 2.0) > most(Theme::Petals, 1000.0, 1.0, 1.0));
     }
 }
 

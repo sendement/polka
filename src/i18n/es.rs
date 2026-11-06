@@ -82,6 +82,7 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "Origen desconocido: %n"),
     ("Right pane opens where it was", "El panel derecho se abre donde estaba"),
     ("Fan menu", "Menú en abanico"),
+    ("View and sorting", "Vista y orden"),
     ("Petal length", "Largo de pétalos"),
     ("Daisy", "Margarita"),
     ("Glow", "Brillo"),

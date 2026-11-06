@@ -695,7 +695,9 @@ pub enum Cmd {
     GoTo,
     SelectAll,
     Help,
-    /// Polka's versions on GitHub: updating, going back.
+    /// Polka's versions on GitHub: updating, going back. (Settings →
+    /// About opens them; tests straight.)
+    #[allow(dead_code)]
     Versions,
     Quit,
     Nothing,
@@ -2962,6 +2964,8 @@ impl App {
                 Action::LeftTrigger => self.osk_key(OskKey::Shift),
                 Action::View => self.osk_key(OskKey::Lang),
                 Action::Menu | Action::RightTrigger => self.osk_key(OskKey::Ok),
+                // Filter ⇄ search in subfolders (the bar's box).
+                Action::LeftStick => self.bar_toggle_search(),
                 _ => {}
             },
             // The pad: → over to the highlighted theme's folder colours,
@@ -4022,17 +4026,14 @@ impl App {
             MenuItem { enabled: writable, ..item(tr("New folder"), Cmd::NewFolder) },
             MenuItem { enabled: writable, ..item(tr("New document"), Cmd::Submenu(SubMenu::Templates(0))) },
             MenuItem { enabled: self.clip.is_some() && writable, ..item(tr("Paste"), Cmd::Paste) },
-            item(tr("Filter…"), Cmd::Filter),
-            MenuItem { enabled: local, ..item(tr("Search…"), Cmd::Search) },
+            // The filter, or (its box ticked) a search in subfolders.
+            item(tr("Find…"), Cmd::FindOrFilter),
             MenuItem { enabled: local, ..item(tr("Open terminal here"), Cmd::TermOpen(self.pane().loc.local_path().map(|p| p.to_path_buf()))) },
-            MenuItem { enabled: self.cfg.torrent.enabled, ..item(tr("Torrents"), Cmd::TorrentsOpen) },
             item(tr("Go to path…"), Cmd::GoTo),
             item(tr("Add network place…"), Cmd::NetAdd),
             item(tr("Select all"), Cmd::SelectAll),
-            item(tr("View"), Cmd::Submenu(SubMenu::View)),
-            item(tr("Sorting"), Cmd::Submenu(SubMenu::Sort)),
+            item(tr("View and sorting"), Cmd::Submenu(SubMenu::View)),
             item(tr("Settings…"), Cmd::Settings),
-            item(tr("Versions and updates…"), Cmd::Versions),
             item(tr("Controls"), Cmd::Help),
             item(tr("Quit"), Cmd::Quit),
         ]);
@@ -4044,7 +4045,7 @@ impl App {
         let (title, items) = match kind {
             SubMenu::TermHistory | SubMenu::TermSaved | SubMenu::TermLaunch | SubMenu::TermTabs | SubMenu::TermEntry(..) => return self.term_submenu(kind),
             SubMenu::View => (
-                tr("View").to_string(),
+                tr("View and sorting").to_string(),
                 vec![
                     toggle(tr("List"), Cmd::SetView(ViewMode::List), c.view == ViewMode::List),
                     toggle(tr("Grid"), Cmd::SetView(ViewMode::Grid), c.view == ViewMode::Grid),
@@ -4054,6 +4055,12 @@ impl App {
                     toggle(tr("Thumbnails"), Cmd::ToggleThumbnails, c.thumbnails),
                     item(tr("Status bar"), Cmd::Submenu(SubMenu::Status)),
                     item(tr("Icon theme…"), Cmd::IconThemes),
+                    toggle(tr("By name"), Cmd::Sort(SortKey::Name), c.sort == SortKey::Name),
+                    toggle(tr("By size"), Cmd::Sort(SortKey::Size), c.sort == SortKey::Size),
+                    toggle(tr("By date"), Cmd::Sort(SortKey::Date), c.sort == SortKey::Date),
+                    toggle(tr("By type"), Cmd::Sort(SortKey::Type), c.sort == SortKey::Type),
+                    toggle(tr("Reverse order"), Cmd::ToggleSortReverse, c.sort_reverse),
+                    toggle(tr("Folders first"), Cmd::ToggleDirsFirst, c.dirs_first),
                 ],
             ),
             SubMenu::Strip => {
