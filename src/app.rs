@@ -2880,6 +2880,9 @@ impl App {
             Action::Home => self.side_cursor = 0,
             Action::End => self.side_cursor = n.saturating_sub(1),
             Action::Right | Action::Back => self.focus = Focus::Panes,
+            // Two panes: the triggers pick which one a place opens in (the
+            // sidebar keeps the cursor).
+            Action::LeftTrigger | Action::RightTrigger if self.cfg.dual => self.set_side((a == Action::RightTrigger) as usize),
             Action::Accept => {
                 if let Some(it) = self.side_items.get(self.side_cursor).cloned() {
                     // The sidebar keeps the focus: the place shows, and → or

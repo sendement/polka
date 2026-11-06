@@ -8542,6 +8542,10 @@ fn fan_screens() {
         assert_eq!(h.state().fan.hot, Some(3), "{name}");
         settle(&mut h);
         shot(&mut h, &format!("fan6-{name}"));
+        // A long one pointed at: its whole text (the petal reaching out).
+        point(&mut h, 7);
+        settle(&mut h);
+        shot(&mut h, &format!("fan6-{name}-long-text"));
         stick(&mut h, 0.0, 0.0);
     }
     // Longer (straight right): still pointing where drawn.
@@ -8727,4 +8731,49 @@ fn app_menu_screens() {
     press(&mut h, &[Action::Back]);
     h.state_mut().cfg.search_subfolders = true;
     h.state_mut().cfg.save();
+}
+
+/// Two panes, the pad on the sidebar: the triggers pick the pane a place
+/// opens in (framed so), the cursor staying on the sidebar; ✕ opens it
+/// there, the other pane left as it was.
+#[test]
+#[ignore]
+fn sidebar_pane_screens() {
+    use crate::app::{Cmd, Focus};
+    use crate::input::Action;
+    use crate::vfs::Location;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir.clone());
+    if !h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    h.state_mut().pad_active = true;
+    let cfg = h.state().cfg.clone();
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(Location::Local(dir.join("folder")), None, &cfg);
+    h.state_mut().set_side(0);
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(&mut h);
+    h.state_mut().focus_sidebar();
+    settle(&mut h);
+    // RT: the right pane, still on the sidebar.
+    press(&mut h, &[Action::RightTrigger]);
+    assert_eq!(h.state().side(), 1);
+    assert_eq!(h.state().focus, Focus::Sidebar, "left the sidebar");
+    shot(&mut h, "sp0-right-picked");
+    press(&mut h, &[Action::LeftTrigger]);
+    assert_eq!(h.state().side(), 0);
+    assert_eq!(h.state().focus, Focus::Sidebar);
+    press(&mut h, &[Action::RightTrigger]);
+    // A place (Home): opens in the right one; the left one as it was.
+    let home = dirs::home_dir().unwrap();
+    let i = h.state().side_items.iter().position(|it| it.loc == Location::Local(home.clone())).expect("no Home");
+    h.state_mut().side_cursor = i;
+    press(&mut h, &[Action::Accept]);
+    assert_eq!(h.state().pane_at(1).loc, Location::Local(home), "not opened in the right pane");
+    assert_eq!(h.state().pane_at(0).loc, Location::Local(dir.clone()), "the left pane moved");
+    shot(&mut h, "sp1-opened-right");
+    h.state_mut().focus = Focus::Panes;
+    h.state_mut().run(Cmd::ToggleDual);
 }

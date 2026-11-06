@@ -733,7 +733,12 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
     let step = 2.0 * ROUND_SPREAD / n.max(1) as f32;
     let font = FontId::proportional(g.font);
     let round_font = FontId::proportional(g.font * ROUND_TEXT);
-    for (i, a) in angles(theme, n).into_iter().enumerate() {
+    // (The one pointed at last: over its neighbours as it stands out.)
+    let angs = angles(theme, n);
+    let is_lit = |i: &usize| l.hot == Some(*i) || (!l.last && l.chosen == Some(*i));
+    let order: Vec<usize> = (0..n).filter(|i| !is_lit(i)).chain((0..n).filter(is_lit)).collect();
+    for i in order {
+        let a = angs[i];
         let it = &items[i];
         let alpha = if l.last || l.chosen == Some(i) { l.alpha } else { l.alpha * l.others };
         if alpha <= 0.01 {
@@ -831,10 +836,38 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 // either side), then round.
                 let r0 = g.outer + 8.0 * s;
                 let len = (g.ry * 0.94 - r0).max(60.0 * s) * l.grow;
-                let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
-                let w = ((r1 - 0.15 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.78).clamp(6.0 * s, 34.0 * s * g.stretch.sqrt());
-                let w0 = (w * 0.25).max(2.0 * s);
-                let cap = r1 - w;
+                let shape = |r1: f32| {
+                    let w = ((r1 - 0.15 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.78).clamp(6.0 * s, 34.0 * s * g.stretch.sqrt());
+                    (w, (w * 0.25).max(2.0 * s), r1 - w)
+                };
+                let hw_of = |(w, w0, cap): (f32, f32, f32)| {
+                    move |r: f32| {
+                        if r <= cap {
+                            w0 + (w - w0) * ((r - r0) / (cap - r0).max(1.0)).clamp(0.0, 1.0)
+                        } else {
+                            (w * w - (r - cap).powi(2)).max(0.0).sqrt()
+                        }
+                    }
+                };
+                // The text where the petal's wide enough for it with room
+                // above and below (smaller in narrow ones), clear of the
+                // round end; the one pointed at bigger, the petal reaching
+                // out as far as its whole text takes.
+                let most = g.font * ROUND_TEXT * if lit { 1.12 } else { 1.0 };
+                let mut r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
+                let mut run = text_run(hw_of(shape(r1)), r0, r1, most, 5.0 * s);
+                if lit {
+                    for _ in 0..4 {
+                        let gw = p.layout_no_wrap(it.label.clone(), FontId::proportional(run.0), color).size().x;
+                        let short = gw + 12.0 * s - (run.2 - run.1 - 4.0 * s);
+                        if short <= 0.0 {
+                            break;
+                        }
+                        r1 += short * 1.1;
+                        run = text_run(hw_of(shape(r1)), r0, r1, most, 5.0 * s);
+                    }
+                }
+                let (w, w0, cap) = shape(r1);
                 let nrm = vec2(-u.y, u.x);
                 let mut pts = vec![g.anchor + u * r0 + nrm * w0, g.anchor + u * cap + nrm * w];
                 pts.extend((1..16).map(|k| {
@@ -845,17 +878,7 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
-                // The text where the petal's wide enough for it with room
-                // above and below (smaller in narrow ones), clear of the
-                // round end.
-                let hw = |r: f32| {
-                    if r <= cap {
-                        w0 + (w - w0) * ((r - r0) / (cap - r0).max(1.0)).clamp(0.0, 1.0)
-                    } else {
-                        (w * w - (r - cap).powi(2)).max(0.0).sqrt()
-                    }
-                };
-                let (fs, from, to) = text_run(hw, r0, r1, g.font * ROUND_TEXT, 5.0 * s);
+                let (fs, from, to) = run;
                 along(p, g.anchor, a, from, (to - from - 4.0 * s).max(10.0), &it.label, &FontId::proportional(fs), color, true);
             }
             Theme::Petals => {
@@ -863,18 +886,35 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 // out where the text goes; a gap between neighbours.
                 let r0 = g.outer + 6.0 * s;
                 let len = (g.ry * 0.92 - r0).max(60.0 * s) * l.grow;
-                let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
                 let half = (step.to_radians() / 2.0).sin();
-                let hw = |r: f32| {
-                    let t = ((r - r0) / (r1 - r0)).clamp(0.0, 1.0);
-                    0.78 * half * r * (std::f32::consts::PI * t.powf(1.5)).sin().max(0.0)
+                let hw_of = |r1: f32| {
+                    move |r: f32| {
+                        let t = ((r - r0) / (r1 - r0)).clamp(0.0, 1.0);
+                        0.78 * half * r * (std::f32::consts::PI * t.powf(1.5)).sin().max(0.0)
+                    }
                 };
+                // The text where the petal's wide enough for it with room
+                // above and below (smaller in narrow ones); the one pointed
+                // at bigger, the petal reaching out as far as its whole
+                // text takes.
+                let most = g.font * ROUND_TEXT * if lit { 1.12 } else { 1.0 };
+                let mut r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
+                let mut run = text_run(hw_of(r1), r0, r1, most, 5.0 * s);
+                if lit {
+                    for _ in 0..4 {
+                        let gw = p.layout_no_wrap(it.label.clone(), FontId::proportional(run.0), color).size().x;
+                        let short = gw + 12.0 * s - (run.2 - run.1);
+                        if short <= 0.0 {
+                            break;
+                        }
+                        r1 += short * 1.3;
+                        run = text_run(hw_of(r1), r0, r1, most, 5.0 * s);
+                    }
+                }
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
-                petal(p, g.anchor, u, r0, r1, hw, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
-                // The text where the petal's wide enough for it with room
-                // above and below (smaller in narrow ones).
-                let (fs, from, to) = text_run(hw, r0, r1, g.font * ROUND_TEXT, 5.0 * s);
+                petal(p, g.anchor, u, r0, r1, hw_of(r1), fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
+                let (fs, from, to) = run;
                 along(p, g.anchor, a, from, (to - from).max(10.0), &it.label, &FontId::proportional(fs), color, true);
             }
         }

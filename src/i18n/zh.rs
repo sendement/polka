@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "无法得知原位置：%n"),
     ("Right pane opens where it was", "右侧面板在上次的位置打开"),
     ("Fan menu", "扇形菜单"),
+    ("Left pane", "左窗格"),
+    ("Right pane", "右窗格"),
     ("View and sorting", "视图和排序"),
     ("Petal length", "花瓣长度"),
     ("Daisy", "雏菊"),

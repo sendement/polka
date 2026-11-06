@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "Qayerdan oʻchirilgani nomaʼlum: %n"),
     ("Right pane opens where it was", "Oʻng panel avvalgi joyida ochiladi"),
     ("Fan menu", "Yelpigʻich menyu"),
+    ("Left pane", "Chap panel"),
+    ("Right pane", "Oʻng panel"),
     ("View and sorting", "Koʻrinish va saralash"),
     ("Petal length", "Gulbarg uzunligi"),
     ("Daisy", "Moychechak"),

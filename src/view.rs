@@ -1399,7 +1399,12 @@ impl App {
             None if self.torrents_shown() && self.focus == Focus::Panes => self.torrents_hints(),
             None if self.icon_pick.is_some() => vec![(Action::Accept, tr("Choose")), (Action::Actions, tr("Cancel")), (Action::Back, tr("Back"))],
             None if self.focus == Focus::Sidebar => {
-                vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions")), (Action::Back, tr("Back"))]
+                let mut v = vec![(Action::Accept, tr("Open")), (Action::Actions, tr("Actions"))];
+                if self.cfg.dual {
+                    v.extend([(Action::LeftTrigger, tr("Left pane")), (Action::RightTrigger, tr("Right pane"))]);
+                }
+                v.push((Action::Back, tr("Back")));
+                v
             }
             None => vec![
                 (Action::Accept, tr("Open")),
@@ -1627,6 +1632,7 @@ impl App {
         // for keeps its frame.)
         let typing_bar = matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar());
         let focused = self.focus == Focus::Panes && (self.overlay.is_none() || typing_bar);
+        let on_sidebar = self.focus == Focus::Sidebar && self.overlay.is_none();
         let active = self.side();
         // Each side shows its own tab.
         let tab_of = [self.tab_of(0), self.tab_of(1)];
@@ -1738,6 +1744,9 @@ impl App {
                     let is_active = active == idx;
                     let stroke = if is_active && focused {
                         Stroke::new(1.5, child.visuals().selection.bg_fill)
+                    } else if is_active && on_sidebar {
+                        // (The one a sidebar place opens in.)
+                        Stroke::new(1.5, child.visuals().selection.bg_fill.gamma_multiply(0.5))
                     } else {
                         Stroke::new(1.0, child.visuals().widgets.noninteractive.bg_stroke.color)
                     };

@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "Невідомо, звідки видалено: %n"),
     ("Right pane opens where it was", "Права панель відкривається там, де була"),
     ("Fan menu", "Віялове меню"),
+    ("Left pane", "Ліва панель"),
+    ("Right pane", "Права панель"),
     ("View and sorting", "Вигляд і сортування"),
     ("Petal length", "Довжина пелюсток"),
     ("Daisy", "Ромашка"),

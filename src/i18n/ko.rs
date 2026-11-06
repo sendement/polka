@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),
     ("Right pane opens where it was", "오른쪽 창을 이전 위치에서 열기"),
     ("Fan menu", "부채꼴 메뉴"),
+    ("Left pane", "왼쪽 창"),
+    ("Right pane", "오른쪽 창"),
     ("View and sorting", "보기 및 정렬"),
     ("Petal length", "꽃잎 길이"),
     ("Daisy", "데이지"),

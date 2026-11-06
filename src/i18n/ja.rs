@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "元の場所が不明: %n"),
     ("Right pane opens where it was", "右ペインを前回の場所で開く"),
     ("Fan menu", "扇形メニュー"),
+    ("Left pane", "左ペイン"),
+    ("Right pane", "右ペイン"),
     ("View and sorting", "表示と並べ替え"),
     ("Petal length", "花びらの長さ"),
     ("Daisy", "デイジー"),
