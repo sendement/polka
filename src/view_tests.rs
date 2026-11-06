@@ -8538,6 +8538,18 @@ fn fan_screens() {
         shot(&mut h, &format!("fan6-{name}"));
         stick(&mut h, 0.0, 0.0);
     }
+    // Longer (straight right): still pointing where drawn.
+    h.state_mut().cfg.fan.length = 1.8;
+    for (t, name) in [(5u8, "glow-long"), (4, "daisy-long")] {
+        h.state_mut().cfg.fan.theme = t;
+        stick(&mut h, 0.97, 0.0);
+        point(&mut h, 6);
+        assert_eq!(h.state().fan.hot, Some(6), "{name}");
+        settle(&mut h);
+        shot(&mut h, &format!("fan6-{name}"));
+        stick(&mut h, 0.0, 0.0);
+    }
+    h.state_mut().cfg.fan.length = 1.0;
     h.state_mut().cfg.fan.theme = 0;
     // A text file open: the editor's own menu.
     h.state_mut().pane_mut().set_cursor(1);
@@ -8577,6 +8589,8 @@ fn fan_screens() {
     }
     settle(&mut h);
     shot(&mut h, "fan7-settings-segments");
+    h.state_mut().settings_step(crate::app::row::FAN_LENGTH, 1.0);
+    assert!((h.state().cfg.fan.length - 1.1).abs() < 0.01);
     h.state_mut().cfg.fan.linger = 0.4;
     h.state_mut().settings_step(crate::app::row::FAN_LINGER, 1.0);
     assert!((h.state().cfg.fan.linger - 0.5).abs() < 0.01);

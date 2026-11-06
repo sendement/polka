@@ -182,17 +182,21 @@ pub struct FanPrefs {
     /// Back in the middle, it stays this long (seconds) before it goes:
     /// the stick can swing over to the other side.
     pub linger: f32,
+    /// Round styles: how far out the segments and petals reach straight
+    /// right, as many times as up and down (1..2).
+    pub length: f32,
 }
 
 pub const FAN_THEMES: u8 = 6;
 pub const FAN_LINGER: (f32, f32, f32) = (0.0, 1.0, 0.1);
+pub const FAN_LENGTH: (f32, f32, f32) = (1.0, 2.0, 0.1);
 
 pub const FAN_SIZE: (f32, f32, f32) = (0.7, 1.5, 0.1);
 pub const FAN_REACH: (f32, f32, f32) = (0.5, 0.95, 0.05);
 
 impl Default for FanPrefs {
     fn default() -> Self {
-        Self { on: true, stick: 0, size: 1.0, reach: 0.7, anim: true, theme: 0, linger: 0.4 }
+        Self { on: true, stick: 0, size: 1.0, reach: 0.7, anim: true, theme: 0, linger: 0.4, length: 1.0 }
     }
 }
 

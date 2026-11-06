@@ -1239,7 +1239,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
         6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
         7 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
-        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_THEME, row::FAN_SIZE, row::FAN_REACH, row::FAN_LINGER, row::FAN_ANIM]),
+        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_THEME, row::FAN_LENGTH, row::FAN_SIZE, row::FAN_REACH, row::FAN_LINGER, row::FAN_ANIM]),
         _ => vec![SItem::Versions, SItem::Page],
     }
 }
@@ -1343,6 +1343,7 @@ pub mod row {
     pub const FAN_ANIM: usize = 41;
     pub const FAN_THEME: usize = 42;
     pub const FAN_LINGER: usize = 43;
+    pub const FAN_LENGTH: usize = 44;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -4493,6 +4494,10 @@ impl App {
             row::FAN_THEME => {
                 let n = crate::config::FAN_THEMES as isize;
                 self.cfg.fan.theme = (self.cfg.fan.theme as isize + if d < 0.0 { -1 } else { 1 }).rem_euclid(n) as u8;
+            }
+            row::FAN_LENGTH => {
+                step(&mut self.cfg.fan.length, crate::config::FAN_LENGTH);
+                self.cfg.fan.length = (self.cfg.fan.length * 10.0).round() / 10.0;
             }
             row::FAN_LINGER => {
                 step(&mut self.cfg.fan.linger, crate::config::FAN_LINGER);

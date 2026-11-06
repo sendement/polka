@@ -442,7 +442,7 @@ impl App {
         if show <= 0.0 || self.fan.levels.is_empty() {
             return;
         }
-        let geo = Geo { anchor, outer, s, ry: radius_y(area.height(), s), font: 15.0 * s.max(0.85) };
+        let geo = Geo { anchor, outer, s, ry: radius_y(area.height(), s), font: 15.0 * s.max(0.85), stretch: self.cfg.fan.length };
         let gap = 190.0 * s;
         let depth = self.fan.levels.len() - 1;
         if !theme.round() {
@@ -517,6 +517,18 @@ pub struct Geo {
     pub ry: f32,
     /// The items' text size.
     pub font: f32,
+    /// Round ones: how much further out they reach straight right than
+    /// up and down (an ellipse; 1 a circle).
+    pub stretch: f32,
+}
+
+impl Geo {
+    /// Round ones: how far out (from the middle) at `angle` (degrees),
+    /// for items `len` long up and down from `r0` out.
+    fn reach(&self, r0: f32, len: f32, angle: f32) -> f32 {
+        let (k, a) = (self.stretch.max(1.0), angle.to_radians());
+        (r0 + len) * k / (a.cos().powi(2) + (k * a.sin()).powi(2)).sqrt()
+    }
 }
 
 /// How one level shows just now.
@@ -574,16 +586,17 @@ fn along(p: &egui::Painter, anchor: Pos2, angle: f32, from: f32, len: f32, text:
 
 /// A ring's piece: from `r0` to `r1`, between two angles (degrees).
 #[allow(clippy::too_many_arguments)]
-fn sector(p: &egui::Painter, c: Pos2, r0: f32, r1: f32, a0: f32, a1: f32, fill: Color32, stroke: Stroke) {
+fn sector(p: &egui::Painter, c: Pos2, r0: f32, r1: &dyn Fn(f32) -> f32, a0: f32, a1: f32, fill: Color32, stroke: Stroke) {
     let steps = ((a1 - a0).abs() / 3.0).ceil().max(2.0) as usize;
-    let at = |r: f32, k: usize| {
-        let a = (a0 + (a1 - a0) * k as f32 / steps as f32).to_radians();
-        c + vec2(a.cos(), -a.sin()) * r
+    let at = |outer: bool, k: usize| {
+        let deg = a0 + (a1 - a0) * k as f32 / steps as f32;
+        let a = deg.to_radians();
+        c + vec2(a.cos(), -a.sin()) * if outer { r1(deg) } else { r0 }
     };
     let mut mesh = egui::Mesh::default();
     for k in 0..=steps {
-        mesh.colored_vertex(at(r0, k), fill);
-        mesh.colored_vertex(at(r1, k), fill);
+        mesh.colored_vertex(at(false, k), fill);
+        mesh.colored_vertex(at(true, k), fill);
     }
     for k in 0..steps as u32 {
         let i = 2 * k;
@@ -591,8 +604,8 @@ fn sector(p: &egui::Painter, c: Pos2, r0: f32, r1: f32, a0: f32, a1: f32, fill: 
         mesh.add_triangle(i + 1, i + 3, i + 2);
     }
     p.add(mesh);
-    let mut edge: Vec<Pos2> = (0..=steps).map(|k| at(r0, k)).collect();
-    edge.extend((0..=steps).rev().map(|k| at(r1, k)));
+    let mut edge: Vec<Pos2> = (0..=steps).map(|k| at(false, k)).collect();
+    edge.extend((0..=steps).rev().map(|k| at(true, k)));
     p.add(egui::Shape::closed_line(edge, stroke));
 }
 
@@ -605,16 +618,17 @@ fn blend(under: Color32, top: Color32) -> Color32 {
 
 /// A ring's piece coloured by `color(across the ring 0..1, along it 0..1)`.
 #[allow(clippy::too_many_arguments)]
-fn shaded_sector(p: &egui::Painter, c: Pos2, r0: f32, r1: f32, a0: f32, a1: f32, color: impl Fn(f32, f32) -> Color32) {
-    let along = ((a1 - a0).abs() / 2.5).ceil().max(4.0) as usize;
-    let across = 8usize;
+fn shaded_sector(p: &egui::Painter, c: Pos2, r0: f32, r1: &dyn Fn(f32) -> f32, a0: f32, a1: f32, color: impl Fn(f32, f32) -> Color32) {
+    let along = ((a1 - a0).abs() / 2.0).ceil().max(6.0) as usize;
+    let across = 12usize;
     let mut mesh = egui::Mesh::default();
     for i in 0..=across {
         let tr = i as f32 / across as f32;
-        let r = r0 + (r1 - r0) * tr;
         for k in 0..=along {
             let ta = k as f32 / along as f32;
-            let a = (a0 + (a1 - a0) * ta).to_radians();
+            let deg = a0 + (a1 - a0) * ta;
+            let a = deg.to_radians();
+            let r = r0 + (r1(deg) - r0) * tr;
             mesh.colored_vertex(c + vec2(a.cos(), -a.sin()) * r, color(tr, ta));
         }
     }
@@ -686,59 +700,59 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
             }
             Theme::Segments => {
                 let r0 = g.outer + 10.0 * s;
-                let r1 = r0 + (g.ry - r0).max(60.0 * s) * l.grow;
-                let (r0, r1) = if lit { (r0 - 4.0 * s, r1 + 14.0 * s) } else { (r0, r1) };
+                let len = (g.ry - r0).max(60.0 * s) * l.grow;
+                let (r0, out) = if lit { (r0 - 4.0 * s, 14.0 * s) } else { (r0, 0.0) };
+                let r1 = |d: f32| g.reach(r0, len, d) + out;
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
-                sector(p, g.anchor, r0, r1, a - step / 2.0, a + step / 2.0, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
-                // (Out from the narrow middle, where they'd crowd.)
-                let from = r0 + (r1 - r0) * 0.24;
-                along(p, g.anchor, a, from, r1 - from - 16.0 * s, &it.label, &round_font, color, false);
+                sector(p, g.anchor, r0, &r1, a - step / 2.0, a + step / 2.0, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
+                // (Out from the narrow middle, where they'd crowd; clear
+                // of the outer edge.)
+                let from = r0 + (r1(a) - r0) * 0.24;
+                along(p, g.anchor, a, from, r1(a) - from - 26.0 * s, &it.label, &round_font, color, false);
             }
             Theme::Glow => {
                 let r0 = g.outer + 12.0 * s;
-                let r1 = r0 + (g.ry - r0).max(60.0 * s) * l.grow + if lit { 10.0 * s } else { 0.0 };
+                let len = (g.ry - r0).max(60.0 * s) * l.grow;
+                let out = if lit { 10.0 * s } else { 0.0 };
+                let r1 = |d: f32| g.reach(r0, len, d) + out;
                 let (a0, a1) = (a - step / 2.0, a + step / 2.0);
-                // Soft shade: darker by the circle, fading out; the one
-                // pointed at glows from its middle.
-                let base = v.widgets.inactive.bg_fill;
-                shaded_sector(p, g.anchor, r0, r1, a0, a1, |tr, ta| {
-                    let across = (std::f32::consts::PI * ta).sin().max(0.0);
-                    let shade = base.gamma_multiply(alpha * (0.9 - 0.65 * tr) * (0.55 + 0.45 * across));
+                // A soft dark shade, fading out before the edges; the one
+                // pointed at glows from its middle, fading out the same.
+                let fade = |t: f32, m: f32| {
+                    let e = |x: f32| {
+                        let x = (x / m).clamp(0.0, 1.0);
+                        x * x * (3.0 - 2.0 * x)
+                    };
+                    e(t) * e(1.0 - t)
+                };
+                shaded_sector(p, g.anchor, r0, &r1, a0, a1, |tr, ta| {
+                    let shade = Color32::BLACK.gamma_multiply(alpha * 0.6 * fade(ta, 0.3) * fade(tr, 0.25) * (1.0 - 0.3 * tr));
                     if lit {
-                        let glow = accent.gamma_multiply(alpha * across.powf(0.7) * (1.0 - 0.45 * tr));
-                        blend(shade, glow)
+                        blend(shade, accent.gamma_multiply(alpha * 0.95 * fade(ta, 0.5) * fade(tr, 0.45)))
                     } else {
                         shade
                     }
                 });
-                // Short edges: the middle of each divider and arc.
-                let edge = Stroke::new(1.4, if lit { accent } else { border }.gamma_multiply(alpha));
+                // Short dividers, their colour kept.
+                let edge = Stroke::new(1.4, border.gamma_multiply(alpha));
                 for b in [a0, a1] {
                     let br = b.to_radians();
                     let d = vec2(br.cos(), -br.sin());
-                    let len = r1 - r0;
-                    p.line_segment([g.anchor + d * (r0 + 0.3 * len), g.anchor + d * (r0 + 0.7 * len)], edge);
-                }
-                for r in [r0, r1] {
-                    let pts: Vec<Pos2> = (0..=8)
-                        .map(|k| {
-                            let t = (a - step * 0.28 + step * 0.56 * k as f32 / 8.0).to_radians();
-                            g.anchor + vec2(t.cos(), -t.sin()) * r
-                        })
-                        .collect();
-                    p.add(egui::Shape::line(pts, edge));
+                    let span = r1(b) - out - r0;
+                    p.line_segment([g.anchor + d * (r0 + 0.3 * span), g.anchor + d * (r0 + 0.7 * span)], edge);
                 }
                 let c = if lit { v.strong_text_color().gamma_multiply(alpha) } else { color };
-                let from = r0 + (r1 - r0) * 0.24;
-                along(p, g.anchor, a, from, r1 - from - 16.0 * s, &it.label, &round_font, c, false);
+                let from = r0 + (r1(a) - r0) * 0.24;
+                along(p, g.anchor, a, from, r1(a) - from - 26.0 * s, &it.label, &round_font, c, false);
             }
             Theme::Daisy => {
                 // From narrow at the circle to as wide as fits (a gap
                 // either side), then round.
                 let r0 = g.outer + 8.0 * s;
-                let r1 = r0 + (g.ry * 0.94 - r0).max(60.0 * s) * l.grow + if lit { 16.0 * s } else { 0.0 };
-                let w = ((r1 - 0.2 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.72).clamp(6.0 * s, 26.0 * s);
+                let len = (g.ry * 0.94 - r0).max(60.0 * s) * l.grow;
+                let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
+                let w = ((r1 - 0.2 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.72).clamp(6.0 * s, 26.0 * s * g.stretch.sqrt());
                 let w0 = (w * 0.3).max(2.0 * s);
                 let cap = r1 - w;
                 let nrm = vec2(-u.y, u.x);
@@ -752,14 +766,16 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
                 let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
-                along(p, g.anchor, a, r0 + (r1 - r0) * 0.2, (r1 - r0) * 0.72, &it.label, &f, color, true);
+                // (Well clear of both ends.)
+                along(p, g.anchor, a, r0 + (r1 - r0) * 0.26, (r1 - r0) * 0.56, &it.label, &f, color, true);
             }
             Theme::Petals => {
                 let r0 = g.outer + 6.0 * s;
-                let r1 = r0 + (g.ry * 0.92 - r0).max(60.0 * s) * l.grow + if lit { 16.0 * s } else { 0.0 };
+                let len = (g.ry * 0.92 - r0).max(60.0 * s) * l.grow;
+                let r1 = g.reach(r0, len, a) + if lit { 16.0 * s } else { 0.0 };
                 let mid = r0 + 0.55 * (r1 - r0);
                 // (A gap between neighbours.)
-                let w = (mid * (step.to_radians() / 2.0).sin() * 0.74).clamp(6.0 * s, 28.0 * s);
+                let w = (mid * (step.to_radians() / 2.0).sin() * 0.74).clamp(6.0 * s, 28.0 * s * g.stretch.sqrt());
                 let nrm = vec2(-u.y, u.x);
                 let mut pts: Vec<Pos2> = (0..=16)
                     .map(|k| {
@@ -775,7 +791,8 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
                 let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
-                along(p, g.anchor, a, r0 + (r1 - r0) * 0.18, (r1 - r0) * 0.68, &it.label, &f, color, true);
+                // (Well clear of both ends.)
+                along(p, g.anchor, a, r0 + (r1 - r0) * 0.24, (r1 - r0) * 0.56, &it.label, &f, color, true);
             }
         }
     }
@@ -825,7 +842,7 @@ pub fn draw_preview(painter: &egui::Painter, rect: Rect, prefs: &crate::config::
     let hot = 1;
     let a = angles(theme, labels.len())[hot].to_radians();
     painter.circle_filled(anchor + vec2(a.cos(), -a.sin()) * (outer - knob), knob, accent.gamma_multiply(fade));
-    let geo = Geo { anchor, outer, s, ry: (rect.height() / 2.0 - 10.0).min(170.0 * s), font: 12.0 };
+    let geo = Geo { anchor, outer, s, ry: (rect.height() / 2.0 - 10.0).min(170.0 * s), font: 12.0, stretch: prefs.length };
     let look = Look { rx: geo.ry * 1.25, alpha: fade, swing: 0.0, hot: Some(hot), chosen: None, others: 1.0, last: true, grow: 1.0 };
     let items: Vec<Shown> = labels.iter().map(|l| Shown { label: l.to_string(), enabled: true }).collect();
     paint_level(&painter, theme, &geo, &look, &items, v);

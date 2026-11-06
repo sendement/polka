@@ -4632,10 +4632,11 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                         crate::fan::draw_preview(ui.painter(), prev, &cfg.fan, ui.visuals());
                                     }
                                 }
-                                SItem::Row(r @ (row::FAN_STICK | row::FAN_SIZE | row::FAN_REACH | row::FAN_THEME | row::FAN_LINGER)) => {
+                                SItem::Row(r @ (row::FAN_STICK | row::FAN_SIZE | row::FAN_REACH | row::FAN_THEME | row::FAN_LINGER | row::FAN_LENGTH)) => {
                                     let (label, shown, id) = match r {
                                         row::FAN_STICK => (tr("Stick"), if cfg.fan.stick == 0 { tr("Left stick") } else { tr("Right stick") }.to_string(), "fan-stick"),
                                         row::FAN_THEME => (tr("Style"), crate::fan::Theme::label(cfg.fan.theme).to_string(), "fan-theme"),
+                                        row::FAN_LENGTH => (tr("Petal length"), format!("{}%", (cfg.fan.length * 100.0).round()), "fan-length"),
                                         row::FAN_LINGER => (tr("Hides after"), if cfg.fan.linger <= 0.0 { tr("At once").to_string() } else { format!("{:.1} {}", cfg.fan.linger, tr("sec")) }, "fan-linger"),
                                         row::FAN_SIZE => (tr("Size"), format!("{}%", (cfg.fan.size * 100.0).round()), "fan-size"),
                                         _ => (tr("Items show from"), format!("{}%", (cfg.fan.reach * 100.0).round()), "fan-reach"),
