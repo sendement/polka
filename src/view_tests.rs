@@ -8430,7 +8430,8 @@ fn fan_screens() {
         h.state_mut().run(Cmd::ToggleDual);
     }
     h.state_mut().cfg.view = crate::config::ViewMode::List;
-    h.state_mut().cfg.fan = crate::config::FanPrefs::default();
+    // (Gone at once in the middle, here; the moment it waits: below.)
+    h.state_mut().cfg.fan = crate::config::FanPrefs { linger: 0.0, ..Default::default() };
     h.state_mut().pad_active = true;
     settle(&mut h);
     let stick = |h: &mut Harness<'static, App>, x: f32, y: f32| {
@@ -8441,7 +8442,7 @@ fn fan_screens() {
     // Pointing at item i of the last fan.
     let point = |h: &mut Harness<'static, App>, i: usize| {
         let n = h.state().fan.levels.last().unwrap().menu.items.len();
-        let a = crate::fan::angles(n)[i].to_radians();
+        let a = crate::fan::angles(crate::fan::Theme::of(h.state().cfg.fan.theme), n)[i].to_radians();
         h.state_mut().handle(Input::Stick(a.cos() * 0.97, a.sin() * 0.97));
         h.step();
         h.step();
@@ -8456,7 +8457,7 @@ fn fan_screens() {
     // Out: the items; the one straight right lit.
     stick(&mut h, 0.97, 0.0);
     let n = labels(&h).len();
-    assert_eq!(h.state().fan.hot, crate::fan::pointed(n, 0.0));
+    assert_eq!(h.state().fan.hot, crate::fan::pointed(crate::fan::Theme::Lines, n, 0.0));
     shot(&mut h, "fan1-items");
     // The d-pad's moves from the stick are the fan's now.
     h.state_mut().handle(Input::StickPress(crate::input::Action::Down));
@@ -8504,13 +8505,40 @@ fn fan_screens() {
     press(&mut h, &[crate::input::Action::Accept]);
     assert!(matches!(h.state().overlay, Some(Overlay::Props(_))), "didn't run");
     assert!(!h.state().fan.shown);
+    // The stick still pushed: what opened isn't moved about by it.
+    assert!(h.state().fan_has_left_stick(), "the stick goes on moving things");
     h.state_mut().overlay = None;
     stick(&mut h, 0.97, 0.02);
     assert!(!h.state().fan.shown, "back before the stick was let go");
     stick(&mut h, 0.0, 0.0);
+    assert!(!h.state().fan.spent);
     stick(&mut h, 0.97, 0.0);
     assert!(h.state().fan.shown);
     stick(&mut h, 0.0, 0.0);
+    // Back in the middle: it waits a moment (the stick on its way over to
+    // the other side keeps it), then goes.
+    h.state_mut().cfg.fan.linger = 0.4;
+    stick(&mut h, 0.97, 0.0);
+    stick(&mut h, 0.0, 0.0);
+    assert!(h.state().fan.shown, "gone at once");
+    stick(&mut h, -0.97, 0.0);
+    assert!(h.state().fan.global, "the way over didn't keep it");
+    stick(&mut h, 0.0, 0.0);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    h.step();
+    assert!(!h.state().fan.shown, "still there after the moment");
+    h.state_mut().cfg.fan.linger = 0.0;
+    // Its looks: each points where it's drawn.
+    for (t, name) in [(1u8, "segments"), (2, "petals"), (3, "text")] {
+        h.state_mut().cfg.fan.theme = t;
+        stick(&mut h, 0.97, 0.0);
+        point(&mut h, 3);
+        assert_eq!(h.state().fan.hot, Some(3), "{name}");
+        settle(&mut h);
+        shot(&mut h, &format!("fan6-{name}"));
+        stick(&mut h, 0.0, 0.0);
+    }
+    h.state_mut().cfg.fan.theme = 0;
     // A text file open: the editor's own menu.
     h.state_mut().pane_mut().set_cursor(1);
     press(&mut h, &[crate::input::Action::Accept]);
@@ -8542,7 +8570,100 @@ fn fan_screens() {
     assert_eq!(h.state().cfg.fan.stick, 1);
     h.state_mut().settings_step(crate::app::row::FAN_SIZE, 1.0);
     assert!((h.state().cfg.fan.size - 1.1).abs() < 0.01);
+    h.state_mut().settings_step(crate::app::row::FAN_THEME, 1.0);
+    assert_eq!(h.state().cfg.fan.theme, 1);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::FAN_ANIM);
+    }
+    settle(&mut h);
+    shot(&mut h, "fan7-settings-segments");
+    h.state_mut().cfg.fan.linger = 0.4;
+    h.state_mut().settings_step(crate::app::row::FAN_LINGER, 1.0);
+    assert!((h.state().cfg.fan.linger - 0.5).abs() < 0.01);
     h.state_mut().cfg.fan = crate::config::FanPrefs::default();
     h.state_mut().cfg.save();
     h.state_mut().overlay = None;
+}
+
+/// Pictures and videos shown: the folder's others as a strip of previews
+/// (below, as set), the one shown framed; ← → move it along; one chosen
+/// from it is shown, a video too, the strip kept; its menu puts it on
+/// another side or away.
+#[test]
+#[ignore]
+fn strip_screens() {
+    use crate::app::{Cmd, Overlay, SubMenu};
+    use crate::i18n::tr;
+    use crate::input::Action;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("strip");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ff = |args: &[&str]| std::process::Command::new("ffmpeg").args(["-v", "quiet", "-y"]).args(args).current_dir(&dir).status().is_ok_and(|s| s.success());
+    if !ff(&["-f", "lavfi", "-i", "color=c=0x3584e4:size=320x200", "-frames:v", "1", "a-blue.png"]) {
+        return; // no ffmpeg
+    }
+    assert!(ff(&["-f", "lavfi", "-i", "color=c=0xe66100:size=200x320", "-frames:v", "1", "b-orange.png"]));
+    assert!(ff(&["-f", "lavfi", "-i", "smptebars=size=320x240:rate=25:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "c-bars.mp4"]));
+    assert!(ff(&["-f", "lavfi", "-i", "color=c=0x2ec27e:size=300x300", "-frames:v", "1", "d-green.png"]));
+    std::fs::write(dir.join("notes.txt"), "not in the strip").unwrap();
+    let mut h = harness(dir.clone());
+    if h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    h.state_mut().cfg.viewer.strip = 1;
+    h.state_mut().cfg.viewer.strip_size = 1;
+    settle(&mut h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "a-blue.png").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().view_current();
+    // (The previews are made on other threads.)
+    for _ in 0..6 {
+        settle(&mut h);
+    }
+    let shown = |h: &Harness<'static, App>| h.state().cur_tab().viewer.as_ref().map(|v| v.path.file_name().unwrap().to_string_lossy().into_owned()).unwrap_or_default();
+    {
+        let v = h.state().cur_tab().viewer.as_ref().expect("no viewer");
+        let names: Vec<String> = v.strip.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["a-blue.png", "b-orange.png", "c-bars.mp4", "d-green.png"], "not the folder's pictures and videos");
+    }
+    shot(&mut h, "st0-below");
+    // → : the next picture (the video's left out of ← →), framed.
+    press(&mut h, &[Action::Right]);
+    assert_eq!(shown(&h), "b-orange.png");
+    press(&mut h, &[Action::Right]);
+    assert_eq!(shown(&h), "d-green.png", "← → went onto the video");
+    // The video chosen from the strip: shown, the strip still there.
+    h.state_mut().viewer_jump(dir.join("c-bars.mp4"));
+    for _ in 0..4 {
+        settle(&mut h);
+    }
+    assert!(h.state().video_shown(), "the video isn't shown");
+    assert_eq!(h.state().cur_tab().viewer.as_ref().unwrap().strip.len(), 4);
+    shot(&mut h, "st1-video");
+    // Its menu: the strip's own, on the left; then away.
+    press(&mut h, &[Action::Actions]);
+    let has = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => m.items.iter().any(|i| i.label == tr("Preview strip") && matches!(i.cmd, Cmd::Submenu(SubMenu::Strip))),
+        _ => false,
+    };
+    assert!(has, "no Preview strip in the video's menu");
+    h.state_mut().overlay = None;
+    h.state_mut().run(Cmd::StripAt(3));
+    h.state_mut().run(Cmd::StripSize(2));
+    h.state_mut().viewer_jump(dir.join("a-blue.png"));
+    for _ in 0..3 {
+        settle(&mut h);
+    }
+    assert_eq!(h.state().cfg.viewer.strip, 3);
+    shot(&mut h, "st2-left-big");
+    let m = h.state().build_submenu(SubMenu::Strip);
+    assert!(m.items.iter().any(|i| i.label == tr("On the left") && i.checked == Some(true)));
+    h.state_mut().run(Cmd::StripAt(0));
+    settle(&mut h);
+    shot(&mut h, "st3-hidden");
+    h.state_mut().cfg.viewer.strip = 1;
+    h.state_mut().cfg.viewer.strip_size = 1;
+    h.state_mut().cfg.save();
+    h.state_mut().run(Cmd::CloseViewer);
 }

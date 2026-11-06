@@ -1633,6 +1633,7 @@ impl App {
         let mut term_act = None;
         let mut torrent_act = None;
         let mut clicked_viewer = false;
+        let mut strip_pick = None;
         let full = self.video_full();
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
@@ -1643,7 +1644,29 @@ impl App {
             if let Some(v) = self.tabs[tab].viewer.as_mut() {
                 let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
                 let area = ui.available_rect_before_wrap();
-                viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                // Pictures and videos: the folder's others as a strip of
+                // previews, on the side set.
+                let current = match &v.content {
+                    crate::viewer::Content::Image(im) => im.siblings.get(im.index).cloned(),
+                    crate::viewer::Content::Video(m) if !m.full => m.tracks.get(m.index).cloned(),
+                    _ => None,
+                };
+                let at = self.cfg.viewer.strip;
+                if let Some(cur) = current.filter(|_| at != 0 && v.strip.len() > 1) {
+                    let px = self.cfg.viewer.strip_px();
+                    let band = px + 14.0;
+                    let (strip, rest) = match at {
+                        2 => (Rect::from_min_max(area.min, pos2(area.max.x, area.min.y + band)), Rect::from_min_max(pos2(area.min.x, area.min.y + band + 6.0), area.max)),
+                        3 => (Rect::from_min_max(area.min, pos2(area.min.x + band, area.max.y)), Rect::from_min_max(pos2(area.min.x + band + 6.0, area.min.y), area.max)),
+                        4 => (Rect::from_min_max(pos2(area.max.x - band, area.min.y), area.max), Rect::from_min_max(area.min, pos2(area.max.x - band - 6.0, area.max.y))),
+                        _ => (Rect::from_min_max(pos2(area.min.x, area.max.y - band), area.max), Rect::from_min_max(area.min, pos2(area.max.x, area.max.y - band - 6.0))),
+                    };
+                    strip_pick = draw_strip(ui, strip, &v.strip, &cur, &mut self.icons, px, at >= 3);
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rest).id_salt("viewer-beside-strip"));
+                    viewer_act = crate::viewer::draw::draw(&mut child, v, &self.cfg.viewer, &theme);
+                } else {
+                    viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+                }
                 // A click into it: the keys go there (from the sidebar too).
                 clicked_viewer = ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p)));
                 return;
@@ -1769,6 +1792,9 @@ impl App {
         });
         if clicked_viewer && self.overlay.is_none() {
             self.focus = Focus::Panes;
+        }
+        if let Some(p) = strip_pick {
+            self.viewer_jump(p);
         }
         match split_act {
             Some(SplitAct::Set(f)) => {
@@ -2247,6 +2273,79 @@ enum PaneEvent {
     Rest(usize),
     /// A click on empty space.
     ClearSelection,
+}
+
+/// The folder's pictures and videos as a strip of previews, the one shown
+/// framed in the accent colour (and scrolled to as it changes); the one
+/// clicked.
+fn draw_strip(ui: &mut Ui, rect: Rect, items: &[(std::path::PathBuf, i64)], current: &std::path::Path, icons: &mut Icons, px: f32, vertical: bool) -> Option<std::path::PathBuf> {
+    let v = ui.visuals().clone();
+    ui.painter().rect_filled(rect, 8.0, v.extreme_bg_color);
+    let mut pick = None;
+    let reveal_id = egui::Id::new("strip-shown");
+    let reveal = ui.ctx().data(|d| d.get_temp::<std::path::PathBuf>(reveal_id)).as_deref() != Some(current);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(7.0)).id_salt("strip"));
+    let hovered = ui.rect_contains_pointer(rect);
+    let wheel = if hovered { ui.input(|i| i.smooth_scroll_delta) } else { Vec2::ZERO };
+    let area = if vertical { egui::ScrollArea::vertical() } else { egui::ScrollArea::horizontal() };
+    area.id_salt("strip-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(&mut child, |ui| {
+        // (The wheel up and down goes along a strip lying across.)
+        if !vertical && wheel.y != 0.0 && wheel.x == 0.0 {
+            ui.scroll_with_delta(vec2(wheel.y, 0.0));
+        }
+        let lay = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui)| {
+            if vertical {
+                ui.vertical(|ui| f(ui));
+            } else {
+                ui.horizontal(|ui| f(ui));
+            }
+        };
+        lay(ui, &mut |ui: &mut Ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+            for (p, mtime) in items {
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(px), Sense::click());
+                let on = p.as_path() == current;
+                if ui.is_rect_visible(r) {
+                    ui.painter().rect_filled(r, 6.0, Color32::from_gray(28));
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let video = crate::viewer::video::is_video(&name) || crate::steam::is_recording(p);
+                    match icons.thumb(p, *mtime) {
+                        Some((uri, ratio)) => {
+                            let room = r.shrink(3.0);
+                            let size = if ratio >= 1.0 { vec2(room.width(), room.width() / ratio) } else { vec2(room.height() * ratio, room.height()) };
+                            egui::Image::new(uri).corner_radius(4.0).paint_at(ui, Rect::from_center_size(room.center(), size));
+                        }
+                        None => {
+                            let names: &[&str] = if video { &["video-x-generic"] } else { &["image-x-generic"] };
+                            if let Some(u) = icons.named(names, lookup_px(ui, px * 0.5)) {
+                                egui::Image::new(u).paint_at(ui, Rect::from_center_size(r.center(), Vec2::splat(px * 0.5)));
+                            }
+                        }
+                    }
+                    if video {
+                        // A video: ▶ in its corner.
+                        let c = r.left_bottom() + vec2(12.0, -12.0);
+                        ui.painter().circle_filled(c, 9.0, Color32::from_black_alpha(170));
+                        ui.painter().text(c + vec2(1.0, 0.0), Align2::CENTER_CENTER, "▶", FontId::proportional(10.0), Color32::WHITE);
+                    }
+                    if on {
+                        ui.painter().rect_stroke(r, 6.0, Stroke::new(3.0, v.selection.bg_fill), StrokeKind::Inside);
+                    } else {
+                        // (The others a little dimmer.)
+                        ui.painter().rect_filled(r, 6.0, Color32::from_black_alpha(if resp.hovered() { 0 } else { 70 }));
+                    }
+                }
+                if on && reveal {
+                    resp.scroll_to_me(Some(egui::Align::Center));
+                }
+                if resp.on_hover_text(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).clicked() {
+                    pick = Some(p.clone());
+                }
+            }
+        });
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(reveal_id, current.to_path_buf()));
+    pick
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4529,13 +4628,15 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     // Under the last one: how it looks, as set.
                                     if r == row::FAN_ANIM {
                                         ui.add_space(8.0);
-                                        let (prev, _) = ui.allocate_exact_size(vec2(ui.available_width(), 300.0), Sense::hover());
+                                        let (prev, _) = ui.allocate_exact_size(vec2(ui.available_width(), 340.0), Sense::hover());
                                         crate::fan::draw_preview(ui.painter(), prev, &cfg.fan, ui.visuals());
                                     }
                                 }
-                                SItem::Row(r @ (row::FAN_STICK | row::FAN_SIZE | row::FAN_REACH)) => {
+                                SItem::Row(r @ (row::FAN_STICK | row::FAN_SIZE | row::FAN_REACH | row::FAN_THEME | row::FAN_LINGER)) => {
                                     let (label, shown, id) = match r {
                                         row::FAN_STICK => (tr("Stick"), if cfg.fan.stick == 0 { tr("Left stick") } else { tr("Right stick") }.to_string(), "fan-stick"),
+                                        row::FAN_THEME => (tr("Style"), crate::fan::Theme::label(cfg.fan.theme).to_string(), "fan-theme"),
+                                        row::FAN_LINGER => (tr("Hides after"), if cfg.fan.linger <= 0.0 { tr("At once").to_string() } else { format!("{:.1} {}", cfg.fan.linger, tr("sec")) }, "fan-linger"),
                                         row::FAN_SIZE => (tr("Size"), format!("{}%", (cfg.fan.size * 100.0).round()), "fan-size"),
                                         _ => (tr("Items show from"), format!("{}%", (cfg.fan.reach * 100.0).round()), "fan-reach"),
                                     };

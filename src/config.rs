@@ -176,14 +176,22 @@ pub struct FanPrefs {
     pub reach: f32,
     /// Its levels and the switch to Polka's menu slide in.
     pub anim: bool,
+    /// How its items look: 0 lines, 1 segments, 2 petals, 3 text.
+    pub theme: u8,
+    /// Back in the middle, it stays this long (seconds) before it goes:
+    /// the stick can swing over to the other side.
+    pub linger: f32,
 }
+
+pub const FAN_THEMES: u8 = 4;
+pub const FAN_LINGER: (f32, f32, f32) = (0.0, 1.0, 0.1);
 
 pub const FAN_SIZE: (f32, f32, f32) = (0.7, 1.5, 0.1);
 pub const FAN_REACH: (f32, f32, f32) = (0.5, 0.95, 0.05);
 
 impl Default for FanPrefs {
     fn default() -> Self {
-        Self { on: true, stick: 0, size: 1.0, reach: 0.7, anim: true }
+        Self { on: true, stick: 0, size: 1.0, reach: 0.7, anim: true, theme: 0, linger: 0.4 }
     }
 }
 
@@ -261,13 +269,25 @@ pub struct ViewerPrefs {
     pub repeat: u8,
     /// Markdown may fetch pictures from the internet.
     pub web_images: bool,
+    /// Pictures and videos: the folder's others as a strip of previews:
+    /// 0 none, 1 below, 2 above, 3 on the left, 4 on the right.
+    pub strip: u8,
+    /// Its previews: 0 small, 1 medium, 2 big.
+    pub strip_size: u8,
+}
+
+impl ViewerPrefs {
+    /// The strip's previews' size (points).
+    pub fn strip_px(&self) -> f32 {
+        [56.0, 80.0, 112.0][self.strip_size.min(2) as usize]
+    }
 }
 
 pub const VIEWER_FONT: (f32, f32, f32) = (9.0, 40.0, 1.0);
 
 impl Default for ViewerPrefs {
     fn default() -> Self {
-        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true, volume: 0.8, repeat: 0, web_images: true }
+        Self { theme: "Polka".into(), font: None, font_size: 15.0, wrap: true, line_numbers: true, md_rendered: true, volume: 0.8, repeat: 0, web_images: true, strip: 1, strip_size: 1 }
     }
 }
 

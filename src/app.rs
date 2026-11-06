@@ -633,6 +633,10 @@ pub enum Cmd {
     ViewerDiscardThen(crate::viewer::glue::Then),
     ViewerWrap,
     ViewerNumbers,
+    /// The previews strip of pictures and videos: where (0 none, 1 below,
+    /// 2 above, 3 left, 4 right), how big (0..2).
+    StripAt(u8),
+    StripSize(u8),
     AudioToggle,
     AudioNext,
     AudioPrev,
@@ -734,6 +738,8 @@ pub enum Cmd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubMenu {
     View,
+    /// The previews strip under a picture or video.
+    Strip,
     /// The status bar's figures (in View).
     Status,
     Sort,
@@ -1233,7 +1239,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
         6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
         7 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
-        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_SIZE, row::FAN_REACH, row::FAN_ANIM]),
+        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_THEME, row::FAN_SIZE, row::FAN_REACH, row::FAN_LINGER, row::FAN_ANIM]),
         _ => vec![SItem::Versions, SItem::Page],
     }
 }
@@ -1335,6 +1341,8 @@ pub mod row {
     pub const FAN_SIZE: usize = 39;
     pub const FAN_REACH: usize = 40;
     pub const FAN_ANIM: usize = 41;
+    pub const FAN_THEME: usize = 42;
+    pub const FAN_LINGER: usize = 43;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -3592,8 +3600,43 @@ impl App {
         } else {
             Vec::new()
         };
+        // Pictures and videos: the folder's ones for the strip below.
+        let media = |p: &Path, n: &str| crate::viewer::image::is_picture(p, n) || crate::viewer::video::is_video(n) || crate::steam::is_recording(p);
+        let strip: Vec<(PathBuf, i64)> = if media(&path, &e.name) {
+            p.entries.iter().filter(|x| !x.is_dir).filter_map(|x| p.entry_path(x).filter(|xp| media(xp, &x.name)).map(|xp| (xp, x.mtime.unwrap_or(0)))).collect()
+        } else {
+            Vec::new()
+        };
         let (tab, origin) = (self.tab, self.side());
-        self.show_viewer(tab, path, e.name, origin, siblings);
+        let t = self.show_viewer(tab, path, e.name, origin, siblings);
+        if let Some(v) = self.tabs[t].viewer.as_mut() {
+            v.strip = strip;
+        }
+    }
+
+    /// One of the strip's previews chosen: that picture or video shown
+    /// instead (its own kind's ones for ← →), the strip kept.
+    pub fn viewer_jump(&mut self, path: PathBuf) {
+        let tab = self.tab;
+        let Some(v) = self.tabs[tab].viewer.as_ref() else { return };
+        if v.path == path {
+            return;
+        }
+        let (strip, origin) = (v.strip.clone(), v.origin);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let pic = crate::viewer::image::is_picture(&path, &name);
+        let siblings: Vec<PathBuf> = strip
+            .iter()
+            .map(|(p, _)| p.clone())
+            .filter(|p| {
+                let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                crate::viewer::image::is_picture(p, &n) == pic
+            })
+            .collect();
+        let t = self.show_viewer(tab, path, name, origin, siblings);
+        if let Some(v) = self.tabs[t].viewer.as_mut() {
+            v.strip = strip;
+        }
     }
 
     /// Show a file in a tab of its own beside `tab`; that tab.
@@ -3776,6 +3819,9 @@ impl App {
         }
         if let Some(v) = &self.cur_tab().viewer {
             let mut items = vec![item(tr("Open in another app"), Cmd::OpenExternal)];
+            if matches!(&v.content, crate::viewer::Content::Image(_)) && v.strip.len() > 1 {
+                items.insert(0, item(tr("Preview strip"), Cmd::Submenu(SubMenu::Strip)));
+            }
             if matches!(&v.content, crate::viewer::Content::Doc(d) if d.is_slides()) {
                 items.insert(0, item(tr("Slide show"), Cmd::SlideShow));
             }
@@ -4009,6 +4055,15 @@ impl App {
                     item(tr("Icon theme…"), Cmd::IconThemes),
                 ],
             ),
+            SubMenu::Strip => {
+                let (at, z) = (c.viewer.strip, c.viewer.strip_size);
+                let mut items: Vec<MenuItem> = [(1, tr("Below")), (2, tr("Above")), (3, tr("On the left")), (4, tr("On the right")), (0, tr("Hidden"))]
+                    .into_iter()
+                    .map(|(k, l)| toggle(l, Cmd::StripAt(k), at == k))
+                    .collect();
+                items.extend([(0, tr("Small previews")), (1, tr("Medium previews")), (2, tr("Big previews"))].into_iter().map(|(k, l)| toggle(l, Cmd::StripSize(k), z == k)));
+                (tr("Preview strip").to_string(), items)
+            }
             SubMenu::Status => (tr("Status bar").to_string(), crate::status::FIGURES.iter().map(|f| toggle(f.label(), Cmd::ToggleStatus(*f), c.status.get(*f))).collect()),
             SubMenu::Templates(i) => {
                 let title = if i == 0 { tr("New document").to_string() } else { self.templates[i].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() };
@@ -4132,7 +4187,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE | row::FAN_ON | row::FAN_STICK | row::FAN_ANIM => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE | row::FAN_ON | row::FAN_STICK | row::FAN_ANIM | row::FAN_THEME => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4435,6 +4490,14 @@ impl App {
             row::FAN_ON => self.cfg.fan.on = !self.cfg.fan.on,
             row::FAN_STICK => self.cfg.fan.stick = 1 - self.cfg.fan.stick.min(1),
             row::FAN_ANIM => self.cfg.fan.anim = !self.cfg.fan.anim,
+            row::FAN_THEME => {
+                let n = crate::config::FAN_THEMES as isize;
+                self.cfg.fan.theme = (self.cfg.fan.theme as isize + if d < 0.0 { -1 } else { 1 }).rem_euclid(n) as u8;
+            }
+            row::FAN_LINGER => {
+                step(&mut self.cfg.fan.linger, crate::config::FAN_LINGER);
+                self.cfg.fan.linger = (self.cfg.fan.linger * 10.0).round() / 10.0;
+            }
             row::FAN_SIZE => {
                 step(&mut self.cfg.fan.size, crate::config::FAN_SIZE);
                 self.cfg.fan.size = (self.cfg.fan.size * 10.0).round() / 10.0;
@@ -4908,6 +4971,14 @@ impl App {
             }
             Cmd::ViewerWrap => self.viewer_step(vrow::WRAP, 0),
             Cmd::ViewerNumbers => self.viewer_step(vrow::NUMBERS, 0),
+            Cmd::StripAt(at) => {
+                self.cfg.viewer.strip = at;
+                self.cfg.save();
+            }
+            Cmd::StripSize(z) => {
+                self.cfg.viewer.strip_size = z;
+                self.cfg.save();
+            }
             Cmd::CompressAsk => {
                 let sources = self.local_targets();
                 let Some(dir) = self.pane().loc.local_path().map(Path::to_path_buf) else { return };

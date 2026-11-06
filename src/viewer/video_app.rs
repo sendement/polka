@@ -130,6 +130,9 @@ impl App {
         }
         items.push(item(tr("Louder"), Cmd::AudioVolume(1)));
         items.push(item(tr("Quieter"), Cmd::AudioVolume(-1)));
+        if self.cur_tab().viewer.as_ref().is_some_and(|v| v.strip.len() > 1) {
+            items.push(item(tr("Preview strip"), Cmd::Submenu(crate::app::SubMenu::Strip)));
+        }
         items.push(item(tr("Open in another app"), Cmd::OpenExternal));
         items.push(item(tr("Close"), Cmd::CloseViewer));
         self.overlay = Some(Overlay::Menu(Menu::new(&name, items)));

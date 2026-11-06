@@ -155,6 +155,9 @@ pub struct Viewer {
     /// For files opened from an archive: (archive, inner path).
     pub source: Option<(PathBuf, String)>,
     pub content: Content,
+    /// Pictures and videos: the folder's ones (with their times, for
+    /// their previews), for the strip.
+    pub strip: Vec<(PathBuf, i64)>,
 }
 
 /// What the app should do after a key in the viewer.
@@ -217,7 +220,7 @@ impl Viewer {
                 }
             }
         };
-        Viewer { path, name, origin, folder: None, source: None, content }
+        Viewer { path, name, origin, folder: None, source: None, content, strip: Vec::new() }
     }
 
     pub fn is_text(&self) -> bool {
