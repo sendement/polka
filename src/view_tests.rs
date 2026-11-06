@@ -8529,7 +8529,7 @@ fn fan_screens() {
     assert!(!h.state().fan.shown, "still there after the moment");
     h.state_mut().cfg.fan.linger = 0.0;
     // Its looks: each points where it's drawn.
-    for (t, name) in [(1u8, "segments"), (2, "petals"), (3, "text")] {
+    for (t, name) in [(1u8, "segments"), (2, "petals"), (3, "text"), (4, "daisy"), (5, "glow")] {
         h.state_mut().cfg.fan.theme = t;
         stick(&mut h, 0.97, 0.0);
         point(&mut h, 3);

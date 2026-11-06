@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "Қайдан жойылғаны белгісіз: %n"),
     ("Right pane opens where it was", "Оң панель бұрынғы орнында ашылады"),
     ("Fan menu", "Желпуіш мәзір"),
+    ("Daisy", "Түймедақ"),
+    ("Glow", "Жарқырау"),
     ("Preview strip", "Алдын ала қарау таспасы"),
     ("Below", "Төменде"),
     ("Above", "Жоғарыда"),

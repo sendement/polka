@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "यह पता नहीं कि कहाँ से हटाया गया: %n"),
     ("Right pane opens where it was", "दायाँ पैनल वहीं खुलता है जहाँ था"),
     ("Fan menu", "पंखा मेनू"),
+    ("Daisy", "डेज़ी"),
+    ("Glow", "चमक"),
     ("Preview strip", "पूर्वावलोकन पट्टी"),
     ("Below", "नीचे"),
     ("Above", "ऊपर"),

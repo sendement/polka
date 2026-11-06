@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),
     ("Right pane opens where it was", "오른쪽 창을 이전 위치에서 열기"),
     ("Fan menu", "부채꼴 메뉴"),
+    ("Daisy", "데이지"),
+    ("Glow", "글로우"),
     ("Preview strip", "미리보기 스트립"),
     ("Below", "아래"),
     ("Above", "위"),

@@ -82,6 +82,8 @@ pub const T: &[(&str, &str)] = &[
     ("No record of where it came from: %n", "Nie wiadomo, skąd usunięto: %n"),
     ("Right pane opens where it was", "Prawy panel otwiera się tam, gdzie był"),
     ("Fan menu", "Menu wachlarzowe"),
+    ("Daisy", "Stokrotka"),
+    ("Glow", "Poświata"),
     ("Preview strip", "Pasek podglądów"),
     ("Below", "Na dole"),
     ("Above", "Na górze"),

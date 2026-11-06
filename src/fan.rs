@@ -45,7 +45,7 @@ fn most(theme: Theme, height: f32, s: f32) -> usize {
     let n = if theme.round() {
         // (Along the ring's middle, a row's height apart.)
         let mid = (56.0 * s + 10.0 * s + radius_y(height, s)) / 2.0;
-        2.0 * ROUND_SPREAD.to_radians() * mid / (24.0 * s)
+        2.0 * ROUND_SPREAD.to_radians() * mid / (ROUND_ROW * s)
     } else {
         2.0 * radius_y(height, s) * SPREAD.to_radians().sin() / (ROW * s)
     };
@@ -110,6 +110,11 @@ pub enum Theme {
     Segments,
     /// Petals out from the circle, the text along each.
     Petals,
+    /// A daisy's: narrow at the circle, round at their ends.
+    Daisy,
+    /// Segments with short soft edges, shaded, the one pointed at
+    /// glowing in the accent colour.
+    Glow,
     /// Just the words on an arc, the one pointed at bigger, lit.
     Text,
 }
@@ -119,25 +124,31 @@ impl Theme {
         match n {
             1 => Theme::Segments,
             2 => Theme::Petals,
+            4 => Theme::Daisy,
+            5 => Theme::Glow,
             3 => Theme::Text,
             _ => Theme::Lines,
         }
     }
 
     pub fn label(n: u8) -> &'static str {
-        tr(["Lines", "Segments", "Petals", "Text"][n.min(3) as usize])
+        tr(["Lines", "Segments", "Petals", "Text", "Daisy", "Glow"][n.min(5) as usize])
     }
 
     /// Round the circle (segments, petals): even angles, else even
     /// heights.
     fn round(self) -> bool {
-        matches!(self, Theme::Segments | Theme::Petals)
+        matches!(self, Theme::Segments | Theme::Petals | Theme::Daisy | Theme::Glow)
     }
 }
 
 /// The round ones' items from this angle above straight right to as far
 /// below.
 const ROUND_SPREAD: f32 = 80.0;
+/// Round ones: items no closer than this along the ring's middle; their
+/// text this much bigger than on an arc.
+const ROUND_ROW: f32 = 34.0;
+const ROUND_TEXT: f32 = 1.12;
 
 /// Where the items of a fan of `n` sit: their angles (degrees, up
 /// positive). On an arc: evenly apart up and down, so their labels don't
@@ -585,6 +596,39 @@ fn sector(p: &egui::Painter, c: Pos2, r0: f32, r1: f32, a0: f32, a1: f32, fill: 
     p.add(egui::Shape::closed_line(edge, stroke));
 }
 
+/// `top` over `under` (premultiplied colours).
+fn blend(under: Color32, top: Color32) -> Color32 {
+    let k = 1.0 - top.a() as f32 / 255.0;
+    let mix = |t: u8, u: u8| (t as f32 + u as f32 * k).round().min(255.0) as u8;
+    Color32::from_rgba_premultiplied(mix(top.r(), under.r()), mix(top.g(), under.g()), mix(top.b(), under.b()), mix(top.a(), under.a()))
+}
+
+/// A ring's piece coloured by `color(across the ring 0..1, along it 0..1)`.
+#[allow(clippy::too_many_arguments)]
+fn shaded_sector(p: &egui::Painter, c: Pos2, r0: f32, r1: f32, a0: f32, a1: f32, color: impl Fn(f32, f32) -> Color32) {
+    let along = ((a1 - a0).abs() / 2.5).ceil().max(4.0) as usize;
+    let across = 8usize;
+    let mut mesh = egui::Mesh::default();
+    for i in 0..=across {
+        let tr = i as f32 / across as f32;
+        let r = r0 + (r1 - r0) * tr;
+        for k in 0..=along {
+            let ta = k as f32 / along as f32;
+            let a = (a0 + (a1 - a0) * ta).to_radians();
+            mesh.colored_vertex(c + vec2(a.cos(), -a.sin()) * r, color(tr, ta));
+        }
+    }
+    let row = (along + 1) as u32;
+    for i in 0..across as u32 {
+        for k in 0..along as u32 {
+            let q = i * row + k;
+            mesh.add_triangle(q, q + 1, q + row);
+            mesh.add_triangle(q + 1, q + row + 1, q + row);
+        }
+    }
+    p.add(mesh);
+}
+
 /// One level's items, the way the theme draws them.
 pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[Shown], v: &egui::Visuals) {
     let s = g.s;
@@ -594,6 +638,7 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
     let n = items.len();
     let step = 2.0 * ROUND_SPREAD / n.max(1) as f32;
     let font = FontId::proportional(g.font);
+    let round_font = FontId::proportional(g.font * ROUND_TEXT);
     for (i, a) in angles(theme, n).into_iter().enumerate() {
         let it = &items[i];
         let alpha = if l.last || l.chosen == Some(i) { l.alpha } else { l.alpha * l.others };
@@ -646,13 +691,75 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 sector(p, g.anchor, r0, r1, a - step / 2.0, a + step / 2.0, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha)));
-                along(p, g.anchor, a, r0 + 12.0 * s, r1 - r0 - 22.0 * s, &it.label, &font, color, false);
+                // (Out from the narrow middle, where they'd crowd.)
+                let from = r0 + (r1 - r0) * 0.24;
+                along(p, g.anchor, a, from, r1 - from - 16.0 * s, &it.label, &round_font, color, false);
+            }
+            Theme::Glow => {
+                let r0 = g.outer + 12.0 * s;
+                let r1 = r0 + (g.ry - r0).max(60.0 * s) * l.grow + if lit { 10.0 * s } else { 0.0 };
+                let (a0, a1) = (a - step / 2.0, a + step / 2.0);
+                // Soft shade: darker by the circle, fading out; the one
+                // pointed at glows from its middle.
+                let base = v.widgets.inactive.bg_fill;
+                shaded_sector(p, g.anchor, r0, r1, a0, a1, |tr, ta| {
+                    let across = (std::f32::consts::PI * ta).sin().max(0.0);
+                    let shade = base.gamma_multiply(alpha * (0.9 - 0.65 * tr) * (0.55 + 0.45 * across));
+                    if lit {
+                        let glow = accent.gamma_multiply(alpha * across.powf(0.7) * (1.0 - 0.45 * tr));
+                        blend(shade, glow)
+                    } else {
+                        shade
+                    }
+                });
+                // Short edges: the middle of each divider and arc.
+                let edge = Stroke::new(1.4, if lit { accent } else { border }.gamma_multiply(alpha));
+                for b in [a0, a1] {
+                    let br = b.to_radians();
+                    let d = vec2(br.cos(), -br.sin());
+                    let len = r1 - r0;
+                    p.line_segment([g.anchor + d * (r0 + 0.3 * len), g.anchor + d * (r0 + 0.7 * len)], edge);
+                }
+                for r in [r0, r1] {
+                    let pts: Vec<Pos2> = (0..=8)
+                        .map(|k| {
+                            let t = (a - step * 0.28 + step * 0.56 * k as f32 / 8.0).to_radians();
+                            g.anchor + vec2(t.cos(), -t.sin()) * r
+                        })
+                        .collect();
+                    p.add(egui::Shape::line(pts, edge));
+                }
+                let c = if lit { v.strong_text_color().gamma_multiply(alpha) } else { color };
+                let from = r0 + (r1 - r0) * 0.24;
+                along(p, g.anchor, a, from, r1 - from - 16.0 * s, &it.label, &round_font, c, false);
+            }
+            Theme::Daisy => {
+                // From narrow at the circle to as wide as fits (a gap
+                // either side), then round.
+                let r0 = g.outer + 8.0 * s;
+                let r1 = r0 + (g.ry * 0.94 - r0).max(60.0 * s) * l.grow + if lit { 16.0 * s } else { 0.0 };
+                let w = ((r1 - 0.2 * (r1 - r0)) * (step.to_radians() / 2.0).sin() * 0.72).clamp(6.0 * s, 26.0 * s);
+                let w0 = (w * 0.3).max(2.0 * s);
+                let cap = r1 - w;
+                let nrm = vec2(-u.y, u.x);
+                let mut pts = vec![g.anchor + u * r0 + nrm * w0, g.anchor + u * cap + nrm * w];
+                pts.extend((1..16).map(|k| {
+                    let t = std::f32::consts::PI * k as f32 / 16.0;
+                    g.anchor + u * (cap + w * t.sin()) + nrm * (w * t.cos())
+                }));
+                pts.extend([g.anchor + u * cap - nrm * w, g.anchor + u * r0 - nrm * w0]);
+                let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
+                let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
+                p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
+                let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
+                along(p, g.anchor, a, r0 + (r1 - r0) * 0.2, (r1 - r0) * 0.72, &it.label, &f, color, true);
             }
             Theme::Petals => {
                 let r0 = g.outer + 6.0 * s;
                 let r1 = r0 + (g.ry * 0.92 - r0).max(60.0 * s) * l.grow + if lit { 16.0 * s } else { 0.0 };
                 let mid = r0 + 0.55 * (r1 - r0);
-                let w = (mid * (step.to_radians() / 2.0).sin() * 0.92).clamp(6.0 * s, 30.0 * s);
+                // (A gap between neighbours.)
+                let w = (mid * (step.to_radians() / 2.0).sin() * 0.74).clamp(6.0 * s, 28.0 * s);
                 let nrm = vec2(-u.y, u.x);
                 let mut pts: Vec<Pos2> = (0..=16)
                     .map(|k| {
@@ -667,8 +774,8 @@ pub fn paint_level(p: &egui::Painter, theme: Theme, g: &Geo, l: &Look, items: &[
                 let fill = if lit { accent } else { v.extreme_bg_color.gamma_multiply(0.92) };
                 let line = if lit { on_accent.gamma_multiply(0.5) } else { border };
                 p.add(egui::Shape::convex_polygon(pts, fill.gamma_multiply(alpha), Stroke::new(1.2, line.gamma_multiply(alpha))));
-                let f = FontId::proportional(g.font.min(w * 1.25).max(9.0));
-                along(p, g.anchor, a, r0 + (r1 - r0) * 0.12, (r1 - r0) * 0.76, &it.label, &f, color, true);
+                let f = FontId::proportional((g.font * ROUND_TEXT).min(w * 1.2).max(9.0));
+                along(p, g.anchor, a, r0 + (r1 - r0) * 0.18, (r1 - r0) * 0.68, &it.label, &f, color, true);
             }
         }
     }
@@ -694,6 +801,10 @@ mod tests {
         assert_eq!(r, vec![60.0, 20.0, -20.0, -60.0]);
         assert_eq!(pointed(Theme::Segments, 4, 39.0), Some(1));
         assert_eq!(pointed(Theme::Segments, 4, 41.0), Some(0));
+        assert_eq!(angles(Theme::Daisy, 4), r);
+        assert_eq!(angles(Theme::Glow, 4), r);
+        // Round: roomier than on an arc.
+        assert!(most(Theme::Glow, 1000.0, 1.0) < most(Theme::Lines, 1000.0, 1.0));
     }
 }
 

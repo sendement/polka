@@ -176,14 +176,15 @@ pub struct FanPrefs {
     pub reach: f32,
     /// Its levels and the switch to Polka's menu slide in.
     pub anim: bool,
-    /// How its items look: 0 lines, 1 segments, 2 petals, 3 text.
+    /// How its items look: 0 lines, 1 segments, 2 petals, 3 text, 4 daisy,
+    /// 5 glow.
     pub theme: u8,
     /// Back in the middle, it stays this long (seconds) before it goes:
     /// the stick can swing over to the other side.
     pub linger: f32,
 }
 
-pub const FAN_THEMES: u8 = 4;
+pub const FAN_THEMES: u8 = 6;
 pub const FAN_LINGER: (f32, f32, f32) = (0.0, 1.0, 0.1);
 
 pub const FAN_SIZE: (f32, f32, f32) = (0.7, 1.5, 0.1);
