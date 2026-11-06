@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "Przywracanie"),
     ("No record of where it came from: %n", "Nie wiadomo, skąd usunięto: %n"),
     ("Right pane opens where it was", "Prawy panel otwiera się tam, gdzie był"),
+    ("Other pane's address folds away", "Adres drugiego panelu się zwija"),
     ("Open by touch", "Otwieranie dotykiem"),
     ("Double tap", "Podwójne dotknięcie"),
     ("One tap", "Jedno dotknięcie"),

@@ -8303,3 +8303,106 @@ fn props_screens() {
     assert!(h.query_by_label_contains("note.txt").is_some());
     shot(&mut h, "pr1-several");
 }
+
+/// Dual mode: the other pane's address folded by itself (as set), the
+/// line between the panes dragged to share the width, and pulled up to a
+/// wall, the pane there goes and the other stays alone, with the keys.
+#[test]
+#[ignore]
+fn dual_split_screens() {
+    use crate::app::{Cmd, Focus};
+    use crate::vfs::Location;
+    use egui::{Event, PointerButton, Pos2, pos2};
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness_with(dir.clone(), [1100.0, 640.0], "");
+    if !h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    h.state_mut().cfg.fold_other_addr = false;
+    h.state_mut().cfg.dual_split = 0.5;
+    let cfg = h.state().cfg.clone();
+    h.state_mut().pane_at_mut(1).navigate(Location::Local(dir.join("folder")), None, &cfg);
+    h.state_mut().set_side(0);
+    // (The mouse away from the address bar.)
+    h.event(Event::PointerMoved(pos2(600.0, 400.0)));
+    settle(&mut h);
+    let widths = |h: &Harness<'static, App>| {
+        let r = &h.state().addr_rects;
+        (r[0].1.width(), r[1].1.width())
+    };
+    // (Split where the panes split.)
+    let r = h.state().addr_rects.clone();
+    let line = h.state().divider_x.unwrap();
+    assert!((r[0].1.max.x + 4.0 - line).abs() < 6.0 && (r[1].1.min.x - 4.0 - line).abs() < 6.0, "not at the line {line}: {r:?}");
+    // Set: only the active side's is wide; the other side active, the
+    // other way round.
+    h.state_mut().settings_step(crate::app::row::FOLD_ADDR, 0.0);
+    assert!(h.state().cfg.fold_other_addr);
+    settle(&mut h);
+    let (a, b) = widths(&h);
+    assert!(a > 300.0 && b < 64.0, "left not wide alone: {a} {b}");
+    shot(&mut h, "ds1-folded-right");
+    h.state_mut().set_side(1);
+    settle(&mut h);
+    let (a, b) = widths(&h);
+    assert!(b > 300.0 && a < 64.0, "right not wide alone: {a} {b}");
+    shot(&mut h, "ds2-folded-left");
+    h.state_mut().settings_step(crate::app::row::FOLD_ADDR, 0.0);
+    assert!(!h.state().cfg.fold_other_addr);
+    h.state_mut().set_side(0);
+    settle(&mut h);
+    // The line between them, dragged right: the left one wider (kept).
+    let line = h.state().divider_x.expect("no line");
+    let drag = |h: &mut Harness<'static, App>, from: Pos2, to: Pos2, release: bool| {
+        h.event(Event::PointerMoved(from));
+        h.step();
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        for k in 1..=6 {
+            h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 6.0)));
+            h.step();
+        }
+        if release {
+            h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+            settle(h);
+        }
+    };
+    drag(&mut h, pos2(line, 400.0), pos2(line + 150.0, 400.0), true);
+    let f = h.state().cfg.dual_split;
+    assert!(f > 0.6 && f < 0.8, "{f}");
+    let moved = h.state().divider_x.unwrap();
+    assert!((moved - line - 150.0).abs() < 6.0, "{moved} vs {line}");
+    shot(&mut h, "ds3-wider-left");
+    // A double click on it: even again.
+    let at = pos2(moved, 400.0);
+    for pressed in [true, false, true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() });
+    }
+    settle(&mut h);
+    assert!((h.state().cfg.dual_split - 0.5).abs() < 0.01, "{}", h.state().cfg.dual_split);
+    // Up to the left wall: the left pane is to go (shown), and let go, it
+    // goes; the right one stays alone and takes the keys.
+    let line = h.state().divider_x.unwrap();
+    h.state_mut().focus = Focus::Sidebar;
+    let side_edge = 220.0;
+    drag(&mut h, pos2(line, 400.0), pos2(side_edge + 10.0, 400.0), false);
+    shot(&mut h, "ds4-closing-left");
+    assert!(h.state().cfg.dual, "gone before let go");
+    h.event(Event::PointerButton { pos: pos2(side_edge + 10.0, 400.0), button: PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    settle(&mut h);
+    assert!(!h.state().cfg.dual, "still two panes");
+    assert_eq!(h.state().pane().loc, Location::Local(dir.join("folder")), "not the right one left");
+    assert_eq!(h.state().focus, Focus::Panes);
+    shot(&mut h, "ds5-right-alone");
+    // Two again, then the right one pulled away: the left one stays.
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(&mut h);
+    let keep = h.state().pane_at(0).loc.clone();
+    let line = h.state().divider_x.unwrap();
+    drag(&mut h, pos2(line, 400.0), pos2(1090.0, 400.0), true);
+    assert!(!h.state().cfg.dual);
+    assert_eq!(h.state().pane().loc, keep);
+    h.state_mut().cfg.dual_split = 0.5;
+    h.state_mut().cfg.save();
+}

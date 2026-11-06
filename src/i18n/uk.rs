@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "Відновлення"),
     ("No record of where it came from: %n", "Невідомо, звідки видалено: %n"),
     ("Right pane opens where it was", "Права панель відкривається там, де була"),
+    ("Other pane's address folds away", "Адреса іншої панелі згортається"),
     ("Open by touch", "Відкривати дотиком"),
     ("Double tap", "Подвійний дотик"),
     ("One tap", "Один дотик"),

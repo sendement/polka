@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "복원 중"),
     ("No record of where it came from: %n", "원래 위치를 알 수 없음: %n"),
     ("Right pane opens where it was", "오른쪽 창을 이전 위치에서 열기"),
+    ("Other pane's address folds away", "다른 창의 주소 접기"),
     ("Open by touch", "터치로 열기"),
     ("Double tap", "두 번 탭"),
     ("One tap", "한 번 탭"),

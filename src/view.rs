@@ -20,6 +20,16 @@ const TOOL_BTN: f32 = 38.0;
 /// Narrower than this, an address field (folded for the other in dual
 /// mode) is a square with a folder.
 const FOLDED_ADDR: f32 = 64.0;
+/// Dual mode: a pane no narrower than this as the line between is
+/// dragged; the line taken this near a wall closes the pane by it.
+const PANE_MIN: f32 = 160.0;
+const PANE_CLOSE: f32 = 60.0;
+
+/// The line between the panes, let go.
+enum SplitAct {
+    Set(f32),
+    Close(usize),
+}
 /// How long a widened address field stays so after the mouse leaves it.
 const ADDR_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 const TOOL_ICON: f32 = 24.0;
@@ -538,9 +548,11 @@ impl App {
             let fields: Vec<(usize, Rect)> = if let Some((origin, _)) = &viewing {
                 vec![(*origin, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             } else if dual {
+                // (Where the panes split, kept off the ends.)
                 let even = self
                     .divider_x
-                    .filter(|d| *d > addr_start + 120.0 && *d < addr_end - 120.0)
+                    .filter(|_| addr_end - addr_start > 240.0)
+                    .map(|d| d.clamp(addr_start + 120.0, addr_end - 120.0))
                     .unwrap_or((addr_start + addr_end) / 2.0);
                 // Resting on one field a moment widens it to show the
                 // whole path; the other keeps a strip to come back to.
@@ -561,6 +573,13 @@ impl App {
                 }
                 // (A square, as big as a button.)
                 let strip = TOOL_BTN + 4.0;
+                // At rest: split even, or (as set) the active one wide, the
+                // other folded.
+                let rest_at = if self.cfg.fold_other_addr {
+                    if active == 0 { addr_end - strip } else { addr_start + strip }
+                } else {
+                    even
+                };
                 // (The field typed in doesn't fold away.)
                 let typed_side = if matches!(&self.overlay, Some(Overlay::Osk(k)) if k.in_bar()) { Some(active) } else { None };
                 let wide = wide.filter(|w| typed_side.is_none_or(|t| t == *w));
@@ -570,7 +589,10 @@ impl App {
                 // The mouse gone, a widened field stays so a while (as it
                 // goes off it on the way elsewhere); a click anywhere but on
                 // it folds it at once.
-                let widened = before.filter(|b| (b - even).abs() > 1.0);
+                // (Widened by the mouse, not just moved with the line
+                // between the panes or the setting.)
+                let by_mouse: bool = ui.ctx().data(|d| d.get_temp(id.with("by-mouse"))).unwrap_or(false);
+                let widened = before.filter(|b| by_mouse && (b - rest_at).abs() > 1.0);
                 let wide_rect = widened.map(|b| {
                     if b > even {
                         Rect::from_min_max(pos2(addr_start, row.min.y), pos2(now_mid - 4.0, row.max.y))
@@ -591,14 +613,18 @@ impl App {
                 let target = match wide {
                     Some(0) => addr_end - strip,
                     Some(_) => addr_start + strip,
-                    _ if clicked_away => even,
-                    None if self.addr_hover.is_some() || held => before.unwrap_or(even),
-                    None => even,
+                    _ if clicked_away => rest_at,
+                    None if self.addr_hover.is_some() || held => before.unwrap_or(rest_at),
+                    None => rest_at,
                 };
                 if clicked_away {
                     self.addr_hold = None;
                 }
-                ui.ctx().data_mut(|d| d.insert_temp(id.with("target"), target));
+                let by_mouse = wide.is_some() || (!clicked_away && by_mouse && (self.addr_hover.is_some() || held));
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(id.with("target"), target);
+                    d.insert_temp(id.with("by-mouse"), by_mouse);
+                });
                 let mid = now_mid;
                 self.addr_mid = Some(mid);
                 vec![
@@ -1588,6 +1614,7 @@ impl App {
         let tab_of = [self.tab_of(0), self.tab_of(1)];
         let mut events: Vec<(usize, PaneEvent)> = Vec::new();
         let mut divider = None;
+        let mut split_act = None;
         let mut tab_act = None;
         let mut viewer_act = None;
         let mut usage_act = None;
@@ -1653,9 +1680,17 @@ impl App {
                 let (a, b) = crate::app::two_panes(tabs, tab_of[0], tab_of[1]);
                 let full = ui.available_rect_before_wrap();
                 let gap = 6.0;
-                let w = (full.width() - gap) / 2.0;
+                // The line between them is dragged with the mouse: as wide
+                // as each is wanted (not narrower than a little), or pulled
+                // up to a wall, the pane there goes.
+                let span = full.width() - gap;
+                let lo = (PANE_MIN / span).min(0.5);
+                let split_id = ui.id().with("dual-split");
+                let live: Option<f32> = ui.ctx().data(|d| d.get_temp(split_id));
+                let frac = live.unwrap_or(cfg.dual_split).clamp(lo, 1.0 - lo);
+                let w = (span * frac).round();
                 let ra = Rect::from_min_size(full.min, vec2(w, full.height()));
-                let rb = Rect::from_min_size(pos2(full.min.x + w + gap, full.min.y), vec2(w, full.height()));
+                let rb = Rect::from_min_max(pos2(full.min.x + w + gap, full.min.y), full.max);
                 divider = Some(full.min.x + w + gap / 2.0);
                 for (idx, (pane, rect)) in [(a, ra), (b, rb)].into_iter().enumerate() {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("pane", idx)));
@@ -1672,6 +1707,47 @@ impl App {
                         events.push((idx, e));
                     }
                 }
+                // (Over the panes' edges: it's on top.)
+                let grip = Rect::from_center_size(pos2(full.min.x + w + gap / 2.0, full.center().y), vec2(gap + 6.0, full.height()));
+                let r = ui.interact(grip, split_id, Sense::click_and_drag());
+                if r.hovered() || r.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                // Near a wall: the pane by it is to go (shown so).
+                let doomed = r.interact_pointer_pos().filter(|_| r.dragged() || r.drag_stopped()).and_then(|p| {
+                    if p.x < full.min.x + PANE_CLOSE {
+                        Some(0)
+                    } else if p.x > full.max.x - PANE_CLOSE {
+                        Some(1)
+                    } else {
+                        None
+                    }
+                });
+                if r.dragged() {
+                    if let Some(p) = r.interact_pointer_pos() {
+                        let f = ((p.x - full.min.x - gap / 2.0) / span).clamp(lo, 1.0 - lo);
+                        ui.ctx().data_mut(|d| d.insert_temp(split_id, f));
+                    }
+                }
+                if r.hovered() || r.dragged() {
+                    let line = if r.dragged() { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.hovered.bg_stroke.color };
+                    ui.painter().vline(grip.center().x, full.y_range(), Stroke::new(2.0, line));
+                }
+                if let Some(side) = doomed {
+                    let rect = if side == 0 { ra } else { rb };
+                    let v = ui.visuals();
+                    ui.painter().rect_filled(rect, 6.0, v.extreme_bg_color.gamma_multiply(0.85));
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "✕", FontId::proportional(40.0), v.error_fg_color);
+                }
+                if r.drag_stopped() {
+                    let f = ui.ctx().data_mut(|d| d.remove_temp::<f32>(split_id)).unwrap_or(frac);
+                    split_act = Some(match doomed {
+                        Some(side) => SplitAct::Close(side),
+                        None => SplitAct::Set(f),
+                    });
+                } else if r.double_clicked() {
+                    split_act = Some(SplitAct::Set(0.5));
+                }
             } else {
                 let shown = tabs[tab].pane.loc.clone();
                 for e in draw_pane(ui, &mut tabs[tab].pane, icons, cfg, focused, (tab_of[0], 0), dragging, lifted(0), springing(0, &shown), tap, finger) {
@@ -1681,6 +1757,18 @@ impl App {
         });
         if clicked_viewer && self.overlay.is_none() {
             self.focus = Focus::Panes;
+        }
+        match split_act {
+            Some(SplitAct::Set(f)) => {
+                self.cfg.dual_split = f;
+                self.cfg.save();
+            }
+            // The other one stays, alone, and takes the keys.
+            Some(SplitAct::Close(side)) => {
+                self.leave_dual(1 - side);
+                self.focus = Focus::Panes;
+            }
+            None => {}
         }
         if self.text_mut().is_some_and(|t| t.ed.menu) {
             if self.overlay.is_none() {
@@ -4409,6 +4497,19 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
+                                    }
+                                }
+                                SItem::Row(row::FOLD_ADDR) => {
+                                    // Dual mode: only the active pane's address wide.
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::FOLD_ADDR, "fold-addr");
+                                    row_label(ui, rect, tr("Other pane's address folds away"), &label_font, v.text_color(), rect.max.x - 40.0);
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if cfg.fold_other_addr {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::FOLD_ADDR));
                                     }
                                 }
                                 SItem::Row(row::PAD_HINTS) => {

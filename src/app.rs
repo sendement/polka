@@ -1223,7 +1223,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
         1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
         2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::TYPE_HOP, row::LENS, row::MENU_STYLE, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
-        3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT]),
+        3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT, row::FOLD_ADDR]),
         4 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
             v.push(SItem::Row(row::WEB_IMAGES));
@@ -1325,6 +1325,7 @@ pub mod row {
     pub const T_SEED: usize = 33;
     pub const T_AUTO: usize = 34;
     pub const MENU_STYLE: usize = 35;
+    pub const FOLD_ADDR: usize = 36;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -2770,6 +2771,30 @@ impl App {
         }
     }
 
+    /// Out of dual mode, side `keep`'s tab staying (as the one shown); one
+    /// opened for the right side goes with it (unless something's open in
+    /// it). Saved by the caller.
+    pub(crate) fn leave_dual(&mut self, keep: usize) {
+        if !self.cfg.dual {
+            return;
+        }
+        self.remember_right_pane();
+        self.set_side(keep);
+        let r = self.other_tab;
+        let t = &self.tabs[r];
+        let spare = t.for_right && t.viewer.is_none() && t.usage.is_none() && t.term.is_none();
+        self.cfg.dual = false;
+        self.side = 0;
+        if spare && r != self.tab && self.tabs.len() > 1 {
+            self.tabs.remove(r);
+            if r < self.tab {
+                self.tab -= 1;
+            }
+            self.other_tab = self.tab;
+        }
+        self.cfg.save();
+    }
+
     /// Keep where the right pane is, for the next start.
     fn remember_right_pane(&mut self) {
         if !self.cfg.dual || !self.cfg.remember_right {
@@ -4088,7 +4113,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4295,6 +4320,10 @@ impl App {
             }
             row::REMEMBER_RIGHT => {
                 self.cfg.remember_right = !self.cfg.remember_right;
+                self.cfg.save();
+            }
+            row::FOLD_ADDR => {
+                self.cfg.fold_other_addr = !self.cfg.fold_other_addr;
                 self.cfg.save();
             }
             row::PAD_HINTS => {
@@ -4982,21 +5011,7 @@ impl App {
             }
             Cmd::ToggleDual => {
                 if self.cfg.dual {
-                    // The left side's tab stays; one opened for the right
-                    // side goes with it (unless something's open in it).
-                    self.set_side(0);
-                    self.remember_right_pane();
-                    let r = self.other_tab;
-                    let t = &self.tabs[r];
-                    let spare = t.for_right && t.viewer.is_none() && t.usage.is_none() && t.term.is_none();
-                    self.cfg.dual = false;
-                    if spare && r != self.tab && self.tabs.len() > 1 {
-                        self.tabs.remove(r);
-                        if r < self.tab {
-                            self.tab -= 1;
-                        }
-                        self.other_tab = self.tab;
-                    }
+                    self.leave_dual(0);
                 } else {
                     self.cfg.dual = true;
                     self.side = 0;

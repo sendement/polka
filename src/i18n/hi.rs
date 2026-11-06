@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "पुनर्स्थापित हो रहा है"),
     ("No record of where it came from: %n", "यह पता नहीं कि कहाँ से हटाया गया: %n"),
     ("Right pane opens where it was", "दायाँ पैनल वहीं खुलता है जहाँ था"),
+    ("Other pane's address folds away", "दूसरे पैनल का पता सिमट जाता है"),
     ("Open by touch", "स्पर्श से खोलें"),
     ("Double tap", "दो बार टैप"),
     ("One tap", "एक टैप"),

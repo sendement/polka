@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "Қалпына келтіру"),
     ("No record of where it came from: %n", "Қайдан жойылғаны белгісіз: %n"),
     ("Right pane opens where it was", "Оң панель бұрынғы орнында ашылады"),
+    ("Other pane's address folds away", "Басқа панельдің мекенжайы жиналады"),
     ("Open by touch", "Түртумен ашу"),
     ("Double tap", "Екі рет түрту"),
     ("One tap", "Бір рет түрту"),

@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "復元中"),
     ("No record of where it came from: %n", "元の場所が不明: %n"),
     ("Right pane opens where it was", "右ペインを前回の場所で開く"),
+    ("Other pane's address folds away", "もう一方のペインのアドレスを折りたたむ"),
     ("Open by touch", "タッチで開く"),
     ("Double tap", "ダブルタップ"),
     ("One tap", "シングルタップ"),

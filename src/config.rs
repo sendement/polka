@@ -93,6 +93,12 @@ pub struct Config {
     pub install_on_open: bool,
     /// The right pane opens where it was (else beside the left one).
     pub remember_right: bool,
+    /// Dual mode: the other pane's address folds to a square by itself
+    /// (the active one's is wide).
+    pub fold_other_addr: bool,
+    /// Dual mode: the left pane's share of the width (the line between
+    /// them dragged with the mouse).
+    pub dual_split: f32,
     /// Network places.
     pub connections: Vec<crate::net::Conn>,
     /// Where the right pane was last.
@@ -322,6 +328,8 @@ impl Default for Config {
             osk_layouts: Vec::new(),
             install_on_open: true,
             remember_right: true,
+            fold_other_addr: false,
+            dual_split: 0.5,
             connections: Vec::new(),
             right_dir: None,
             touch_double: true,

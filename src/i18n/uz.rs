@@ -81,6 +81,7 @@ pub const T: &[(&str, &str)] = &[
     ("Restoring", "Tiklanmoqda"),
     ("No record of where it came from: %n", "Qayerdan oʻchirilgani nomaʼlum: %n"),
     ("Right pane opens where it was", "Oʻng panel avvalgi joyida ochiladi"),
+    ("Other pane's address folds away", "Boshqa panel manzili yigʻiladi"),
     ("Open by touch", "Teginish bilan ochish"),
     ("Double tap", "Ikki marta teginish"),
     ("One tap", "Bir marta teginish"),
