@@ -747,6 +747,7 @@ pub enum SubMenu {
     TermEntry(bool, usize),
 }
 
+#[derive(Clone)]
 pub struct MenuItem {
     pub label: String,
     pub cmd: Cmd,
@@ -1207,12 +1208,12 @@ pub enum SItem {
     Page,
 }
 
-pub const SETTINGS_CATS: usize = 9;
+pub const SETTINGS_CATS: usize = 10;
 pub const NO_ROW: usize = usize::MAX;
 
 /// A category's name.
 pub fn settings_cat_name(cat: usize) -> &'static str {
-    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "Torrents", "About"][cat.min(SETTINGS_CATS - 1)])
+    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "Torrents", "Fan menu", "About"][cat.min(SETTINGS_CATS - 1)])
 }
 
 /// What a category holds, in order.
@@ -1232,6 +1233,7 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
         5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
         6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
         7 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
+        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_SIZE, row::FAN_REACH, row::FAN_ANIM]),
         _ => vec![SItem::Versions, SItem::Page],
     }
 }
@@ -1326,6 +1328,13 @@ pub mod row {
     pub const T_AUTO: usize = 34;
     pub const MENU_STYLE: usize = 35;
     pub const FOLD_ADDR: usize = 36;
+    // The fan menu: on, which stick, how big, how far out its items
+    // show, its slides.
+    pub const FAN_ON: usize = 37;
+    pub const FAN_STICK: usize = 38;
+    pub const FAN_SIZE: usize = 39;
+    pub const FAN_REACH: usize = 40;
+    pub const FAN_ANIM: usize = 41;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1579,6 +1588,8 @@ pub struct App {
     /// Range selection while Select (or Shift on the keyboard) is held.
     pub range: Option<RangeSel>,
     pub icon_pick: Option<IconPick>,
+    /// The fan menu on a stick.
+    pub fan: crate::fan::Fan,
     pub clip: Option<Clip>,
     pub jobs: Vec<Arc<Job>>,
     pub toast: Option<(String, bool, Instant)>,
@@ -1760,6 +1771,7 @@ impl App {
             tab: 0,
             side: 0,
             focus: Focus::Panes,
+            fan: Default::default(),
             side_cursor: 0,
             side_items: Vec::new(),
             side_all: Vec::new(),
@@ -2548,6 +2560,13 @@ impl App {
                 self.pad_seen = true;
                 return;
             }
+            // The fan menu's stick.
+            Input::Stick(x, y) => return self.fan_stick(x, y),
+            // The left stick: as the d-pad, unless the fan has it.
+            Input::StickPress(_) if self.fan_has_left_stick() => return,
+            Input::StickPress(a) => return self.handle(Input::Press(a)),
+            Input::Press(Action::Accept) if self.fan_accept() => return,
+            Input::Press(Action::Back) if self.fan_back() => return,
             Input::Release(Action::Select) => {
                 self.range = None;
                 if self.overlay.is_none() && self.video_shown() {
@@ -3741,7 +3760,7 @@ impl App {
         self.cfg.save();
     }
 
-    fn open_actions_menu(&mut self) {
+    pub(crate) fn open_actions_menu(&mut self) {
         self.scan_templates();
         if self.usage_shown() {
             return self.usage_menu();
@@ -4113,7 +4132,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE | row::FAN_ON | row::FAN_STICK | row::FAN_ANIM => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4413,6 +4432,17 @@ impl App {
             row::SIDE_ICON => step(&mut self.cfg.side_icon, SIDE_ICON),
             row::LIST_ICON => step(&mut self.cfg.list_icon, LIST_ICON),
             row::GRID_ICON => step(&mut self.cfg.grid_icon, GRID_ICON),
+            row::FAN_ON => self.cfg.fan.on = !self.cfg.fan.on,
+            row::FAN_STICK => self.cfg.fan.stick = 1 - self.cfg.fan.stick.min(1),
+            row::FAN_ANIM => self.cfg.fan.anim = !self.cfg.fan.anim,
+            row::FAN_SIZE => {
+                step(&mut self.cfg.fan.size, crate::config::FAN_SIZE);
+                self.cfg.fan.size = (self.cfg.fan.size * 10.0).round() / 10.0;
+            }
+            row::FAN_REACH => {
+                step(&mut self.cfg.fan.reach, crate::config::FAN_REACH);
+                self.cfg.fan.reach = (self.cfg.fan.reach * 20.0).round() / 20.0;
+            }
             row::ZOOM => {
                 let z = self.zoom_mut();
                 step(z, ZOOM);

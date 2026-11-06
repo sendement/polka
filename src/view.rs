@@ -90,10 +90,14 @@ impl eframe::App for App {
         // The pad is read globally; never act on it while another window
         // (e.g. a game) has focus.
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        self.fan_sync_stick();
+        if !focused {
+            self.fan_close();
+        }
         for i in inputs {
             if focused || matches!(i, Input::Pad(_) | Input::Release(_)) {
                 // A button pressed, or a pad plugged in: it's in use.
-                if matches!(i, Input::Press(_) | Input::Pad(_)) {
+                if matches!(i, Input::Press(_) | Input::StickPress(_) | Input::Pad(_)) || matches!(i, Input::Stick(x, y) if x.hypot(y) > 0.5) {
                     self.pad_active = true;
                     self.pointer_moved = 0.0;
                 }
@@ -148,6 +152,11 @@ impl eframe::App for App {
             }
             ctx.request_repaint();
         }
+        // (Something else opened over it: put away.)
+        if self.fan.shown && (self.overlay.is_some() || self.term_window.is_some()) {
+            self.fan_close();
+        }
+        self.draw_fan(&ctx);
         self.draw_touch_hold(&ctx);
         // Text being chosen, bigger; text handles: a finger drags them.
         crate::textfx::draw_lens(&ctx);
@@ -1213,6 +1222,9 @@ impl App {
     }
 
     fn hints(&self) -> Vec<(Action, &'static str)> {
+        if self.fan.shown {
+            return vec![(Action::Accept, tr("Choose")), (Action::Back, if self.fan.levels.len() > 1 { tr("Back") } else { tr("Close") })];
+        }
         match &self.overlay {
             Some(Overlay::Menu(_)) => vec![(Action::Accept, tr("OK")), (Action::Back, tr("Back"))],
             Some(Overlay::Osk(k)) if k.live() => vec![
@@ -4127,8 +4139,11 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
         ui.vertical(|ui| {
             ui.set_width(CATS_W);
             ui.spacing_mut().item_spacing.y = 2.0;
+            // (Lower rows in a low window: all of them fit.)
+            let below = if pad.is_some() { 30.0 } else { 0.0 };
+            let row_h = ((h - below) / SETTINGS_CATS as f32 - 2.0).clamp(24.0, 36.0);
             for c in 0..SETTINGS_CATS {
-                let (rect, r) = ui.allocate_exact_size(vec2(CATS_W, 36.0), Sense::click());
+                let (rect, r) = ui.allocate_exact_size(vec2(CATS_W, row_h), Sense::click());
                 let on = c == st.cat;
                 if on && st.side {
                     // The cursor's here: as a focused row.
@@ -4497,6 +4512,38 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::REMEMBER_RIGHT));
+                                    }
+                                }
+                                SItem::Row(r @ (row::FAN_ON | row::FAN_ANIM)) => {
+                                    let (on, label, id) = if r == row::FAN_ON { (cfg.fan.on, tr("Fan menu on a stick"), "fan-on") } else { (cfg.fan.anim, tr("Animations"), "fan-anim") };
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == r, id);
+                                    row_label(ui, rect, label, &label_font, v.text_color(), rect.max.x - 40.0);
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if on {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(r));
+                                    }
+                                    // Under the last one: how it looks, as set.
+                                    if r == row::FAN_ANIM {
+                                        ui.add_space(8.0);
+                                        let (prev, _) = ui.allocate_exact_size(vec2(ui.available_width(), 300.0), Sense::hover());
+                                        crate::fan::draw_preview(ui.painter(), prev, &cfg.fan, ui.visuals());
+                                    }
+                                }
+                                SItem::Row(r @ (row::FAN_STICK | row::FAN_SIZE | row::FAN_REACH)) => {
+                                    let (label, shown, id) = match r {
+                                        row::FAN_STICK => (tr("Stick"), if cfg.fan.stick == 0 { tr("Left stick") } else { tr("Right stick") }.to_string(), "fan-stick"),
+                                        row::FAN_SIZE => (tr("Size"), format!("{}%", (cfg.fan.size * 100.0).round()), "fan-size"),
+                                        _ => (tr("Items show from"), format!("{}%", (cfg.fan.reach * 100.0).round()), "fan-reach"),
+                                    };
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == r, id);
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), v.strong_text_color());
+                                    row_label(ui, rect, label, &label_font, v.text_color(), left - 8.0);
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Step(r, 1.0));
                                     }
                                 }
                                 SItem::Row(row::FOLD_ADDR) => {

@@ -6448,7 +6448,7 @@ fn settings_cats_screens() {
     }
     assert_eq!(at(&h).0, 0, "RB came round");
     // The viewer: its font size one up, from here.
-    press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
+    press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
     assert_eq!(at(&h), (4, SItem::Viewer(crate::app::vrow::THEME)));
     let size = h.state().cfg.viewer.font_size;
     press(&mut h, &[Action::Accept, Action::Down, Action::Down, Action::Right]);
@@ -6470,8 +6470,8 @@ fn settings_cats_screens() {
     press(&mut h, &[Action::Accept]);
     assert_ne!(h.state().cfg.status.get(f), was);
     press(&mut h, &[Action::Accept]);
-    // (The torrents', then) About: the versions.
-    press(&mut h, &[Action::NextTab, Action::NextTab, Action::Accept]);
+    // (The torrents', the fan menu's, then) About: the versions.
+    press(&mut h, &[Action::NextTab, Action::NextTab, Action::NextTab, Action::Accept]);
     assert!(matches!(h.state().overlay, Some(Overlay::Versions(_))), "no versions");
     h.state_mut().overlay = None;
 }
@@ -8405,4 +8405,144 @@ fn dual_split_screens() {
     assert_eq!(h.state().pane().loc, keep);
     h.state_mut().cfg.dual_split = 0.5;
     h.state_mut().cfg.save();
+}
+
+/// The fan menu on the left stick: pushed out, the item's menu fans out
+/// to the right, the item pointed at lit, ✕ runs it; the left edge
+/// switches to Polka's menu; "More…" and submenus fan out further, ○
+/// back; back in the middle it's gone. The stick moves the cursor only
+/// with the fan off; its settings show a preview.
+#[test]
+#[ignore]
+fn fan_screens() {
+    use crate::app::{Cmd, Overlay};
+    use crate::i18n::tr;
+    use crate::input::Input;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("fan");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for i in 0..6 {
+        std::fs::write(dir.join(format!("file{i}.txt")), "text").unwrap();
+    }
+    let mut h = harness(dir.clone());
+    if h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    h.state_mut().cfg.fan = crate::config::FanPrefs::default();
+    h.state_mut().pad_active = true;
+    settle(&mut h);
+    let stick = |h: &mut Harness<'static, App>, x: f32, y: f32| {
+        h.state_mut().handle(Input::Stick(x, y));
+        h.step();
+        h.step();
+    };
+    // Pointing at item i of the last fan.
+    let point = |h: &mut Harness<'static, App>, i: usize| {
+        let n = h.state().fan.levels.last().unwrap().menu.items.len();
+        let a = crate::fan::angles(n)[i].to_radians();
+        h.state_mut().handle(Input::Stick(a.cos() * 0.97, a.sin() * 0.97));
+        h.step();
+        h.step();
+    };
+    let labels = |h: &Harness<'static, App>| h.state().fan.levels.last().map(|l| l.menu.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()).unwrap_or_default();
+    let find = |h: &Harness<'static, App>, l: &str| labels(h).iter().position(|x| x == l);
+    // A little: the circles, no items yet.
+    stick(&mut h, 0.35, 0.0);
+    assert!(h.state().fan.shown && h.state().fan.hot.is_none());
+    assert_eq!(h.state().fan.levels[0].menu.title, "file0.txt", "not the item's menu");
+    shot(&mut h, "fan0-circles");
+    // Out: the items; the one straight right lit.
+    stick(&mut h, 0.97, 0.0);
+    let n = labels(&h).len();
+    assert_eq!(h.state().fan.hot, crate::fan::pointed(n, 0.0));
+    shot(&mut h, "fan1-items");
+    // The d-pad's moves from the stick are the fan's now.
+    h.state_mut().handle(Input::StickPress(crate::input::Action::Down));
+    assert_eq!(h.state().pane().cursor, 0, "the stick moved the cursor");
+    // The left edge: Polka's menu (once), and back on touching it again.
+    // (Bigger: fewer fit, the rest under "More…".)
+    h.state_mut().cfg.fan.size = 1.5;
+    stick(&mut h, -0.97, 0.05);
+    stick(&mut h, -0.97, -0.05);
+    assert!(h.state().fan.global);
+    assert_eq!(h.state().fan.levels[0].menu.title, "Polka");
+    settle(&mut h);
+    shot(&mut h, "fan2-polka-menu");
+    // Its tail under "More…": in, then View, a further fan; Grid ticked
+    // there, the fan stays.
+    let more = find(&h, tr("More…")).expect("no More…");
+    point(&mut h, more);
+    press(&mut h, &[crate::input::Action::Accept]);
+    assert_eq!(h.state().fan.levels.len(), 2);
+    assert_eq!(labels(&h).last().map(|l| l.as_str()), Some(tr("Quit")), "not the tail");
+    let view = find(&h, tr("View")).expect("no View in More…");
+    point(&mut h, view);
+    press(&mut h, &[crate::input::Action::Accept]);
+    assert_eq!(h.state().fan.levels.len(), 3);
+    h.state_mut().cfg.fan.size = 1.0;
+    let grid = find(&h, tr("Grid")).unwrap();
+    point(&mut h, grid);
+    shot(&mut h, "fan3-submenu");
+    press(&mut h, &[crate::input::Action::Accept]);
+    assert_eq!(h.state().cfg.view, crate::config::ViewMode::Grid);
+    assert!(h.state().fan.shown && h.state().fan.levels.len() == 3, "a toggle closed it");
+    assert!(h.state().fan.levels[2].menu.items[grid].checked == Some(true), "its tick didn't follow");
+    // ○: a level back out; in the middle: gone, back to the item's menu.
+    press(&mut h, &[crate::input::Action::Back]);
+    assert_eq!(h.state().fan.levels.len(), 2);
+    stick(&mut h, 0.0, 0.0);
+    assert!(!h.state().fan.shown);
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    settle(&mut h);
+    // An item run: Properties; nothing more till the stick's back.
+    stick(&mut h, 0.97, 0.0);
+    assert!(!h.state().fan.global);
+    let props = find(&h, tr("Properties")).expect("no Properties");
+    point(&mut h, props);
+    press(&mut h, &[crate::input::Action::Accept]);
+    assert!(matches!(h.state().overlay, Some(Overlay::Props(_))), "didn't run");
+    assert!(!h.state().fan.shown);
+    h.state_mut().overlay = None;
+    stick(&mut h, 0.97, 0.02);
+    assert!(!h.state().fan.shown, "back before the stick was let go");
+    stick(&mut h, 0.0, 0.0);
+    stick(&mut h, 0.97, 0.0);
+    assert!(h.state().fan.shown);
+    stick(&mut h, 0.0, 0.0);
+    // A text file open: the editor's own menu.
+    h.state_mut().pane_mut().set_cursor(1);
+    press(&mut h, &[crate::input::Action::Accept]);
+    assert!(h.state().cur_tab().viewer.is_some());
+    stick(&mut h, 0.97, 0.0);
+    assert!(h.state().fan.shown && !labels(&h).is_empty());
+    assert!(!labels(&h).iter().any(|l| l == tr("Properties")), "the files' menu over the editor: {:?}", labels(&h));
+    shot(&mut h, "fan4-editor");
+    stick(&mut h, 0.0, 0.0);
+    h.state_mut().run(Cmd::CloseViewer);
+    settle(&mut h);
+    // Off: the stick moves the cursor as the d-pad does.
+    h.state_mut().settings_step(crate::app::row::FAN_ON, 0.0);
+    assert!(!h.state().cfg.fan.on);
+    let before = h.state().pane().cursor;
+    h.state_mut().handle(Input::StickPress(crate::input::Action::Down));
+    assert_eq!(h.state().pane().cursor, before + 1);
+    stick(&mut h, 0.97, 0.0);
+    assert!(!h.state().fan.shown);
+    h.state_mut().settings_step(crate::app::row::FAN_ON, 0.0);
+    // Its settings, with how it looks.
+    h.state_mut().run(Cmd::Settings);
+    if let Some(Overlay::Settings(st)) = h.state_mut().overlay.as_mut() {
+        st.go_to_row(crate::app::row::FAN_STICK);
+    }
+    settle(&mut h);
+    shot(&mut h, "fan5-settings");
+    h.state_mut().settings_step(crate::app::row::FAN_STICK, 1.0);
+    assert_eq!(h.state().cfg.fan.stick, 1);
+    h.state_mut().settings_step(crate::app::row::FAN_SIZE, 1.0);
+    assert!((h.state().cfg.fan.size - 1.1).abs() < 0.01);
+    h.state_mut().cfg.fan = crate::config::FanPrefs::default();
+    h.state_mut().cfg.save();
+    h.state_mut().overlay = None;
 }

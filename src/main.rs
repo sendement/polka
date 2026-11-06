@@ -8,6 +8,7 @@ mod diagnose;
 mod dnd;
 mod drives;
 mod elevate;
+mod fan;
 mod fm1;
 mod fonts;
 mod i18n;

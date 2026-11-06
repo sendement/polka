@@ -66,6 +66,11 @@ pub enum PadKind {
 pub enum Input {
     Press(Action),
     Release(Action),
+    /// A direction from the left stick (pushed, or repeating as it's
+    /// held): a press of the d-pad, unless the fan menu has the stick.
+    StickPress(Action),
+    /// The fan menu's stick, where it is (x right, y up; -1..1).
+    Stick(f32, f32),
     /// The gamepad in control changed; used for button glyphs.
     Pad(PadKind),
 }
@@ -86,7 +91,13 @@ struct Held {
     action: Action,
     since: Instant,
     next: Instant,
+    /// Pushed by the left stick (else a button).
+    stick: bool,
 }
+
+/// Which stick the fan menu reads (set by the app from its settings):
+/// 0 none, 1 the left one, 2 the right one.
+pub static FAN_STICK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Direction of a stick on one axis pair, with hysteresis.
 #[derive(Default)]
@@ -101,6 +112,10 @@ struct PadThread {
     wake: Box<dyn Fn() + Send>,
     held: Vec<Held>,
     left: Stick,
+    /// The right stick, for the fan menu.
+    right: (f32, f32),
+    /// The fan stick's last position sent.
+    fan_sent: (f32, f32),
     owner: Option<(GamepadId, Instant)>,
     /// The device whose stick moved last, and how many stick moves were logged.
     stick_from: String,
@@ -127,6 +142,8 @@ pub fn spawn_gamepad(tx: Sender<Input>, wake: impl Fn() + Send + 'static) {
                 wake: Box::new(wake),
                 held: Vec::new(),
                 left: Stick::default(),
+                right: (0.0, 0.0),
+                fan_sent: (0.0, 0.0),
                 owner: None,
                 stick_from: String::new(),
                 stick_logged: 0,
@@ -233,16 +250,17 @@ impl PadThread {
     }
 
     fn press(&mut self, a: Action) {
+        self.press_from(a, false);
+    }
+
+    fn press_from(&mut self, a: Action, stick: bool) {
         if self.held.iter().any(|h| h.action == a) {
             return;
         }
         let now = Instant::now();
-        if a.repeats() {
-            self.held.push(Held { action: a, since: now, next: now + REPEAT_DELAY });
-        } else {
-            self.held.push(Held { action: a, since: now, next: now + Duration::from_secs(3600) });
-        }
-        self.send(Input::Press(a));
+        let next = if a.repeats() { now + REPEAT_DELAY } else { now + Duration::from_secs(3600) };
+        self.held.push(Held { action: a, since: now, next, stick });
+        self.send(if stick { Input::StickPress(a) } else { Input::Press(a) });
     }
 
     fn release(&mut self, a: Action) {
@@ -264,11 +282,11 @@ impl PadThread {
             if h.action.repeats() && now >= h.next {
                 let fast = now.duration_since(h.since) > ACCEL_AFTER;
                 h.next = now + if fast { REPEAT_FAST } else { REPEAT_SLOW };
-                fire.push(h.action);
+                fire.push(if h.stick { Input::StickPress(h.action) } else { Input::Press(h.action) });
             }
         }
-        for a in fire {
-            self.send(Input::Press(a));
+        for i in fire {
+            self.send(i);
         }
     }
 
@@ -284,6 +302,8 @@ impl PadThread {
                         self.release(a);
                     }
                     self.left = Stick::default();
+                    self.right = (0.0, 0.0);
+                    self.send_fan(true);
                 }
                 self.owner = Some((id, now));
                 true
@@ -329,18 +349,44 @@ impl PadThread {
                 }
             }
             EventType::AxisChanged(axis, v, _) => match axis {
-                // The right stick is deliberately unbound.
+                // The right stick: only for the fan menu, if it's set so.
                 Axis::LeftStickX => {
                     self.left.x = v;
                     self.update_stick();
+                    self.send_fan(false);
                 }
                 Axis::LeftStickY => {
                     self.left.y = v;
                     self.update_stick();
+                    self.send_fan(false);
+                }
+                Axis::RightStickX => {
+                    self.right.0 = v;
+                    self.send_fan(false);
+                }
+                Axis::RightStickY => {
+                    self.right.1 = v;
+                    self.send_fan(false);
                 }
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    /// The fan menu's stick, as it moves (small wobbles left out; back in
+    /// the middle always told).
+    fn send_fan(&mut self, always: bool) {
+        let (x, y) = match FAN_STICK.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => (self.left.x, self.left.y),
+            2 => self.right,
+            _ => return,
+        };
+        let (px, py) = self.fan_sent;
+        let centred = x.hypot(y) < 0.15;
+        if always || (x - px).abs() + (y - py).abs() > 0.02 || (centred && px.hypot(py) >= 0.15) {
+            self.fan_sent = (x, y);
+            self.send(Input::Stick(x, y));
         }
     }
 
@@ -368,7 +414,7 @@ impl PadThread {
                     self.stick_logged += 1;
                     log(&format!("stick {w:?} from {:?} ({x:.2}, {y:.2})", self.stick_from));
                 }
-                self.press(w);
+                self.press_from(w, true);
             }
             let s = &mut self.left;
             s.active = want;

@@ -84,6 +84,8 @@ pub struct Config {
     pub terminal: TermPrefs,
     /// The torrent client.
     pub torrent: TorrentPrefs,
+    /// The fan menu on a stick.
+    pub fan: FanPrefs,
     /// Passwords typed show nothing at all (else an asterisk a character).
     pub password_hidden: bool,
     /// On-screen keyboard layouts ⇄ goes through (codes; empty: English
@@ -156,6 +158,32 @@ impl PadHints {
             PadHints::Always => "Always",
             PadHints::Never => "Never",
         })
+    }
+}
+
+/// The fan menu: the context menu spread out to the right of a stick's
+/// circles at the window's left edge.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FanPrefs {
+    pub on: bool,
+    /// Which stick: 0 the left one (it then no longer moves the cursor
+    /// while the fan can show), 1 the right one.
+    pub stick: u8,
+    /// How big (1.0 as made).
+    pub size: f32,
+    /// How far out the stick goes before the items show (0..1).
+    pub reach: f32,
+    /// Its levels and the switch to Polka's menu slide in.
+    pub anim: bool,
+}
+
+pub const FAN_SIZE: (f32, f32, f32) = (0.7, 1.5, 0.1);
+pub const FAN_REACH: (f32, f32, f32) = (0.5, 0.95, 0.05);
+
+impl Default for FanPrefs {
+    fn default() -> Self {
+        Self { on: true, stick: 0, size: 1.0, reach: 0.7, anim: true }
     }
 }
 
@@ -324,6 +352,7 @@ impl Default for Config {
             language: None,
             terminal: TermPrefs::default(),
             torrent: TorrentPrefs::default(),
+            fan: FanPrefs::default(),
             password_hidden: false,
             osk_layouts: Vec::new(),
             install_on_open: true,
