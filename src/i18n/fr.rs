@@ -245,6 +245,8 @@ pub const T: &[(&str, &str)] = &[
     ("Arch package", "paquet Arch"),
     ("installed by hand", "installée à la main"),
     ("No connection", "Pas de connexion"),
+    ("GitHub turned the request away (too many from this address): try again in an hour", "GitHub a refusé la requête (trop depuis cette adresse) : réessayez dans une heure"),
+    ("GitHub turned the request away (too many from this address): try again in %n min", "GitHub a refusé la requête (trop depuis cette adresse) : réessayez dans %n min"),
     ("Install Polka", "Installer Polka"),
     ("Restart Polka once it's installed", "Redémarrez Polka une fois installée"),
     ("Nothing here installs it", "Rien ici ne peut l’installer"),

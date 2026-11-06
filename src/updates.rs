@@ -22,6 +22,8 @@ pub const SINCE: Version = (0, 44, 0);
 pub type Version = (u32, u32, u32);
 
 const RELEASES: &str = "https://api.github.com/repos/sendement/polka/releases?per_page=100";
+/// How the API's limit stands (asking doesn't count against it).
+const RATE_LIMIT: &str = "https://api.github.com/rate_limit";
 /// Polka's own Flatpak repository (its versions.json: each version's commit).
 const SITE: &str = "https://sendement.github.io/polka";
 const APP_ID: &str = "io.github.sendement.Polka";
@@ -196,11 +198,39 @@ fn flat() -> Flat {
     Flat { from_repo: remote.as_deref().is_some_and(|r| r == origin), remote }
 }
 
+/// The releases as GitHub's API lists them (or a stand-in, for tests:
+/// POLKA_RELEASES_URL). It answers 60 times an hour to one address with
+/// no account, then 403: said so, with when it answers again.
+fn releases_json() -> Result<String, String> {
+    let url = std::env::var("POLKA_RELEASES_URL").unwrap_or_else(|_| RELEASES.into());
+    releases_from(&url, RATE_LIMIT)
+}
+
+fn releases_from(url: &str, rate: &str) -> Result<String, String> {
+    get(url).map_err(|e| {
+        if !(e.contains("403") || e.contains("429")) {
+            return e;
+        }
+        // (Asking how long is left doesn't count against the limit.)
+        match get(rate).ok().and_then(|j| reset_in(&j, std::time::SystemTime::now())) {
+            Some(m) => tr("GitHub turned the request away (too many from this address): try again in %n min").replace("%n", &m.to_string()),
+            None => tr("GitHub turned the request away (too many from this address): try again in an hour").to_string(),
+        }
+    })
+}
+
+/// Minutes until the API answers again, from its rate_limit answer.
+pub fn reset_in(json: &str, now: std::time::SystemTime) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let at = v["resources"]["core"]["reset"].as_u64().or_else(|| v["rate"]["reset"].as_u64())?;
+    let now = now.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(at.saturating_sub(now).div_ceil(60).max(1))
+}
+
 /// From GitHub (or a stand-in, for tests: POLKA_RELEASES_URL); for a
 /// Flatpak, with each version's commit and where it comes from.
 fn fetch(way: Way) -> Result<(Vec<Release>, Option<Flat>), String> {
-    let url = std::env::var("POLKA_RELEASES_URL").unwrap_or_else(|_| RELEASES.into());
-    let mut list = parse(&get(&url)?, way)?;
+    let mut list = parse(&releases_json()?, way)?;
     if way != Way::Flatpak {
         return Ok((list, None));
     }
@@ -576,6 +606,39 @@ pub fn draw(ui: &mut Ui, d: &VersionsDlg) -> Option<VEv> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// GitHub's limit reached: said so, with the minutes left (asked of
+    /// the rate_limit answer), not a bare "error: 403".
+    #[test]
+    fn rate_limited_said_so() {
+        use std::io::{Read, Write};
+        let now = std::time::SystemTime::now();
+        let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(reset_in(&format!(r#"{{"resources": {{"core": {{"reset": {}}}}}}}"#, secs + 17 * 60 + 5), now), Some(18));
+        assert_eq!(reset_in(&format!(r#"{{"rate": {{"reset": {}}}}}"#, secs - 5), now), Some(1));
+        assert_eq!(reset_in("{}", now), None);
+        // A stand-in GitHub: 403 for the list, the limit's reset on asking.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let reset = secs + 25 * 60;
+        std::thread::spawn(move || {
+            for s in l.incoming().take(2) {
+                let mut s = s.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (status, body) = if req.starts_with("GET /rate_limit") {
+                    ("200 OK", format!(r#"{{"resources": {{"core": {{"limit": 60, "remaining": 0, "reset": {reset}}}}}}}"#))
+                } else {
+                    ("403 Forbidden", r#"{"message": "API rate limit exceeded"}"#.to_string())
+                };
+                let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let e = releases_from(&format!("{base}/repos/x/releases"), &format!("{base}/rate_limit")).unwrap_err();
+        assert!(e.contains("25") && !e.contains("403"), "{e}");
+    }
 
     #[test]
     fn versions_and_files() {
