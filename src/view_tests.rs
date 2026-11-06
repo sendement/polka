@@ -7821,7 +7821,8 @@ fn torrents_screens() {
     h.state_mut().pane_mut().navigate(Location::Local(dir.join("chosen")), None, &cfg);
     settle(&mut h);
     shot(&mut h, "tr1-progress");
-    assert!(progress(&h, &first.join("beach.jpg")).is_some_and(|f| f < 1.0));
+    // (Shown on the file too; at 128 KiB/s it may already be whole.)
+    assert!(progress(&h, &first.join("beach.jpg")).is_some());
     // Moved elsewhere in Polka meanwhile: it goes on there.
     std::fs::create_dir_all(dir.join("moved")).unwrap();
     h.state_mut().start(crate::ops::Op::Move { sources: vec![Location::Local(first.clone())], dest: crate::vfs::Dest::Dir(dir.join("moved")), policy: crate::ops::Conflict::Rename });
@@ -8018,6 +8019,41 @@ fn menu_style_screens() {
     settle(&mut h);
     assert!(matches!(h.state().overlay, Some(Overlay::Osk(_))), "the item didn't run");
     h.state_mut().overlay = None;
+    // Tiles: a right click on the empty space past them gives Polka's own
+    // menu (as the menu button does) where it was clicked, on a tile its
+    // own actions.
+    h.state_mut().cfg.view = crate::config::ViewMode::Grid;
+    settle(&mut h);
+    let right = |h: &mut Harness<'static, App>, p: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        settle(h);
+    };
+    let low = h.state().pane().drawn.iter().map(|d| d.2.max.y).fold(0.0, f32::max);
+    let p = egui::pos2(500.0, low + 40.0);
+    right(&mut h, p);
+    let (title, labels) = match &h.state().overlay {
+        Some(Overlay::Menu(m)) => (m.title.clone(), m.items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()),
+        _ => panic!("no menu on the empty space"),
+    };
+    assert_eq!(title, "Polka");
+    assert!(labels.iter().any(|l| l == tr("New folder")) && labels.iter().any(|l| l == tr("Settings…")), "{labels:?}");
+    assert!(place(&h).unwrap().1.is_some_and(|a| a.min.distance(p) < 2.0));
+    shot(&mut h, "ms5-grid-empty");
+    h.state_mut().overlay = None;
+    settle(&mut h);
+    let p = row(&h, "file2.txt").center();
+    right(&mut h, p);
+    match &h.state().overlay {
+        Some(Overlay::Menu(m)) => assert!(m.title != "Polka" && m.items.iter().any(|i| i.label == tr("Rename")), "{}", m.title),
+        _ => panic!("no menu on the tile"),
+    }
+    h.state_mut().overlay = None;
+    h.state_mut().cfg.view = crate::config::ViewMode::List;
+    settle(&mut h);
     // Near the window's foot: kept on the screen.
     h.state_mut().cfg.menu_style = 2;
     let p = egui::pos2(900.0, 600.0);

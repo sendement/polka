@@ -1782,12 +1782,13 @@ impl App {
                     p.cursor_hidden = false;
                     self.activate();
                 }
-                PaneEvent::Context(i) => {
-                    if let Some(i) = i {
-                        self.pane_mut().cursor = i;
-                    }
+                // On an item: its actions; on the empty space around them:
+                // Polka's own menu, as from the menu button.
+                PaneEvent::Context(Some(i)) => {
+                    self.pane_mut().cursor = i;
                     self.handle(Input::Press(Action::Actions));
                 }
+                PaneEvent::Context(None) => self.open_app_menu(),
                 PaneEvent::DragStart(i) => self.drag_start(idx, i),
                 PaneEvent::Drop(i) => self.drop_on_pane(idx, i),
                 PaneEvent::Rest(_) => {}
