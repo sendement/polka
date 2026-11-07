@@ -306,7 +306,16 @@ impl App {
         let Some(p) = ctx.input(|i| i.pointer.hover_pos()) else { return };
         let accent = ctx.style_of(ctx.theme()).visuals.selection.bg_fill;
         // The stack's pictures (paths), for the system's drag.
-        let pics_for_icon: Vec<String> = if self.dnd_out || ctx.content_rect().contains(p) {
+        let inside = ctx.content_rect().contains(p);
+        // Plain files go to the system's drag at once, while still over the
+        // window: another window on top of ours gets them there too (the
+        // pointer stays ours till the drag is the system's, so only the
+        // compositor knows which window it's over). From an archive: once
+        // pulled out, not to unpack on every drag inside.
+        // (Held, not dropped back here and waiting for its release.)
+        let held = ctx.input(|i| i.pointer.primary_down()) && self.dnd_release.is_none() && !self.dnd_dropped;
+        let plain = held && self.drag.as_ref().is_some_and(|d| d.from != EXTERNAL && d.sources.iter().all(|l| l.local_path().is_some()));
+        let pics_for_icon: Vec<String> = if self.dnd_out || (inside && !plain) {
             Vec::new()
         } else {
             let shown = self.drag.as_ref().map(|d| d.shown.clone()).unwrap_or_default();
@@ -324,7 +333,7 @@ impl App {
         };
         // Pulled out of the window: the system's drag takes the files on, to
         // other programs (and back here, if it returns).
-        if !self.dnd_out && !ctx.content_rect().contains(p) && self.dnd.is_some() {
+        if !self.dnd_out && (!inside || plain) && self.dnd.is_some() {
             if let Some(d) = self.drag.as_ref().filter(|d| d.from != EXTERNAL) {
                 let n = d.sources.len();
                 let local: Vec<PathBuf> = d.sources.iter().filter_map(|l| l.local_path().map(|p| p.to_path_buf())).collect();
@@ -363,7 +372,7 @@ impl App {
                 if let (Some(files), Some(dnd)) = (files, &self.dnd) {
                     self.dnd_unpack = None;
                     let icon = drag_icon(&pics_for_icon, n, accent, ctx.pixels_per_point());
-                    dnd.start(files, icon);
+                    dnd.start(files, icon, inside);
                     self.dnd_out = true;
                     self.dnd_dropped = false;
                 }

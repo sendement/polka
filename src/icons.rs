@@ -95,19 +95,25 @@ impl Icons {
 
     /// Folder icons in `color` where the theme draws them, else as named.
     pub fn named_colored(&mut self, theme: &str, candidates: &[&str], size: u16, color: Option<&str>) -> Option<String> {
+        // Only a colour the theme has; its variants from the theme itself
+        // (elsewhere a folder-<c> may be some other theme's tiny outline).
+        let color = color.filter(|c| self.colors_of(theme).iter().any(|x| x == c));
         candidates.iter().find_map(|c| {
-            color.and_then(|col| tinted(c, col)).and_then(|t| self.lookup_in(theme, &t, size)).or_else(|| self.lookup_in(theme, c, size))
+            color.as_deref().and_then(|col| tinted(c, col)).and_then(|t| self.lookup_themed(theme, &t, size)).or_else(|| self.lookup_in(theme, c, size))
         })
     }
 
     /// The folder colours `theme` (and what it inherits) comes in.
     pub fn folder_colors(&mut self, theme: &str) -> Vec<String> {
-        if let Some(c) = self.colors.get(theme) {
-            return c.clone();
+        self.colors_of(theme).to_vec()
+    }
+
+    fn colors_of(&mut self, theme: &str) -> &[String] {
+        if !self.colors.contains_key(theme) {
+            let c: Vec<String> = place_icons_in(theme).into_iter().filter_map(|g| g.color).collect();
+            self.colors.insert(theme.to_string(), c);
         }
-        let c: Vec<String> = place_icons_in(theme).into_iter().filter_map(|g| g.color).collect();
-        self.colors.insert(theme.to_string(), c.clone());
-        c
+        &self.colors[theme]
     }
 
     /// Icon for UI chrome (toolbar buttons). Tries `name` and
@@ -168,6 +174,11 @@ impl Icons {
         self.trash.as_ref().and_then(|(_, set)| set.as_ref()).map(|set| set[level.min(2)].clone())
     }
 
+    /// The theme in use (its light or dark variant).
+    pub fn theme_name(&self) -> &str {
+        &self.theme
+    }
+
     /// Switch themes; None follows the desktop's setting.
     pub fn set_theme(&mut self, theme: Option<String>) {
         self.chosen = theme.or_else(detect_theme).unwrap_or_else(|| "hicolor".into());
@@ -184,6 +195,17 @@ impl Icons {
     fn lookup(&mut self, name: &str, size: u16) -> Option<String> {
         let theme = self.theme.clone();
         self.lookup_in(&theme, name, size)
+    }
+
+    /// In `theme` (and what it inherits) only.
+    fn lookup_themed(&mut self, theme: &str, name: &str, size: u16) -> Option<String> {
+        let key = format!("themed:{theme}/{name}@{size}");
+        if let Some(v) = self.names.get(&key) {
+            return v.clone();
+        }
+        let found = freedesktop_icons::lookup(name).with_theme(theme).with_size(size).with_cache().find().map(|p| recolored(&p, self.text).unwrap_or_else(|| uri(&p)));
+        self.names.insert(key, found.clone());
+        found
     }
 
     fn lookup_in(&mut self, theme: &str, name: &str, size: u16) -> Option<String> {

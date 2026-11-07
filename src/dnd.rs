@@ -63,7 +63,8 @@ pub struct Icon {
 }
 
 enum Cmd {
-    Start(Vec<PathBuf>, Option<Icon>),
+    /// The files, the picture, and whether it starts hidden (over us).
+    Start(Vec<PathBuf>, Option<Icon>, bool),
     GetText(Sender<Option<String>>),
     SetText(String),
     /// Raise the window with another program's activation token.
@@ -156,12 +157,15 @@ impl Dnd {
         Some(Self { cmd, events })
     }
 
-    /// Hand the files to the system's drag (they've left the window).
-    pub fn start(&self, files: Vec<PathBuf>, icon: Option<Icon>) {
+    /// Hand the files to the system's drag. Started while still over the
+    /// window (`over_us`), the picture waits hidden till it leaves: the
+    /// window draws its own stack meanwhile, and the compositor says where
+    /// the pointer is, other windows on top of ours included.
+    pub fn start(&self, files: Vec<PathBuf>, icon: Option<Icon>, over_us: bool) {
         match WAKER.get() {
-            Some(w) => w.send(Cmd::Start(files, icon)),
+            Some(w) => w.send(Cmd::Start(files, icon, over_us)),
             None => {
-                let _ = self.cmd.send(Cmd::Start(files, icon));
+                let _ = self.cmd.send(Cmd::Start(files, icon, over_us));
             }
         }
     }
@@ -185,7 +189,7 @@ impl Dnd {
         let (out_tx, out) = crossbeam_channel::unbounded();
         std::thread::spawn(move || {
             while let Ok(c) = cmd_rx.recv() {
-                if let Cmd::Start(f, _) = c {
+                if let Cmd::Start(f, _, _) = c {
                     let _ = out_tx.send(f);
                 }
             }
@@ -201,7 +205,7 @@ fn run(conn: Connection, mut queue: EventQueue<State>, mut st: State, cmds: Rece
         }
         while let Ok(c) = cmds.try_recv() {
             match c {
-                Cmd::Start(files, icon) => st.start(files, icon),
+                Cmd::Start(files, icon, over_us) => st.start(files, icon, over_us),
                 Cmd::GetText(reply) => st.get_text(&conn, reply),
                 Cmd::SetText(t) => st.set_text(t),
                 Cmd::Activate(token) => {
@@ -269,7 +273,7 @@ impl State {
         self.ctx.request_repaint();
     }
 
-    fn start(&mut self, files: Vec<PathBuf>, icon: Option<Icon>) {
+    fn start(&mut self, files: Vec<PathBuf>, icon: Option<Icon>, over_us: bool) {
         let (Some(m), Some(d)) = (&self.manager, &self.device) else { return };
         if self.own.is_some() || files.is_empty() {
             return;
@@ -286,6 +290,11 @@ impl State {
             src.set_actions(DndAction::Copy | DndAction::Move);
         }
         let pic = icon.and_then(|i| self.icon_surface(i));
+        if let Some((s, _)) = &pic {
+            if over_us {
+                s.attach(None, 0, 0);
+            }
+        }
         d.start_drag(Some(&src), &self.surface, pic.as_ref().map(|(s, _)| s), self.serial);
         if let Some((s, _)) = &pic {
             s.commit();

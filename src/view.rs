@@ -2536,7 +2536,7 @@ fn draw_pane(ui: &mut Ui, pane: &mut Pane, icons: &mut Icons, cfg: &Config, focu
                 let i = row * cols + col;
                 let Some(e) = pane.entries.get(i) else { break };
                 let rect = if grid {
-                    Rect::from_min_size(row_rect.min + vec2(col as f32 * grid_w + 4.0, 0.0), vec2(grid_w - 4.0, grid_h - 4.0))
+                    Rect::from_min_size(row_rect.min + vec2(col as f32 * grid_w + 4.0, 4.0), vec2(grid_w - 4.0, grid_h - 4.0))
                 } else {
                     row_rect
                 };
@@ -3403,8 +3403,8 @@ const THEME_SAMPLES: [(&str, &[&str]); 16] = [
     ("Disk", &["drive-harddisk"]),
 ];
 
-/// Room for three rows of folder colours (Papirus has 28) in the theme picker.
-const THEME_CHIPS_H: f32 = 3.0 * 33.0 + 6.0;
+/// Room for the rows of folder colours (Papirus has 28) in the theme picker.
+const THEME_CHIPS_H: f32 = 5.0 * 33.0 + 6.0;
 
 /// Nothing changes until Apply (or a double click): the preview shows the
 /// pick first.
@@ -3471,7 +3471,12 @@ fn draw_themes(ui: &mut Ui, t: &mut crate::app::ThemePicker, icons: &mut Icons) 
             let colors = icons.folder_colors(&theme);
             t.colors = colors.clone();
             if !colors.is_empty() {
-                let (room, _) = ui.allocate_exact_size(vec2((crate::app::ThemePicker::COLOR_COLS as f32 * 33.0 + 6.0).min(per as f32 * 84.0), THEME_CHIPS_H), Sense::hover());
+                // As many rows as they take at the samples' width (else
+                // they'd spill over the samples below).
+                let w = per as f32 * 84.0 - 6.0;
+                t.cols = (((w + 3.0) / 33.0).floor() as usize).max(1);
+                let rows = (colors.len() + 1).div_ceil(t.cols);
+                let (room, _) = ui.allocate_exact_size(vec2(w, rows as f32 * 33.0 + 3.0), Sense::hover());
                 let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::left_to_right(Align::Min).with_main_wrap(true)));
                 let ui = &mut ui;
                 {

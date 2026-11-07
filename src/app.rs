@@ -1438,12 +1438,11 @@ pub struct ThemePicker {
     pub colors: Vec<String>,
     /// The pad is in the colours rather than the list of themes.
     pub in_colors: bool,
+    /// Colours a row holds, as last drawn (the pad's ↑↓ go by it).
+    pub cols: usize,
 }
 
 impl ThemePicker {
-    /// Colours a row of the picker holds (the drawing wraps at as many).
-    pub const COLOR_COLS: usize = 10;
-
     /// The cursor row, once per cursor change, for scrolling it into view.
     pub fn take_scroll(&mut self) -> Option<usize> {
         (self.scrolled != Some(self.cursor)).then(|| {
@@ -2977,7 +2976,7 @@ impl App {
                 let colors = self.icons.folder_colors(&t.preview[t.cursor]);
                 let all: Vec<Option<String>> = std::iter::once(None).chain(colors.into_iter().map(Some)).collect();
                 let at = all.iter().position(|c| *c == t.color).unwrap_or(0) as isize;
-                let row = ThemePicker::COLOR_COLS as isize;
+                let row = t.cols.max(1) as isize;
                 let to = match a {
                     Action::Left if at % row == 0 => {
                         t.in_colors = false;
@@ -5209,7 +5208,7 @@ impl App {
                 }
                 let cursor = items.iter().position(|(id, _)| *id == self.cfg.icon_theme).unwrap_or(0);
                 let color = self.cfg.folder_color.clone();
-                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new(), in_colors: false }));
+                self.overlay = Some(Overlay::Themes(ThemePicker { items, cursor, preview, scrolled: None, color, colors: Vec::new(), in_colors: false, cols: 7 }));
             }
             Cmd::SchemesFolder => {
                 let Some(dir) = crate::schemes::dir() else { return };
@@ -5224,6 +5223,14 @@ impl App {
                 self.icons.folder_color = color.clone();
                 self.cfg.folder_color = color;
                 self.run(Cmd::SetIconTheme(id));
+                // A theme without that colour: none kept (picked again with
+                // a theme that has it).
+                let theme = self.icons.theme_name().to_string();
+                if self.cfg.folder_color.as_ref().is_some_and(|c| !self.icons.folder_colors(&theme).contains(c)) {
+                    self.icons.folder_color = None;
+                    self.cfg.folder_color = None;
+                    self.cfg.save();
+                }
             }
             Cmd::SetIconTheme(id) => {
                 self.icons.set_theme(id.clone());

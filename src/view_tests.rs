@@ -3024,9 +3024,18 @@ fn other_programs(h: &mut Harness<'static, App>) {
         move_to(h, pos2(1300.0, 300.0));
         move_to(h, pos2(1310.0, 305.0));
     };
-    pull_out(h);
-    let files = started.recv_timeout(std::time::Duration::from_secs(2)).expect("no drag started");
+    // Handed on while still over the window (another window on top of
+    // ours only the compositor knows about).
+    let (_, hot) = rect_of(h, "out.txt");
+    press_at(h, hot.center(), true);
+    move_to(h, hot.center() + vec2(8.0, 8.0));
+    move_to(h, hot.center() + vec2(100.0, 40.0));
+    assert!(h.ctx.content_rect().contains(hot.center() + vec2(100.0, 40.0)));
+    let files = started.recv_timeout(std::time::Duration::from_secs(2)).expect("no drag started over the window");
     assert_eq!(files, vec![dir.join("out.txt")]);
+    move_to(h, pos2(1300.0, 300.0));
+    move_to(h, pos2(1310.0, 305.0));
+    assert!(started.try_recv().is_err(), "started twice");
     // Dropped in another program: done here, the button up again.
     tx.send(Ev::OutEnded).unwrap();
     feed(h);
@@ -4850,6 +4859,20 @@ fn folder_color_screens() {
     // Back to the theme's own.
     h.state_mut().run(Cmd::SetIconLook(Some("Papirus-Dark".into()), None));
     assert!(!h.state_mut().icons.named(&["folder"], 64).unwrap().contains("green"));
+    // Green kept over to a theme without colours: its own folders (not
+    // some other theme's folder-green outline), and no colour kept.
+    h.state_mut().run(Cmd::SetIconLook(Some("Papirus-Dark".into()), Some("green".into())));
+    if std::path::Path::new("/usr/share/icons/Adwaita/index.theme").exists() {
+        assert!(h.state_mut().icons.folder_colors("Adwaita").is_empty());
+        h.state_mut().run(Cmd::SetIconLook(Some("Adwaita".into()), Some("green".into())));
+        assert_eq!(h.state().cfg.folder_color, None);
+        let own = h.state_mut().icons.named_in("Adwaita", &["folder"], 64);
+        assert_eq!(h.state_mut().icons.named(&["folder"], 64), own);
+        // Even with the colour still in the settings (an older Polka's).
+        h.state_mut().icons.folder_color = Some("green".into());
+        assert_eq!(h.state_mut().icons.named(&["folder"], 64), own);
+        h.state_mut().icons.folder_color = None;
+    }
     h.state_mut().run(Cmd::SetIconTheme(None));
 }
 
@@ -8776,4 +8799,48 @@ fn sidebar_pane_screens() {
     shot(&mut h, "sp1-opened-right");
     h.state_mut().focus = Focus::Panes;
     h.state_mut().run(Cmd::ToggleDual);
+}
+
+/// Tiles in the dual panes: as far from the pane's frame above as beside.
+#[test]
+#[ignore]
+fn tile_gap_screens() {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap();
+    let mut h = harness(dir.clone());
+    if !h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::Grid));
+    let cfg = h.state().cfg.clone();
+    for side in [1, 0] {
+        h.state_mut().set_side(side);
+        h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    }
+    settle(&mut h);
+    shot(&mut h, "tg0-dual-tiles");
+    // The frame (1.5 px, accent) around the left pane: its top and left
+    // edges by colour, from the first tile's middle outwards.
+    let img = h.render().expect("render");
+    let ppp = h.ctx.pixels_per_point();
+    let (_, cell, _) = h.state().pane_at(0).drawn.iter().find(|d| d.0 == 0).copied().expect("no tile drawn");
+    let accent = h.ctx.style_of(h.ctx.theme()).visuals.selection.bg_fill;
+    let is_frame = |x: f32, y: f32| {
+        let p = img.get_pixel((x * ppp) as u32, (y * ppp) as u32).0;
+        (p[0] as i32 - accent.r() as i32).abs() + (p[1] as i32 - accent.g() as i32).abs() + (p[2] as i32 - accent.b() as i32).abs() < 60
+    };
+    let c = cell.center();
+    let mut top = cell.min.y - 1.0;
+    while top > 0.0 && !is_frame(c.x, top) {
+        top -= 1.0;
+    }
+    let mut left = cell.min.x - 1.0;
+    while left > 0.0 && !is_frame(left, c.y) {
+        left -= 1.0;
+    }
+    let (above, beside) = (cell.min.y - top, cell.min.x - left);
+    assert!((above - beside).abs() <= 1.5, "above {above}, beside {beside}");
+    h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
 }
