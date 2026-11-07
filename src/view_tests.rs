@@ -8844,3 +8844,70 @@ fn tile_gap_screens() {
     assert!((above - beside).abs() <= 1.5, "above {above}, beside {beside}");
     h.state_mut().run(Cmd::SetView(crate::config::ViewMode::List));
 }
+
+/// btrfs compression on the disk usage page: the button, compsize's
+/// answers shown beside the sizes, and no compsize at all.
+#[test]
+#[ignore]
+fn usage_real_screens() {
+    use crate::app::Cmd;
+    use crate::i18n::tr;
+    let _only = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("real");
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["logs", "pics"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    std::fs::write(dir.join("logs/a.log"), "line\n".repeat(40000)).unwrap();
+    std::fs::write(dir.join("pics/b.bin"), vec![7u8; 90000]).unwrap();
+    let mut h = harness(dir.clone());
+    h.state_mut().run(Cmd::UsageOpen(Some(dir.clone())));
+    for _ in 0..50 {
+        settle(&mut h);
+        if h.state().cur_tab().usage.as_ref().unwrap().ready().is_some() {
+            break;
+        }
+    }
+    h.state_mut().run(Cmd::UsageMode(0));
+    // As on btrfs (the test folder may lie anywhere).
+    h.state_mut().tabs.iter_mut().filter_map(|t| t.usage.as_deref_mut()).for_each(|u| u.ready_mut().unwrap().btrfs = true);
+    settle(&mut h);
+    shot(&mut h, "ur-button");
+    h.state_mut().usage_menu();
+    let labels: Vec<String> = match &h.state().overlay {
+        Some(crate::app::Overlay::Menu(m)) => m.items.iter().map(|i| i.label.clone()).collect(),
+        _ => Vec::new(),
+    };
+    assert!(labels.iter().any(|l| l == tr("Size after compression")), "{labels:?}");
+    h.state_mut().overlay = None;
+    // No compsize: said so.
+    unsafe { std::env::set_var("POLKA_CONVERT_TOOLS", "ffmpeg") };
+    h.state_mut().run(Cmd::UsageReal);
+    unsafe { std::env::remove_var("POLKA_CONVERT_TOOLS") };
+    assert!(h.state().overlay.is_none(), "asked for a password without compsize");
+    assert!(h.state().toast.as_ref().is_some_and(|t| t.0.contains("compsize")), "no word about compsize");
+    // compsize's answers (as the elevated run leaves them).
+    let out = std::env::temp_dir().join(format!("polka-compsize-test-{}", std::process::id()));
+    std::fs::create_dir_all(&out).unwrap();
+    let total = |disk: u64, raw: u64| format!("Processed 1 file.\nType       Perc     Disk Usage   Uncompressed Referenced\nTOTAL       10%      {disk}      {raw}      {raw}\n");
+    std::fs::write(out.join("0"), total(150_000, 290_000)).unwrap();
+    std::fs::write(out.join("1"), total(20_000, 200_000)).unwrap();
+    std::fs::write(out.join("2"), "").unwrap();
+    let items = vec![dir.clone(), dir.join("logs"), dir.join("pics")];
+    h.state_mut().usage_real_done(&out, &items, &Ok(()));
+    assert!(!out.exists(), "answers left behind");
+    let r = h.state().cur_tab().usage.as_ref().unwrap().ready().unwrap();
+    assert_eq!(r.real.get(&Vec::new()), Some(&crate::usage::Real { disk: 150_000, raw: 290_000 }));
+    let logs = r.tree.children.iter().position(|c| &*c.name == "logs").unwrap();
+    assert_eq!(r.real.get(&vec![logs]).map(|x| x.disk), Some(20_000));
+    assert_eq!(r.real.len(), 2, "pics had no answer");
+    assert!(r.real_wanted().iter().all(|p| p != &vec![logs]), "logs asked again");
+    settle(&mut h);
+    shot(&mut h, "ur0-rings");
+
+    h.state_mut().run(Cmd::UsageMode(2));
+    settle(&mut h);
+    shot(&mut h, "ur1-list");
+    h.state_mut().run(Cmd::UsageMode(0));
+    h.state_mut().run(Cmd::UsageClose);
+}

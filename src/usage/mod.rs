@@ -71,6 +71,9 @@ impl Node {
     }
 }
 
+/// Folders in the middle one asked about at once (each a compsize run).
+pub const REAL_MOST: usize = 40;
+
 /// Files kept by name in each folder; the smaller ones become one item.
 const KEEP_FILES: usize = 48;
 
@@ -343,6 +346,33 @@ pub struct Ready {
     pub took: Duration,
     pub errors: u64,
     pub cancelled: bool,
+    /// Sizes after btrfs compression (compsize), per folder (child
+    /// indices), once asked for.
+    pub real: std::collections::HashMap<Vec<usize>, Real>,
+    /// Measured on btrfs (compression may make it smaller on disk).
+    pub btrfs: bool,
+}
+
+/// Bytes a folder really takes on btrfs, and before compression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Real {
+    pub disk: u64,
+    pub raw: u64,
+}
+
+/// The TOTAL line of `compsize -b`: (disk usage, uncompressed).
+pub fn parse_compsize(out: &str) -> Option<Real> {
+    let line = out.lines().find(|l| l.trim_start().starts_with("TOTAL"))?;
+    let f: Vec<&str> = line.split_whitespace().collect();
+    Some(Real { disk: f.get(2)?.parse().ok()?, raw: f.get(3)?.parse().ok()? })
+}
+
+/// The folder lies on btrfs.
+pub fn on_btrfs(path: &Path) -> bool {
+    const BTRFS_SUPER_MAGIC: i64 = 0x9123_683E;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else { return false };
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    unsafe { libc::statfs(c.as_ptr(), &mut st) == 0 && st.f_type as i64 == BTRFS_SUPER_MAGIC }
 }
 
 pub enum State {
@@ -368,7 +398,7 @@ pub struct Usage {
 impl Ready {
     pub fn new(tree: Node, took: Duration, errors: u64, cancelled: bool) -> Self {
         let sel = if tree.children.is_empty() { Vec::new() } else { vec![0] };
-        Ready { tree, center: Vec::new(), sel, took, errors, cancelled }
+        Ready { tree, center: Vec::new(), sel, took, errors, cancelled, real: Default::default(), btrfs: false }
     }
 
     pub fn center_node(&self) -> &Node {
@@ -380,6 +410,19 @@ impl Ready {
     }
 
     /// The real path of an item (a folder for the small files' item).
+    /// The folders whose compressed size to ask for: the one in the middle
+    /// and the biggest folders in it.
+    pub fn real_wanted(&self) -> Vec<Vec<usize>> {
+        let mut v = vec![self.center.clone()];
+        for (i, _) in self.center_node().children.iter().enumerate().filter(|(_, c)| c.is_dir()).take(REAL_MOST) {
+            let mut p = self.center.clone();
+            p.push(i);
+            v.push(p);
+        }
+        v.retain(|p| !self.real.contains_key(p));
+        v
+    }
+
     pub fn path_of(&self, root: &Path, path: &[usize]) -> PathBuf {
         let mut p = root.to_path_buf();
         let mut n = &self.tree;
@@ -477,6 +520,7 @@ impl Usage {
         let Some(tree) = scan.done() else { return };
         let p = &scan.progress;
         let mut r = Ready::new(tree, scan.started.elapsed(), p.errors.load(Ordering::Relaxed), p.cancel.load(Ordering::Relaxed));
+        r.btrfs = on_btrfs(&scan.root);
         if let Some((center, sel)) = self.restore.take() {
             r.center = r.tree.find(&center);
             if r.center.len() == center.len() {
@@ -628,6 +672,14 @@ pub fn squarify(sizes: &[f64], r: egui::Rect) -> Vec<egui::Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compsize_totals() {
+        let out = "Processed 3 files, 4 regular extents (4 refs), 1 inline.\nType       Perc     Disk Usage   Uncompressed Referenced  \nTOTAL       38%       400000      1048576      1048576     \nnone       100%       200000       200000       200000     \nzstd        23%       200000       848576       848576     \n";
+        assert_eq!(parse_compsize(out), Some(Real { disk: 400000, raw: 1048576 }));
+        assert_eq!(parse_compsize(""), None);
+        assert_eq!(parse_compsize("ERROR: not btrfs\n"), None);
+    }
 
     #[test]
     fn scans_sizes_links_and_small_files() {

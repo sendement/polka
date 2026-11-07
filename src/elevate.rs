@@ -68,6 +68,10 @@ impl App {
                 self.net_elevated(id.clone(), cred.clone(), *open, *mount, r);
                 true
             }
+            (Op::Elevated { after: Some(After::Compsize { out, items }), .. }, r) => {
+                self.usage_real_done(out, items, r);
+                true
+            }
             (Op::Elevated { .. }, _) => false,
             (op, Err(_)) if denied => match crate::ops::elevated_steps(op) {
                 Some((steps, label)) => {

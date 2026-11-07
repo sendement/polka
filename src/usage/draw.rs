@@ -26,6 +26,8 @@ pub enum Act {
     /// Measure the start screen's item.
     Scan(usize),
     Cancel,
+    /// Ask btrfs for the sizes after compression.
+    Real,
     /// Right click: pick, then the actions.
     Context(Vec<usize>),
 }
@@ -93,6 +95,15 @@ pub fn draw(ui: &mut Ui, u: &mut Usage, icons: &mut Icons) -> Option<Act> {
         bx -= 32.0;
         if header_button(ui, btn(bx, 28.0), "⟳", tr("Measure again"), false) {
             act = Some(Act::Rescan);
+        }
+        if u.ready().is_some_and(|r| r.btrfs) {
+            let label = tr("Size on disk");
+            let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+            bx -= w + 4.0;
+            let asked = u.ready().is_some_and(|r| r.real.contains_key(&r.center));
+            if header_button(ui, btn(bx, w), label, tr("Size after compression (btrfs, needs the administrator password)"), asked) {
+                act = Some(Act::Real);
+            }
         }
         for m in Mode::ALL.iter().rev() {
             let label = mode_name(*m);
@@ -512,6 +523,10 @@ fn draw_side(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
     y += 22.0;
     ui.painter().text(pos2(x, y), Align2::LEFT_TOP, human_size(center.size), FontId::proportional(22.0), vis.strong_text_color());
     y += 32.0;
+    if let Some(real) = r.real.get(&r.center) {
+        ui.painter().text(pos2(x, y - 4.0), Align2::LEFT_TOP, real_line(real), FontId::proportional(13.0), vis.selection.bg_fill);
+        y += 20.0;
+    }
     ui.painter().text(pos2(x, y), Align2::LEFT_TOP, trn("%n files", center.files as usize), FontId::proportional(13.0), vis.weak_text_color());
     y += 26.0;
     // The pick.
@@ -546,7 +561,12 @@ fn draw_side(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
         let (f0, f1) = super::frac_of(center, &[i]);
         let col = color((f0 + f1) / 2.0, 1, c.kind);
         ui.painter().circle_filled(pos2(x + 5.0, row.center().y), 5.0, col);
-        let size = human_size(c.size);
+        let mut p = r.center.clone();
+        p.push(i);
+        let size = match r.real.get(&p) {
+            Some(real) => format!("{} → {}", human_size(c.size), human_size(real.disk)),
+            None => human_size(c.size),
+        };
         let sg = ui.painter().layout_no_wrap(size, FontId::proportional(12.5), vis.text_color());
         let g = elided_text(ui, &item_name(c), FontId::proportional(13.5), vis.text_color(), w - sg.size().x - 30.0);
         ui.painter().galley(pos2(x + 16.0, row.center().y - g.size().y / 2.0 - 2.0), g, vis.text_color());
@@ -566,11 +586,17 @@ fn draw_side(ui: &mut Ui, rect: Rect, r: &Ready) -> Option<Act> {
         }
         y += row_h;
     }
-    footer(ui, pos2(x, rect.max.y - 22.0), r);
+    footer(ui, pos2(x, rect.max.y - 22.0), r, false);
     act
 }
 
-fn footer(ui: &Ui, at: Pos2, r: &Ready) {
+/// "After compression: 3.1 GiB (42%)".
+fn real_line(real: &super::Real) -> String {
+    let pct = 100.0 * real.disk as f64 / real.raw.max(1) as f64;
+    format!("{}: {} ({pct:.0}%)", tr("After compression"), human_size(real.disk))
+}
+
+fn footer(ui: &Ui, at: Pos2, r: &Ready, real: bool) {
     let vis = ui.visuals();
     let mut s = format!("{} {:.1} {}", tr("Measured in"), r.took.as_secs_f32(), tr("sec"));
     if r.errors > 0 {
@@ -578,6 +604,9 @@ fn footer(ui: &Ui, at: Pos2, r: &Ready) {
     }
     if r.cancelled {
         s += &format!(" · {}", tr("stopped early"));
+    }
+    if let Some(real) = r.real.get(&r.center).filter(|_| real) {
+        s += &format!(" · {}", real_line(real));
     }
     ui.painter().text(at, Align2::LEFT_TOP, s, FontId::proportional(12.0), vis.weak_text_color());
 }
@@ -607,7 +636,12 @@ fn draw_list(ui: &mut Ui, area: Rect, r: &Ready, reveal: bool) -> Option<Act> {
             }
             ui.painter().rect_filled(Rect::from_center_size(pos2(row.min.x + 18.0, row.center().y), Vec2::splat(14.0)), 3.0, col);
             let pct = 100.0 * c.size as f64 / center.size.max(1) as f64;
-            let right = format!("{}   {pct:5.1}%", human_size(c.size));
+            let mut at = r.center.clone();
+            at.push(i);
+            let right = match r.real.get(&at) {
+                Some(real) => format!("{} → {}   {pct:5.1}%", human_size(c.size), human_size(real.disk)),
+                None => format!("{}   {pct:5.1}%", human_size(c.size)),
+            };
             let rg = ui.painter().layout_no_wrap(right, FontId::monospace(13.0), vis.text_color());
             let rx = row.max.x - 12.0 - rg.size().x;
             ui.painter().galley(pos2(rx, row.center().y - rg.size().y / 2.0), rg, vis.text_color());
@@ -632,6 +666,6 @@ fn draw_list(ui: &mut Ui, area: Rect, r: &Ready, reveal: bool) -> Option<Act> {
             ui.label(tr("Empty"));
         }
     });
-    footer(ui, pos2(area.min.x + 8.0, area.max.y - 20.0), r);
+    footer(ui, pos2(area.min.x + 8.0, area.max.y - 20.0), r, true);
     act
 }

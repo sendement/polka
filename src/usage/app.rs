@@ -166,6 +166,7 @@ impl App {
             Act::Close => self.run(Cmd::UsageClose),
             Act::Mode(m) => self.run(Cmd::UsageMode(m.index())),
             Act::Rescan => self.run(Cmd::UsageRescan),
+            Act::Real => self.run(Cmd::UsageReal),
             Act::Cancel => self.usage_start(),
             Act::Scan(i) => {
                 if let State::Start { targets, cursor } = &mut u.state {
@@ -230,6 +231,9 @@ impl App {
         for m in Mode::ALL {
             items.push(MenuItem { checked: Some(m == mode), ..item(mode_name(m), Cmd::UsageMode(m.index())) });
         }
+        if r.btrfs {
+            items.push(item(tr("Size after compression"), Cmd::UsageReal));
+        }
         items.push(item(tr("Measure again"), Cmd::UsageRescan));
         items.push(item(tr("Measure something else"), Cmd::UsageStart));
         items.push(item(tr("Close"), Cmd::UsageClose));
@@ -279,6 +283,7 @@ impl App {
                 }
                 u.scan(root, &ctx);
             }
+            Cmd::UsageReal => self.usage_real(),
             Cmd::UsageReveal => {
                 let Some(u) = self.tabs[self.tab].usage.as_deref_mut() else { return };
                 let (Some(root), Some(r)) = (u.last_root.clone(), u.ready()) else { return };
@@ -302,6 +307,64 @@ impl App {
                 self.focus = Focus::Panes;
             }
             _ => {}
+        }
+    }
+
+    /// How much the folder in the middle and the biggest folders in it
+    /// really take on btrfs: compsize, which needs administrator rights.
+    fn usage_real(&mut self) {
+        let Some(u) = self.tabs[self.tab].usage.as_deref() else { return };
+        let (Some(root), Some(r)) = (u.last_root.clone(), u.ready()) else { return };
+        if !crate::convert::has("compsize") {
+            return self.toast(tr("Needs compsize (the compsize package)"), true);
+        }
+        let items: Vec<PathBuf> = r.real_wanted().iter().map(|p| r.path_of(&root, p)).collect();
+        if items.is_empty() {
+            return;
+        }
+        let out = dirs::cache_dir().unwrap_or_else(crate::vfs::temp_root).join(format!("polka/compsize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        if let Err(e) = std::fs::create_dir_all(&out) {
+            return self.toast(format!("{}: {e}", tr("Failed")), true);
+        }
+        // (No compressible files in a folder is no failure: its file stays
+        // empty.)
+        let steps = items
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                vec!["sh".into(), "-c".into(), "compsize -b -- \"$2\" > \"$1\" 2>/dev/null; exit 0".into(), "sh".into(), out.join(format!("{i}")).into_os_string(), p.clone().into_os_string()]
+            })
+            .collect();
+        self.elevate(steps, tr("Size after compression"), Vec::new(), Some(crate::ops::After::Compsize { out, items }));
+    }
+
+    /// compsize's answers into the page that asked (any tab with it).
+    pub fn usage_real_done(&mut self, out: &std::path::Path, items: &[PathBuf], result: &Result<(), String>) {
+        if let Err(e) = result {
+            self.toast(format!("{}: {e}", tr("Failed")), true);
+        }
+        let found: Vec<(PathBuf, super::Real)> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| std::fs::read_to_string(out.join(format!("{i}"))).ok().and_then(|t| super::parse_compsize(&t)).map(|r| (p.clone(), r)))
+            .collect();
+        let _ = std::fs::remove_dir_all(out);
+        for t in &mut self.tabs {
+            let Some(u) = t.usage.as_deref_mut() else { continue };
+            let Some(root) = u.last_root.clone() else { continue };
+            let Some(r) = u.ready_mut() else { continue };
+            for (p, real) in &found {
+                let Ok(rel) = p.strip_prefix(&root) else { continue };
+                let names: Vec<Box<str>> = rel.iter().map(|n| n.to_string_lossy().into()).collect();
+                let at = r.tree.find(&names);
+                if at.len() == names.len() {
+                    r.real.insert(at, *real);
+                }
+            }
+        }
+        if result.is_ok() && found.is_empty() {
+            self.toast(tr("Nothing compressed here"), false);
         }
     }
 

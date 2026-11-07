@@ -318,6 +318,9 @@ pub enum After {
     /// A network place (un)mounted: the password file to remove, whether
     /// to open it.
     Net { id: String, cred: Option<PathBuf>, open: bool, mount: bool },
+    /// compsize run on folders, each into its own file in `out`
+    /// (numbered as `items`).
+    Compsize { out: PathBuf, items: Vec<PathBuf> },
 }
 
 /// The job's error when sudo didn't take the password.

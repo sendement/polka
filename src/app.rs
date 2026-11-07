@@ -733,6 +733,8 @@ pub enum Cmd {
     UsageZoomOut,
     UsageMode(u8),
     UsageRescan,
+    /// Ask btrfs how much the folders here really take (compressed).
+    UsageReal,
     UsageStart,
     UsageClose,
 }
@@ -4949,6 +4951,7 @@ impl App {
             | Cmd::UsageZoomOut
             | Cmd::UsageMode(_)
             | Cmd::UsageRescan
+            | Cmd::UsageReal
             | Cmd::UsageStart
             | Cmd::UsageClose => self.usage_cmd(cmd),
             Cmd::TorrentsOpen | Cmd::TorrentsClose | Cmd::TorrentMagnet | Cmd::TorrentToggle(_) | Cmd::TorrentReveal(_) | Cmd::TorrentRemove(..) => self.torrents_cmd(cmd),
