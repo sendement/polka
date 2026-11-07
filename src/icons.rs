@@ -203,7 +203,7 @@ impl Icons {
         if let Some(v) = self.names.get(&key) {
             return v.clone();
         }
-        let found = freedesktop_icons::lookup(name).with_theme(theme).with_size(size).with_cache().find().map(|p| recolored(&p, self.text).unwrap_or_else(|| uri(&p)));
+        let found = sized(theme, name, size).map(|p| recolored(&p, self.text).unwrap_or_else(|| uri(&p)));
         self.names.insert(key, found.clone());
         found
     }
@@ -213,11 +213,7 @@ impl Icons {
         if let Some(v) = self.names.get(&key) {
             return v.clone();
         }
-        let found = freedesktop_icons::lookup(name)
-            .with_theme(theme)
-            .with_size(size)
-            .with_cache()
-            .find()
+        let found = sized(theme, name, size)
             .or_else(|| {
                 // Some themes only ship symbolic variants for UI names.
                 freedesktop_icons::lookup(name).with_size(size).with_cache().find()
@@ -467,6 +463,96 @@ fn variant(theme: &str, dark: bool) -> String {
         }
     };
     cands.into_iter().find(|c| !theme_dirs(c).is_empty()).unwrap_or_else(|| theme.to_string())
+}
+
+/// `name` from `theme` at about `size`. The theme's own picture wins, as
+/// the spec has it, unless it's far too small (Infinity has its folders
+/// only as 16–24 px outlines): then its blue folders for its plain ones,
+/// else one the right size from the themes it inherits, as KDE picks them.
+fn sized(theme: &str, name: &str, size: u16) -> Option<PathBuf> {
+    let own = freedesktop_icons::lookup(name).with_theme(theme).with_size(size).with_cache().find()?;
+    if !too_small(&own, size) {
+        return Some(own);
+    }
+    // Its folders in their usual blue, in the theme's own style.
+    let blue = tinted(name, "blue").and_then(|b| freedesktop_icons::lookup(&b).with_theme(theme).with_size(size).with_cache().find()).filter(|p| !too_small(p, size) && theme_root(p).is_some() && theme_root(p) == theme_root(&own));
+    if blue.is_some() {
+        return blue;
+    }
+    let better = theme_chain(theme).into_iter().find_map(|t| {
+        freedesktop_icons::lookup(name).with_theme(&t).with_size(size).with_cache().find().filter(|p| !too_small(p, size))
+    });
+    Some(better.unwrap_or(own))
+}
+
+/// The themes `theme` inherits, nearest first, hicolor last.
+fn theme_chain(theme: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut queue = std::collections::VecDeque::from([theme.to_string()]);
+    while let Some(t) = queue.pop_front() {
+        for dir in theme_dirs(&t) {
+            let Ok(idx) = std::fs::read_to_string(dir.join("index.theme")) else { continue };
+            if let Some(inh) = idx.lines().find_map(|l| l.trim().strip_prefix("Inherits=")) {
+                for p in inh.split(',').map(|s| s.trim().trim_matches('"').to_string()) {
+                    if !p.is_empty() && p != theme && p != "hicolor" && !out.contains(&p) {
+                        out.push(p.clone());
+                        queue.push_back(p);
+                    }
+                }
+            }
+        }
+    }
+    out.push("hicolor".into());
+    out
+}
+
+/// A fixed-size picture under half the size wanted (scalable ones never).
+fn too_small(path: &Path, want: u16) -> bool {
+    dir_size(path).is_some_and(|(px, scalable)| !scalable && px * 2 <= want)
+}
+
+/// The theme folder a picture lies in (the one with index.theme).
+fn theme_root(path: &Path) -> Option<&Path> {
+    path.ancestors().skip(2).take(3).find(|a| a.join("index.theme").is_file())
+}
+
+/// The size (times its scale) the theme's index gives the picture's folder,
+/// and whether it scales.
+fn dir_size(path: &Path) -> Option<(u16, bool)> {
+    static INDEX: std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, HashMap<String, (u16, bool)>>>> = std::sync::LazyLock::new(Default::default);
+    let dir = path.parent()?;
+    let root = theme_root(path)?;
+    let rel = dir.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+    let mut cache = INDEX.lock().ok()?;
+    let sections = cache.entry(root.to_path_buf()).or_insert_with(|| {
+        let text = std::fs::read_to_string(root.join("index.theme")).unwrap_or_default();
+        let mut out = HashMap::new();
+        let (mut cur, mut size, mut scale, mut scalable) = (None::<String>, 0u16, 1u16, false);
+        let flush = |cur: &Option<String>, size: u16, scale: u16, scalable: bool, out: &mut HashMap<String, (u16, bool)>| {
+            if let Some(c) = cur {
+                if size > 0 {
+                    out.insert(c.clone(), (size.saturating_mul(scale.max(1)), scalable));
+                }
+            }
+        };
+        for line in text.lines().map(str::trim) {
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                flush(&cur, size, scale, scalable, &mut out);
+                cur = Some(name.to_string());
+                (size, scale, scalable) = (0, 1, false);
+            } else if let Some((k, v)) = line.split_once('=') {
+                match k.trim() {
+                    "Size" => size = v.trim().parse().unwrap_or(0),
+                    "Scale" => scale = v.trim().parse().unwrap_or(1),
+                    "Type" => scalable = v.trim().eq_ignore_ascii_case("scalable"),
+                    _ => {}
+                }
+            }
+        }
+        flush(&cur, size, scale, scalable, &mut out);
+        out
+    });
+    sections.get(&rel).copied()
 }
 
 fn theme_dirs(theme: &str) -> Vec<PathBuf> {
@@ -829,6 +915,36 @@ mod tests {
         // Papirus and Win11 here: the bare name is the empty bin again.
         let linked = set(&[("gnome-stock-trash", "user-trash.svg"), ("gnome-stock-trash-empty", "user-trash.svg"), ("gnome-stock-trash-full", "user-trash-full.svg")]);
         assert_eq!(super::trash_set(&linked), None);
+    }
+
+    /// Sizes from the theme's index (Infinity's folders: fixed 16–24 px
+    /// only), and which are too small for a big tile.
+    #[test]
+    fn small_fixed_pictures() {
+        let root = std::env::temp_dir().join(format!("polka-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let t = root.join("Tiny");
+        for d in ["places/22", "places/32@2", "scalable/places", "loose"] {
+            std::fs::create_dir_all(t.join(d)).unwrap();
+            std::fs::write(t.join(d).join("folder.svg"), "<svg/>").unwrap();
+        }
+        std::fs::write(
+            t.join("index.theme"),
+            "[Icon Theme]\nName=Tiny\nInherits=\"breeze\",hicolor\nDirectories=places/22,places/32@2,scalable/places\n\n[places/22]\nSize=22\nType=Fixed\n\n[places/32@2]\nSize=32\nScale=2\nType=Fixed\n\n[scalable/places]\nSize=64\nType=Scalable\nMinSize=8\nMaxSize=512\n",
+        )
+        .unwrap();
+        let at = |d: &str| t.join(d).join("folder.svg");
+        assert_eq!(super::dir_size(&at("places/22")), Some((22, false)));
+        assert_eq!(super::dir_size(&at("places/32@2")), Some((64, false)));
+        assert_eq!(super::dir_size(&at("scalable/places")), Some((64, true)));
+        assert_eq!(super::dir_size(&at("loose")), None);
+        assert!(super::too_small(&at("places/22"), 64) && super::too_small(&at("places/22"), 88));
+        assert!(!super::too_small(&at("places/22"), 32), "a list's 32 px row takes 22 px pictures");
+        assert!(!super::too_small(&at("places/32@2"), 88));
+        assert!(!super::too_small(&at("scalable/places"), 256));
+        assert!(!super::too_small(&at("loose"), 256), "not in the index: left as found");
+        assert_eq!(super::theme_root(&at("places/22")), Some(t.as_path()));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
