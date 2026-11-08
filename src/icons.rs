@@ -506,9 +506,11 @@ fn theme_chain(theme: &str) -> Vec<String> {
     out
 }
 
-/// A fixed-size picture under half the size wanted (scalable ones never).
+/// A fixed-size picture under half the size wanted (scalable ones never;
+/// pictures from 48 px up are drawn for big sizes, 16–32 px ones are
+/// panel glyphs: Infinity's 22 px folder outlines for 64 aren't fine).
 fn too_small(path: &Path, want: u16) -> bool {
-    dir_size(path).is_some_and(|(px, scalable)| !scalable && px * 2 <= want)
+    dir_size(path).is_some_and(|(px, scalable)| !scalable && px <= 32 && px * 2 < want)
 }
 
 /// The theme folder a picture lies in (the one with index.theme).
@@ -531,7 +533,12 @@ fn dir_size(path: &Path) -> Option<(u16, bool)> {
         let flush = |cur: &Option<String>, size: u16, scale: u16, scalable: bool, out: &mut HashMap<String, (u16, bool)>| {
             if let Some(c) = cur {
                 if size > 0 {
-                    out.insert(c.clone(), (size.saturating_mul(scale.max(1)), scalable));
+                    // (A folder listed twice: the bigger, scalable first.)
+                    let new = (size.saturating_mul(scale.max(1)), scalable);
+                    let e = out.entry(c.clone()).or_insert(new);
+                    if (new.1, new.0) > (e.1, e.0) {
+                        *e = new;
+                    }
                 }
             }
         };
@@ -924,13 +931,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("polka-theme-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let t = root.join("Tiny");
-        for d in ["places/22", "places/32@2", "scalable/places", "loose"] {
+        for d in ["places/22", "places/32@2", "places/64", "apps/scalable", "scalable/places", "loose"] {
             std::fs::create_dir_all(t.join(d)).unwrap();
             std::fs::write(t.join(d).join("folder.svg"), "<svg/>").unwrap();
         }
         std::fs::write(
             t.join("index.theme"),
-            "[Icon Theme]\nName=Tiny\nInherits=\"breeze\",hicolor\nDirectories=places/22,places/32@2,scalable/places\n\n[places/22]\nSize=22\nType=Fixed\n\n[places/32@2]\nSize=32\nScale=2\nType=Fixed\n\n[scalable/places]\nSize=64\nType=Scalable\nMinSize=8\nMaxSize=512\n",
+            "[Icon Theme]\nName=Tiny\nInherits=\"breeze\",hicolor\nDirectories=places/22,places/32@2,places/64,apps/scalable,scalable/places\n\n[places/64]\nSize=64\nType=Fixed\n\n[apps/scalable]\nSize=128\nType=Scalable\n\n[apps/scalable]\nSize=16\nType=Fixed\n\n[places/22]\nSize=22\nType=Fixed\n\n[places/32@2]\nSize=32\nScale=2\nType=Fixed\n\n[scalable/places]\nSize=64\nType=Scalable\nMinSize=8\nMaxSize=512\n",
         )
         .unwrap();
         let at = |d: &str| t.join(d).join("folder.svg");
@@ -941,6 +948,10 @@ mod tests {
         assert!(super::too_small(&at("places/22"), 64) && super::too_small(&at("places/22"), 88));
         assert!(!super::too_small(&at("places/22"), 32), "a list's 32 px row takes 22 px pictures");
         assert!(!super::too_small(&at("places/32@2"), 88));
+        // Drawn for big sizes: fine blown up (Vivid's folders are 64 px).
+        assert!(!super::too_small(&at("places/64"), 128) && !super::too_small(&at("places/64"), 256));
+        // Listed twice (Nordic-Slot): the scalable one counts.
+        assert_eq!(super::dir_size(&at("apps/scalable")), Some((128, true)));
         assert!(!super::too_small(&at("scalable/places"), 256));
         assert!(!super::too_small(&at("loose"), 256), "not in the index: left as found");
         assert_eq!(super::theme_root(&at("places/22")), Some(t.as_path()));
