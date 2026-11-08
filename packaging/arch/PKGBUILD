@@ -34,7 +34,7 @@ makedepends=('cargo')
 # Rust links with lld here; GCC LTO objects from C build scripts break that.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('c41c7cbb1cf8c0508713cfb92cb74192cfe220fc1550ee898cc91f05e864c6ca')
+sha256sums=('fc45e55eb81d552f138217bfd43294be4811aa487b3fbd6e7f6d5356106810da')
 
 prepare() {
   cd "$pkgname-$pkgver"
