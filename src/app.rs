@@ -471,6 +471,8 @@ pub struct Tab {
     pub own: bool,
     /// The torrents page shows here.
     pub torrents: bool,
+    /// In the right pane's own row of tabs (each pane with its own).
+    pub right: bool,
 }
 
 impl Tab {
@@ -508,7 +510,7 @@ pub const SPRING: std::time::Duration = std::time::Duration::from_millis(600);
 /// The panes of two different tabs at once.
 impl Tab {
     pub fn new(pane: Pane) -> Self {
-        Tab { pane, for_right: false, viewer: None, usage: None, term: None, own: false, torrents: false }
+        Tab { pane, for_right: false, viewer: None, usage: None, term: None, own: false, torrents: false, right: false }
     }
 }
 
@@ -658,6 +660,8 @@ pub enum Cmd {
     CloseTabAt(usize),
     /// A tab to another place in the row.
     MoveTab(usize, usize),
+    /// A tab into the other pane's own row (each pane with its own tabs).
+    TabToSide(usize, usize),
     /// A presentation's slides, one at a time on the whole screen (or no more).
     SlideShow,
     /// The viewer's next (or previous) picture or video of the folder.
@@ -1218,12 +1222,12 @@ pub enum SItem {
     Page,
 }
 
-pub const SETTINGS_CATS: usize = 10;
+pub const SETTINGS_CATS: usize = 11;
 pub const NO_ROW: usize = usize::MAX;
 
 /// A category's name.
 pub fn settings_cat_name(cat: usize) -> &'static str {
-    tr(["Look", "Window", "Language and input", "Files", "Viewer", "Terminal", "Status bar", "Torrents", "Fan menu", "About"][cat.min(SETTINGS_CATS - 1)])
+    tr(["Look", "Window", "Language and input", "Files", "Dual pane", "Viewer", "Terminal", "Status bar", "Torrents", "Fan menu", "About"][cat.min(SETTINGS_CATS - 1)])
 }
 
 /// What a category holds, in order.
@@ -1232,18 +1236,19 @@ pub fn settings_items(cat: usize) -> Vec<SItem> {
     let rows = |r: &[usize]| r.iter().map(|r| SItem::Row(*r)).collect::<Vec<_>>();
     match cat {
         0 => rows(&[row::ACCENT, row::APPEARANCE, row::SCHEME, row::THEME, row::ZOOM, row::SIDE_ICON, row::LIST_ICON, row::GRID_ICON]),
-        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::TOOLBARS]),
+        1 => rows(&[row::TITLEBAR, row::WIN_STYLE, row::WIN_SIDE, row::WIN_ORDER, row::TABS_ALIGN, row::KEEP_TABS, row::TOOLBARS]),
         2 => rows(&[row::LANGUAGE, row::LAYOUTS, row::TYPE_FILTER, row::TYPE_HOP, row::LENS, row::MENU_STYLE, row::PASSWORDS, row::PAD_HINTS, row::TOUCH_OPEN]),
-        3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL, row::REMEMBER_RIGHT, row::FOLD_ADDR]),
-        4 => {
+        3 => rows(&[row::OPEN_IN, row::PLACES, row::VOLUMES, row::INSTALL]),
+        4 => rows(&[row::REMEMBER_RIGHT, row::FOLD_ADDR, row::DUAL_TABS, row::DUAL_PAGES, row::PAGES_SIDE]),
+        5 => {
             let mut v: Vec<SItem> = [vrow::THEME, vrow::FONT, vrow::SIZE, vrow::WRAP, vrow::NUMBERS].iter().map(|r| SItem::Viewer(*r)).collect();
             v.push(SItem::Row(row::WEB_IMAGES));
             v
         }
-        5 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
-        6 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
-        7 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
-        8 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_THEME, row::FAN_LENGTH, row::FAN_SIZE, row::FAN_REACH, row::FAN_LINGER, row::FAN_ANIM]),
+        6 => [trow::SCHEME, trow::FONT, trow::SIZE, trow::SHELL, trow::CURSOR, trow::SCROLLBACK, trow::HERE].iter().map(|r| SItem::Term(*r)).collect(),
+        7 => crate::status::FIGURES.iter().map(|f| SItem::Status(*f)).collect(),
+        8 => rows(&[row::T_ON, row::T_FOLDER, row::T_DOWN, row::T_UP, row::T_SEED, row::T_AUTO]),
+        9 => rows(&[row::FAN_ON, row::FAN_STICK, row::FAN_THEME, row::FAN_LENGTH, row::FAN_SIZE, row::FAN_REACH, row::FAN_LINGER, row::FAN_ANIM]),
         _ => vec![SItem::Versions, SItem::Page],
     }
 }
@@ -1348,6 +1353,12 @@ pub mod row {
     pub const FAN_THEME: usize = 42;
     pub const FAN_LINGER: usize = 43;
     pub const FAN_LENGTH: usize = 44;
+    // Dual mode: pages in a pane, which one, a row of tabs each; the tabs
+    // kept for the next start.
+    pub const DUAL_PAGES: usize = 45;
+    pub const PAGES_SIDE: usize = 46;
+    pub const DUAL_TABS: usize = 47;
+    pub const KEEP_TABS: usize = 48;
 }
 
 /// "Open in Polka" kinds, in the settings' order.
@@ -1969,13 +1980,15 @@ impl App {
             // steps aside: the side left goes back to a folder's tab, the
             // nearest before it, so a click there doesn't bring it back.
             let left = self.other_tab;
-            if self.tabs[left].page_shown() {
-                let plain = |k: usize| k != self.tab && !self.tabs[k].page_shown();
+            if self.tabs[left].page_shown() && !self.cfg.dual_pages {
+                let row = self.tabs[left].right;
+                let split = self.cfg.dual_tabs;
+                let plain = |k: usize| k != self.tab && !self.tabs[k].page_shown() && (!split || self.tabs[k].right == row);
                 match (0..left).rev().find(|&k| plain(k)).or_else(|| (left + 1..self.tabs.len()).find(|&k| plain(k))) {
                     Some(k) => self.other_tab = k,
                     // None left: a new one at its folder, before it.
                     None => {
-                        let t = Tab::new(Pane::new(self.tabs[left].pane.loc.clone(), &self.cfg));
+                        let t = Tab { right: row, ..Tab::new(Pane::new(self.tabs[left].pane.loc.clone(), &self.cfg)) };
                         self.tabs.insert(left, t);
                         if self.tab >= left {
                             self.tab += 1;
@@ -2612,6 +2625,13 @@ impl App {
             self.handle_sidebar(a);
             return;
         }
+        // Pages in panes: L3 on a page goes over to the other pane (its
+        // triggers are the page's own).
+        if a == Action::LeftStick && self.pages_in_panes() && self.cur_tab().page_shown() {
+            let other = 1 - self.side();
+            self.set_side(other);
+            return;
+        }
         if self.cur_tab().viewer.is_some() && !matches!(a, Action::PrevTab | Action::NextTab | Action::LeftStick) {
             return self.viewer_input(a);
         }
@@ -2769,8 +2789,36 @@ impl App {
     /// The right side as dual mode comes on: back on its tab if
     /// remembering and that's still another tab; else on a tab where it was
     /// (or where the left one is), a new one if no other tab shows that.
-    fn open_right_pane(&mut self) {
+    pub(crate) fn open_right_pane(&mut self) {
         let cfg = self.cfg.clone();
+        if cfg.dual_tabs {
+            // Each pane its own tabs: the left on one of the left's (the
+            // current one in the right's row: it shows on the right), the
+            // right on one of its own (a new one if it has none).
+            if self.tabs[self.tab].right {
+                match (0..self.tabs.len()).rev().find(|&i| !self.tabs[i].right) {
+                    Some(l) => {
+                        self.side = 1;
+                        self.other_tab = l;
+                        return;
+                    }
+                    None => self.tabs[self.tab].right = false,
+                }
+            }
+            if cfg.remember_right && self.other_tab != self.tab && self.tabs.get(self.other_tab).is_some_and(|t| t.right) {
+                return;
+            }
+            let want = right_start(&cfg, &self.tabs[self.tab].pane.loc);
+            let right = |i: usize| self.tabs[i].right;
+            self.other_tab = match (0..self.tabs.len()).find(|&i| right(i) && self.tabs[i].pane.loc == want).or_else(|| (0..self.tabs.len()).find(|&i| right(i))) {
+                Some(i) => i,
+                None => {
+                    self.tabs.push(Tab { for_right: true, right: true, ..Tab::new(Pane::new(want, &cfg)) });
+                    self.tabs.len() - 1
+                }
+            };
+            return;
+        }
         if cfg.remember_right && self.other_tab != self.tab && self.other_tab < self.tabs.len() {
             return;
         }
@@ -2778,7 +2826,7 @@ impl App {
         self.other_tab = match (0..self.tabs.len()).find(|&i| i != self.tab && self.tabs[i].pane.loc == want) {
             Some(i) => i,
             None => {
-                self.tabs.push(Tab { for_right: true, ..Tab::new(Pane::new(want, &cfg)) });
+                self.tabs.push(Tab { for_right: true, right: true, ..Tab::new(Pane::new(want, &cfg)) });
                 self.tabs.len() - 1
             }
         };
@@ -2800,6 +2848,69 @@ impl App {
         } else {
             self.other_tab = if self.tab + 1 < n { self.tab + 1 } else { self.tab - 1 };
         }
+    }
+
+    /// Each pane with its own row of tabs (dual mode, as set).
+    pub fn split_tabs(&self) -> bool {
+        self.cfg.dual && self.cfg.dual_tabs
+    }
+
+    /// Pages (a file shown, the terminal…) in a pane, not the window.
+    pub fn pages_in_panes(&self) -> bool {
+        self.cfg.dual && self.cfg.dual_pages
+    }
+
+    /// A side to show tab `k` (the other side's as it is).
+    fn set_tab_of(&mut self, side: usize, k: usize) {
+        if side == self.side() {
+            self.tab = k;
+        } else {
+            self.other_tab = k;
+        }
+    }
+
+    /// The nearest tab in the same pane's row as `i` (before it first),
+    /// other than `i` and the other side's.
+    fn row_neighbour(&self, i: usize, right: bool, but: usize) -> Option<usize> {
+        let ok = |k: usize| k != i && k != but && self.tabs.get(k).is_some_and(|t| t.right == right);
+        (0..i.min(self.tabs.len())).rev().find(|&k| ok(k)).or_else(|| (i..self.tabs.len()).find(|&k| ok(k)))
+    }
+
+    /// Each pane's own row of tabs just turned on: the tab each side shows
+    /// is in its row.
+    pub(crate) fn tabs_by_side(&mut self) {
+        if !self.split_tabs() {
+            return;
+        }
+        let (l, r) = (self.tab_of(0), self.tab_of(1));
+        self.tabs[l].right = false;
+        self.tabs[r].right = true;
+    }
+
+    /// The tab to go back to from page tab `i`: the one before it (each
+    /// pane with its own tabs: the nearest in its row).
+    pub(crate) fn back_from_page(&self, i: usize) -> usize {
+        let row = self.tabs.get(i).is_some_and(|t| t.right);
+        if self.split_tabs() { self.row_neighbour(i, row, self.other_tab) } else { None }.unwrap_or(i.saturating_sub(1))
+    }
+
+    /// A tab let go over the other pane's row: it's in that row now, shown
+    /// there; the pane it left shows its neighbour (the last tab of a row
+    /// stays).
+    fn tab_to_side(&mut self, i: usize, side: usize) {
+        if !self.split_tabs() || i >= self.tabs.len() || self.tabs[i].right == (side == 1) {
+            return;
+        }
+        let from = 1 - side;
+        let right = self.tabs[i].right;
+        let Some(k) = self.row_neighbour(i, right, usize::MAX) else { return };
+        if self.tab_of(from) == i {
+            self.set_tab_of(from, k);
+        }
+        self.tabs[i].right = side == 1;
+        self.set_side(side);
+        self.tab = i;
+        self.own_tab_focus();
     }
 
     /// Out of dual mode, side `keep`'s tab staying (as the one shown); one
@@ -2840,6 +2951,16 @@ impl App {
 
     /// The active side to the next tab; the other side's is stepped over.
     fn switch_tab(&mut self, d: isize) {
+        if self.split_tabs() {
+            // Within the active pane's own row.
+            let mine = self.side() == 1;
+            let row: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].right == mine).collect();
+            if let Some(p) = row.iter().position(|&i| i == self.tab) {
+                self.tab = row[(p as isize + d).rem_euclid(row.len() as isize) as usize];
+                self.own_tab_focus();
+            }
+            return;
+        }
         let n = self.tabs.len() as isize;
         let mut t = self.tab as isize;
         loop {
@@ -2865,6 +2986,14 @@ impl App {
 
     /// A tab picked (clicked): the other side's makes that side active.
     pub fn pick_tab(&mut self, i: usize) {
+        if self.split_tabs() && i < self.tabs.len() {
+            // Its own pane's row: that pane becomes the active one.
+            let side = self.tabs[i].right as usize;
+            self.set_side(side);
+            self.tab = i;
+            self.own_tab_focus();
+            return;
+        }
         if self.cfg.dual && i == self.other_tab {
             self.set_side(1 - self.side());
         } else {
@@ -3653,7 +3782,16 @@ impl App {
         let k = crate::viewer::kind_in(&path, &name, crate::viewer::OpenIn::from(&self.cfg)).or_else(|| crate::viewer::kind(&path, &name));
         // A file shown gets a tab of its own, beside this one.
         // (One already showing a file keeps to its tab.)
-        let tab = if self.tabs[tab].own && self.tabs[tab].viewer.is_some() { tab } else { self.open_beside(tab) };
+        let other = self.tab_of(1 - self.side());
+        let tab = if self.tabs[tab].own && self.tabs[tab].viewer.is_some() {
+            tab
+        } else if self.pages_to_other(tab) && self.tabs[other].own && self.tabs[other].viewer.is_some() {
+            // Pages in the other pane: the file shown there gives way.
+            self.set_side(1 - self.side());
+            other
+        } else {
+            self.open_beside(tab)
+        };
         let mut v = Viewer::open_as(k, path, name, origin, siblings, self.cfg.viewer.volume, &self.ctx);
         v.folder = Some(self.tabs[tab].pane.loc.clone());
         self.tabs[tab].viewer = Some(Box::new(v));
@@ -3664,19 +3802,32 @@ impl App {
     /// A tab of its own beside `tab` (for a file shown, the terminal, disk
     /// usage), at its folder; the current one if `tab` was.
     pub(crate) fn open_beside(&mut self, tab: usize) -> usize {
+        // Pages in panes, opened in the other one: beside the tab that
+        // pane shows, that pane the active one now.
+        let other = self.pages_to_other(tab);
+        let at = if other { self.other_tab } else { tab };
         let loc = self.tabs[tab].pane.loc.clone();
         let mut t = Tab::new(Pane::new(loc, &self.cfg));
         t.own = true;
-        self.tabs.insert(tab + 1, t);
-        if self.other_tab > tab {
-            self.other_tab += 1;
+        t.right = self.tabs[at].right;
+        self.tabs.insert(at + 1, t);
+        let cur = self.tab;
+        let shift = |k: usize| if k > at { k + 1 } else { k };
+        self.other_tab = shift(self.other_tab);
+        self.tab = shift(self.tab);
+        if other {
+            self.other_tab = self.tab;
+            self.tab = at + 1;
+            self.side = 1 - self.side;
+        } else if tab == cur {
+            self.tab = at + 1;
         }
-        if tab == self.tab {
-            self.tab = tab + 1;
-        } else if self.tab > tab {
-            self.tab += 1;
-        }
-        tab + 1
+        at + 1
+    }
+
+    /// A page opened from tab `tab` goes into the other pane (as set).
+    fn pages_to_other(&self, tab: usize) -> bool {
+        self.pages_in_panes() && self.cfg.pages_other && tab == self.tab && self.other_tab != self.tab && self.other_tab < self.tabs.len()
     }
 
     /// Such a tab closed: back on the one before it.
@@ -3684,11 +3835,13 @@ impl App {
         if self.tabs.len() < 2 || i >= self.tabs.len() {
             return;
         }
+        // (Each pane its own tabs: back on one of its row.)
+        let back = if self.split_tabs() { self.row_neighbour(i, self.tabs[i].right, self.other_tab) } else { None };
         self.tabs.remove(i);
         if self.other_tab > i {
             self.other_tab -= 1;
         }
-        self.tab = i.saturating_sub(1).min(self.tabs.len() - 1);
+        self.tab = back.map_or(i.saturating_sub(1), |k| if k > i { k - 1 } else { k }).min(self.tabs.len() - 1);
         if self.cfg.dual && self.tab == self.other_tab {
             self.tab = (0..self.tabs.len()).find(|&k| k != self.other_tab).unwrap_or(0);
         }
@@ -3703,7 +3856,13 @@ impl App {
             return;
         }
         match self.tabs.iter().position(|t| t.own && has(t)) {
-            Some(i) => self.pick_tab(i),
+            Some(i) => {
+                // Pages in the other pane: it's brought up there.
+                if self.pages_to_other(self.tab) && i != self.other_tab && !self.split_tabs() {
+                    self.set_side(1 - self.side());
+                }
+                self.pick_tab(i)
+            }
             None => {
                 let t = self.tab;
                 self.open_beside(t);
@@ -4199,7 +4358,7 @@ impl App {
                         };
                         self.settings_toggle_open(chip);
                     }
-                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE | row::FAN_ON | row::FAN_STICK | row::FAN_ANIM | row::FAN_THEME => self.settings_step(row, 0.0),
+                    row::VOLUMES | row::WEB_IMAGES | row::PASSWORDS | row::INSTALL | row::REMEMBER_RIGHT | row::FOLD_ADDR | row::DUAL_PAGES | row::PAGES_SIDE | row::DUAL_TABS | row::KEEP_TABS | row::PAD_HINTS | row::TOUCH_OPEN | row::TITLEBAR | row::WIN_STYLE | row::WIN_SIDE | row::WIN_ORDER | row::TABS_ALIGN | row::TYPE_FILTER | row::TYPE_HOP | row::LENS | row::T_ON | row::T_FOLDER | row::T_DOWN | row::T_UP | row::T_SEED | row::T_AUTO | row::MENU_STYLE | row::FAN_ON | row::FAN_STICK | row::FAN_ANIM | row::FAN_THEME => self.settings_step(row, 0.0),
                     row::TOOLBARS => self.overlay = Some(Overlay::Toolbars),
                     row::PLACES => self.overlay = Some(Overlay::Places(crate::sidebar::PlacesDlg { cursor: 0, scrolled: None })),
                     row::LAYOUTS => {
@@ -4410,6 +4569,23 @@ impl App {
             }
             row::FOLD_ADDR => {
                 self.cfg.fold_other_addr = !self.cfg.fold_other_addr;
+                self.cfg.save();
+            }
+            row::DUAL_PAGES => {
+                self.cfg.dual_pages = !self.cfg.dual_pages;
+                self.cfg.save();
+            }
+            row::PAGES_SIDE => {
+                self.cfg.pages_other = !self.cfg.pages_other;
+                self.cfg.save();
+            }
+            row::DUAL_TABS => {
+                self.cfg.dual_tabs = !self.cfg.dual_tabs;
+                self.tabs_by_side();
+                self.cfg.save();
+            }
+            row::KEEP_TABS => {
+                self.cfg.keep_tabs = !self.cfg.keep_tabs;
                 self.cfg.save();
             }
             row::PAD_HINTS => {
@@ -5045,7 +5221,9 @@ impl App {
                 self.refresh_sidebar();
             }
             Cmd::OpenInNewTab(loc) => {
-                self.tabs.push(Tab::new(Pane::new(loc, &cfg)));
+                // (Each pane its own tabs: in the active one's row.)
+                let right = self.split_tabs() && self.side() == 1;
+                self.tabs.push(Tab { right, ..Tab::new(Pane::new(loc, &cfg)) });
                 self.tab = self.tabs.len() - 1;
                 self.focus = Focus::Panes;
             }
@@ -5059,6 +5237,28 @@ impl App {
                 if self.tabs.len() > 1 && i < self.tabs.len() && !self.confirm_unsaved(i, crate::viewer::glue::Then::CloseTab(i)) {
                     // Ctrl+Shift+T brings it back.
                     self.closed_tabs.push(self.tabs[i].pane.loc.clone());
+                    // Each pane its own tabs: a pane showing it goes on to
+                    // its row's neighbour; with none, the pane goes.
+                    if self.split_tabs() && (i == self.tab || i == self.other_tab) {
+                        let side = if i == self.tab { self.side() } else { 1 - self.side() };
+                        match self.row_neighbour(i, self.tabs[i].right, usize::MAX) {
+                            Some(k) => self.set_tab_of(side, k),
+                            None => {
+                                // Out of dual mode, on the other pane's tab.
+                                self.remember_right_pane();
+                                let keep = self.tab_of(1 - side);
+                                self.tabs.remove(i);
+                                let keep = if keep > i { keep - 1 } else { keep };
+                                self.cfg.dual = false;
+                                self.side = 0;
+                                self.tab = keep;
+                                self.other_tab = keep;
+                                self.cfg.save();
+                                self.range = None;
+                                return;
+                            }
+                        }
+                    }
                     self.tabs.remove(i);
                     // Closing a tab left of the current one shifts it; closing
                     // the current one lands on its neighbour.
@@ -5111,6 +5311,7 @@ impl App {
                     None => self.toast(tr(if back { "Nothing to undo" } else { "Nothing to redo" }), false),
                 }
             }
+            Cmd::TabToSide(i, side) => self.tab_to_side(i, side),
             Cmd::MoveTab(from, to) => {
                 if from < self.tabs.len() && to < self.tabs.len() && from != to {
                     let t = self.tabs.remove(from);

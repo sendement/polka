@@ -728,4 +728,11 @@ pub const T: &[(&str, &str)] = &[
     ("Open with", "開くアプリ："),
     ("left", "残り"),
     ("Cancel operations", "操作をキャンセル"),
+    ("Pages open in a pane", "ページをペイン内で開く"),
+    ("Each pane has its own tabs", "ペインごとに別のタブ"),
+    ("Keep tabs for the next start", "次回起動時にタブを復元"),
+    ("In the other pane", "もう一方のペインで"),
+    ("In the same pane", "同じペインで"),
+    ("Pages open", "ページを開く場所"),
+    ("Other pane", "もう一方のペイン"),
 ];

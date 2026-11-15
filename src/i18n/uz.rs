@@ -728,4 +728,11 @@ pub const T: &[(&str, &str)] = &[
     ("Open with", "Bunda ochish"),
     ("left", "qoldi"),
     ("Cancel operations", "Amallarni bekor qilish"),
+    ("Pages open in a pane", "Sahifalar panelda ochiladi"),
+    ("Each pane has its own tabs", "Har bir panelning oʻz varaqlari"),
+    ("Keep tabs for the next start", "Varaqlarni keyingi ishga tushirishgacha saqlash"),
+    ("In the other pane", "Boshqa panelda"),
+    ("In the same pane", "Oʻsha panelda"),
+    ("Pages open", "Sahifalar qayerda ochiladi"),
+    ("Other pane", "Boshqa panel"),
 ];

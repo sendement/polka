@@ -777,7 +777,7 @@ fn viewer(h: &mut Harness<'static, App>) {
     h.state_mut().pane_mut().navigate(Location::Local(work.clone()), None, &cfg);
     settle(h);
     let open = |h: &mut Harness<'static, App>, name: &str| {
-        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap();
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("{name} not in {:?} at {:?} tab {} of {} dual {}", h.state().pane().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), h.state().pane().loc, h.state().tab, h.state().tabs.len(), h.state().cfg.dual));
         h.state_mut().pane_mut().set_cursor(i);
         press(h, &[Action::Accept]);
         for _ in 0..30 {
@@ -4441,6 +4441,178 @@ fn dual_tabs_screens() {
     h.state_mut().cfg.save();
 }
 
+/// Dual mode as set: pages (a file shown, the terminal) open in a pane,
+/// in the same one or the other; each pane with its own row of tabs; the
+/// tabs kept for the next start.
+#[test]
+#[ignore]
+fn dual_pages_screens() {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("dualpages");
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B", "C"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+        std::fs::write(dir.join(d).join(format!("{d}.txt")), format!("file {d}\n")).unwrap();
+    }
+    let (a, b, c) = (Location::Local(dir.join("A")), Location::Local(dir.join("B")), Location::Local(dir.join("C")));
+    let click = |h: &mut Harness<'static, App>, at: egui::Pos2| {
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        settle(h);
+    };
+    let mut h = harness_with(dir.join("A"), [1100.0, 680.0], "-pages");
+    settle(&mut h);
+    h.state_mut().cfg.remember_right = false;
+    h.state_mut().cfg.dual_pages = true;
+    h.state_mut().cfg.pages_other = false;
+    if !h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(b.clone(), None, &cfg);
+    h.state_mut().set_side(0);
+    settle(&mut h);
+    // In the same pane: the file on the left, the right pane as it was.
+    let i = h.state().pane().entries.iter().position(|e| e.name == "A.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    h.state_mut().view_current();
+    settle(&mut h);
+    assert!(h.state().tabs[h.state().tab_of(0)].viewer.is_some(), "not on the left");
+    assert_eq!(h.state().pane_at(1).loc, b);
+    let divider = h.state().divider_x.expect("no line between the panes");
+    shot(&mut h, "dp0-file-in-left-pane");
+    // A click on the right pane: it's the active one, the file stays put.
+    click(&mut h, egui::pos2(divider + 200.0, 400.0));
+    assert_eq!(h.state().side(), 1);
+    assert!(h.state().tabs[h.state().tab_of(0)].viewer.is_some(), "the file stepped aside");
+    // A click into the file: the left is the active one again.
+    click(&mut h, egui::pos2(divider - 200.0, 400.0));
+    assert_eq!(h.state().side(), 0);
+    h.state_mut().close_viewer();
+    settle(&mut h);
+    assert_eq!(h.state().pane_at(0).loc, a);
+    assert!(!h.state().tabs[h.state().tab_of(0)].page_shown());
+    // In the other pane: the file on the right (the active one now), the
+    // left pane still at its folder.
+    h.state_mut().cfg.pages_other = true;
+    let n = h.state().tabs.len();
+    h.state_mut().view_current();
+    settle(&mut h);
+    assert_eq!(h.state().side(), 1);
+    assert!(h.state().tabs[h.state().tab_of(1)].viewer.is_some(), "not on the right");
+    assert_eq!(h.state().pane_at(0).loc, a);
+    shot(&mut h, "dp1-file-in-other-pane");
+    // From the left again: the file shown there gives way, no new tab.
+    h.state_mut().set_side(0);
+    h.state_mut().view_current();
+    assert_eq!(h.state().tabs.len(), n + 1);
+    assert_eq!(h.state().side(), 1);
+    // Closed: the right pane back on its folder.
+    h.state_mut().close_viewer();
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), n);
+    assert_eq!((h.state().pane_at(0).loc.clone(), h.state().pane_at(1).loc.clone()), (a.clone(), b.clone()));
+    // The terminal: in the other pane too.
+    h.state_mut().set_side(0);
+    h.state_mut().run(Cmd::TermOpen(None));
+    settle(&mut h);
+    assert_eq!(h.state().side(), 1);
+    assert!(h.state().tabs[h.state().tab_of(1)].term.as_ref().is_some_and(|t| t.shown));
+    assert_eq!(h.state().pane_at(0).loc, a);
+    shot(&mut h, "dp2-terminal-in-other-pane");
+    // L3 on the page: over to the other pane, and back.
+    press(&mut h, &[Action::LeftStick]);
+    assert_eq!(h.state().side(), 0);
+    assert!(h.state().tabs[h.state().tab_of(1)].term.as_ref().is_some_and(|t| t.shown), "the terminal stepped aside");
+    h.state_mut().set_side(1);
+    h.state_mut().run(Cmd::TermClose);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), n);
+
+    // Each pane with its own row of tabs.
+    h.state_mut().cfg.dual_pages = false;
+    h.state_mut().run(Cmd::ToggleDual);
+    h.state_mut().cfg.dual_tabs = true;
+    h.state_mut().run(Cmd::ToggleDual);
+    while h.state().tabs.len() > 2 {
+        let k = (0..h.state().tabs.len()).find(|&k| k != h.state().tab_of(0) && k != h.state().tab_of(1)).unwrap();
+        h.state_mut().run(Cmd::CloseTabAt(k));
+    }
+    assert!(!h.state().tabs[h.state().tab_of(0)].right && h.state().tabs[h.state().tab_of(1)].right);
+    h.state_mut().set_side(0);
+    h.state_mut().run(Cmd::OpenInNewTab(c.clone()));
+    h.state_mut().set_side(1);
+    h.state_mut().run(Cmd::OpenInNewTab(a.clone()));
+    let right_row: Vec<usize> = (0..h.state().tabs.len()).filter(|&k| h.state().tabs[k].right).collect();
+    assert_eq!(right_row.len(), 2);
+    settle(&mut h);
+    shot(&mut h, "dp3-a-row-each");
+    // The rows lie over their panes.
+    let divider = h.state().divider_x.unwrap();
+    let rects = h.state().tab_rects.clone();
+    for k in 0..h.state().tabs.len() {
+        let r = rects[k];
+        if h.state().tabs[k].right {
+            assert!(r.min.x > divider, "right tab {k} at {r:?}, the line at {divider}");
+        } else {
+            assert!(r.max.x < divider, "left tab {k} at {r:?}, the line at {divider}");
+        }
+    }
+    // RB goes round the right row only; the left stays.
+    let left = h.state().tab_of(0);
+    for _ in 0..3 {
+        press(&mut h, &[Action::NextTab]);
+        assert!(h.state().tabs[h.state().tab].right);
+        assert_eq!(h.state().tab_of(0), left);
+    }
+    // A left tab clicked: the left pane is the active one.
+    let other_left = (0..h.state().tabs.len()).find(|&k| !h.state().tabs[k].right && k != left).unwrap();
+    click(&mut h, rects[other_left].center());
+    assert_eq!((h.state().side(), h.state().tab), (0, other_left));
+    // Dragged into the right row: shown there, the left on its neighbour.
+    h.state_mut().run(Cmd::TabToSide(other_left, 1));
+    assert!(h.state().tabs[other_left].right);
+    assert_eq!((h.state().side(), h.state().tab), (1, other_left));
+    assert!(!h.state().tabs[h.state().tab_of(0)].right);
+    settle(&mut h);
+    shot(&mut h, "dp4-tab-moved-right");
+    // The left row's last tab closed: the left pane goes.
+    let l = h.state().tab_of(0);
+    h.state_mut().run(Cmd::CloseTabAt(l));
+    assert!(!h.state().cfg.dual, "still two panes");
+
+    // The tabs kept: as they were, back at the next start.
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(&mut h);
+    let kept = crate::session::of(h.state());
+    let locs: Vec<_> = h.state().tabs.iter().map(|t| (t.pane.loc.clone(), t.right)).collect();
+    let (t0, t1) = (h.state().tab_of(0), h.state().tab_of(1));
+    let mut h2 = harness_with(dir.join("C"), [1100.0, 680.0], "-pages");
+    h2.state_mut().restore_tabs(kept, false);
+    settle(&mut h2);
+    assert_eq!(h2.state().tabs.iter().map(|t| (t.pane.loc.clone(), t.right)).collect::<Vec<_>>(), locs);
+    assert_eq!((h2.state().tab_of(0), h2.state().tab_of(1)), (t0, t1));
+    // Started for a folder: it's after them, shown on the left.
+    let kept = crate::session::of(h.state());
+    let mut h3 = harness_with(dir.join("C"), [1100.0, 680.0], "-pages");
+    h3.state_mut().restore_tabs(kept, true);
+    assert_eq!(h3.state().tabs.len(), locs.len() + 1);
+    assert_eq!(h3.state().pane_at(0).loc, c);
+    assert_eq!(h3.state().side(), 0);
+    assert_eq!(h3.state().tab_of(1), t1);
+    drop((h2, h3));
+    h.state_mut().cfg.dual = false;
+    h.state_mut().cfg.dual_tabs = false;
+    h.state_mut().cfg.remember_right = true;
+    h.state_mut().cfg.save();
+}
+
 /// The mouse in dual mode: an address field held a moment widens; a drag
 /// resting on a crumb of the path or on a sidebar place opens it there.
 #[test]
@@ -6472,7 +6644,7 @@ fn settings_cats_screens() {
     assert_eq!(at(&h).0, 0, "RB came round");
     // The viewer: its font size one up, from here.
     press(&mut h, &[Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab, Action::PrevTab]);
-    assert_eq!(at(&h), (4, SItem::Viewer(crate::app::vrow::THEME)));
+    assert_eq!(at(&h), (5, SItem::Viewer(crate::app::vrow::THEME)));
     let size = h.state().cfg.viewer.font_size;
     press(&mut h, &[Action::Accept, Action::Down, Action::Down, Action::Right]);
     assert_eq!(at(&h).1, SItem::Viewer(crate::app::vrow::SIZE));

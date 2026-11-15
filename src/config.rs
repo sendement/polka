@@ -101,6 +101,15 @@ pub struct Config {
     /// Dual mode: the left pane's share of the width (the line between
     /// them dragged with the mouse).
     pub dual_split: f32,
+    /// Dual mode: pages (a file shown, the terminal, disk usage…) open in
+    /// a pane, the other one staying beside them (else they fill the
+    /// window); in the pane they're opened from, or in the other one.
+    pub dual_pages: bool,
+    pub pages_other: bool,
+    /// Dual mode: each pane has its own row of tabs, over it.
+    pub dual_tabs: bool,
+    /// The tabs open at the next start as they were left.
+    pub keep_tabs: bool,
     /// Network places.
     pub connections: Vec<crate::net::Conn>,
     /// Where the right pane was last.
@@ -384,6 +393,10 @@ impl Default for Config {
             remember_right: true,
             fold_other_addr: false,
             dual_split: 0.5,
+            dual_pages: false,
+            pages_other: false,
+            dual_tabs: false,
+            keep_tabs: false,
             connections: Vec::new(),
             right_dir: None,
             touch_double: true,

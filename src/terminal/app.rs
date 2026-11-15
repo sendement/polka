@@ -800,7 +800,8 @@ impl App {
             // on); closed, the tab goes.
             Cmd::TermHide if self.tabs[self.tab].own => {
                 let i = self.tab;
-                self.pick_tab(i.saturating_sub(1));
+                let back = self.back_from_page(i);
+                self.pick_tab(back);
             }
             Cmd::TermHide => {
                 if let Some(t) = self.term_mut() {

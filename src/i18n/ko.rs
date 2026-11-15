@@ -728,4 +728,11 @@ pub const T: &[(&str, &str)] = &[
     ("Open with", "다음으로 열기:"),
     ("left", "남음"),
     ("Cancel operations", "작업 취소"),
+    ("Pages open in a pane", "페이지를 창 안에서 열기"),
+    ("Each pane has its own tabs", "창마다 별도의 탭"),
+    ("Keep tabs for the next start", "다음 실행 때 탭 유지"),
+    ("In the other pane", "다른 창에서"),
+    ("In the same pane", "같은 창에서"),
+    ("Pages open", "페이지 여는 위치"),
+    ("Other pane", "다른 창"),
 ];

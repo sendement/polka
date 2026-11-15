@@ -728,4 +728,11 @@ pub const T: &[(&str, &str)] = &[
     ("Open with", "इसमें खोलें"),
     ("left", "बाकी"),
     ("Cancel operations", "कार्य रद्द करें"),
+    ("Pages open in a pane", "पेज पैनल में खुलते हैं"),
+    ("Each pane has its own tabs", "हर पैनल के अपने टैब"),
+    ("Keep tabs for the next start", "अगली बार के लिए टैब रखें"),
+    ("In the other pane", "दूसरे पैनल में"),
+    ("In the same pane", "उसी पैनल में"),
+    ("Pages open", "पेज कहाँ खुलते हैं"),
+    ("Other pane", "दूसरा पैनल"),
 ];

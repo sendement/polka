@@ -59,6 +59,13 @@ const SMALL_ICON_LOOKUP: u16 = 32;
 const SIDE_W: f32 = 210.0;
 
 impl eframe::App for App {
+    /// The tabs kept for the next start (as set).
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.cfg.keep_tabs {
+            crate::session::save(self);
+        }
+    }
+
     /// Pointer events of drags from and to other programs.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         // A finger on the screen: gestures, not a mouse.
@@ -553,7 +560,8 @@ impl App {
             let addr_end = rx - if right_w > 0.0 { 10.0 } else { 6.0 };
 
             // Address field(s); in dual mode split where the panes split.
-            let viewing = self.tabs[self.tab].viewer.as_ref().map(|v| (v.origin, v.name.clone()));
+            // (Pages in panes: each pane's own field, as with folders.)
+            let viewing = self.tabs[self.tab].viewer.as_ref().filter(|_| !self.pages_in_panes()).map(|v| (v.origin, v.name.clone()));
             let fields: Vec<(usize, Rect)> = if let Some((origin, _)) = &viewing {
                 vec![(*origin, Rect::from_min_max(pos2(addr_start, row.min.y), pos2(addr_end, row.max.y)))]
             } else if dual {
@@ -745,15 +753,16 @@ impl App {
     /// mid-frame (that crashed Polka when the last-but-one tab closed).
     fn draw_tabs(&mut self, ui: &mut Ui) -> Option<TabAct> {
         let dual = self.cfg.dual;
+        // Each pane its own row of tabs: two groups, over their panes.
+        let split = self.split_tabs();
         let mut switch = None;
         let mut close = None;
-        let mut new_tab = false;
+        let mut new_tab = None;
         let v = ui.visuals().clone();
         let many = self.tabs.len() > 1;
         let gap = 6.0;
         // (LB / RB beside them while the gamepad's hints show.)
-        let pad = self.show_pad();
-        let shoulder_w = if pad { TAB_H * 1.4 } else { 0.0 };
+        let pad_hints = self.show_pad();
 
         let names: Vec<String> = self
             .tabs
@@ -770,13 +779,13 @@ impl App {
             .collect();
         let font = FontId::proportional(14.0);
         let close_w = if many { 20.0 } else { 0.0 };
-        // Dual mode: the tab each side shows wears its L or R.
-        let side_of = |i: usize| if !dual { None } else if i == self.tab_of(0) { Some(0) } else if i == self.tab_of(1) { Some(1) } else { None };
+        // Dual mode in one row: the tab each side shows wears its L or R.
+        let side_of = |i: usize| if !dual || split { None } else if i == self.tab_of(0) { Some(0) } else if i == self.tab_of(1) { Some(1) } else { None };
         const BADGE: f32 = 18.0;
         // Narrower than this a tab isn't made: the row scrolls instead.
         const MIN_TAB: f32 = 64.0;
         let extra = |i: usize| 28.0 + close_w + if side_of(i).is_some() { BADGE + 6.0 } else { 0.0 };
-        let natural: Vec<f32> = names.iter().enumerate().map(|(i, n)| (elided(ui, n, font.clone(), v.text_color(), 180.0, 1).size().x + extra(i)).max(96.0)).collect();
+        let natural_all: Vec<f32> = names.iter().enumerate().map(|(i, n)| (elided(ui, n, font.clone(), v.text_color(), 180.0, 1).size().x + extra(i)).max(96.0)).collect();
 
         let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), TAB_H), Sense::hover());
         // The places for buttons at its ends (drawn after the tabs).
@@ -786,205 +795,236 @@ impl App {
         let lw = crate::toolbar::width(&self.cfg, Zone::TabsLeft, TAB_H, editing, &lift);
         let rw = crate::toolbar::width(&self.cfg, Zone::TabsRight, TAB_H, editing, &lift);
         let (lo, hi) = (row.min.x + if lw > 0.0 { lw + 10.0 } else { 0.0 }, row.max.x - if rw > 0.0 { rw + 10.0 } else { 0.0 });
-        // The tabs' room between them, less LB / RB and "+": tabs too wide
-        // for it narrow down alike (their names cut short); too many even
-        // so, they scroll, the current one in sight.
-        let n = natural.len();
-        let gaps = gap * n as f32;
-        let room = (hi - lo - shoulder_w * 2.0 - TAB_H - gap * if pad { 2.0 } else { 0.0 }).max(MIN_TAB + gap);
-        let fits = |m: f32| natural.iter().map(|w| w.min(m)).sum::<f32>() + gaps <= room;
-        let cap = if fits(f32::MAX) {
-            f32::MAX
+        // The groups: (their tabs, their room, the side they're for).
+        let groups: Vec<(Vec<usize>, f32, f32, Option<usize>)> = if split {
+            let mid = self.divider_x.unwrap_or(row.min.x + row.width() * self.cfg.dual_split).clamp(lo + 2.0 * MIN_TAB, (hi - 2.0 * MIN_TAB).max(lo + 2.0 * MIN_TAB));
+            let of = |right: bool| (0..self.tabs.len()).filter(|&i| self.tabs[i].right == right).collect::<Vec<_>>();
+            vec![(of(false), lo, mid - gap / 2.0, Some(0)), (of(true), mid + gap / 2.0, hi, Some(1))]
         } else {
-            let (mut a, mut b) = (MIN_TAB, natural.iter().cloned().fold(MIN_TAB, f32::max));
-            for _ in 0..24 {
-                let m = (a + b) / 2.0;
-                if fits(m) { a = m } else { b = m }
-            }
-            a
+            vec![((0..self.tabs.len()).collect(), lo, hi, None)]
         };
-        let widths: Vec<f32> = natural.iter().map(|w| w.min(cap)).collect();
-        let over = widths.iter().sum::<f32>() + gaps > room + 0.5;
-        let titles: Vec<_> = names.iter().enumerate().map(|(i, nm)| elided(ui, nm, font.clone(), v.text_color(), (widths[i] - extra(i)).clamp(8.0, 180.0), 1)).collect();
-        let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
-        let strip_lo = lo + if pad { shoulder_w + gap } else { 0.0 };
-        let strip = Rect::from_min_max(pos2(strip_lo, row.min.y - 2.0), pos2(strip_lo + room, row.max.y + 2.0));
-        let mut x = if over {
-            // Scrolled: by the wheel over it, and so the current tab shows.
-            let id = ui.id().with("tabs-scroll");
-            let len: f32 = widths.iter().sum::<f32>() + gaps;
-            let mut off: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
-            if ui.rect_contains_pointer(strip) {
-                let wheel = ui.input(|i| i.smooth_scroll_delta);
-                off -= wheel.x + wheel.y;
-            }
-            if self.tab < n && self.tab_drag.is_none() && ui.ctx().data(|d| d.get_temp::<usize>(id.with("shown"))) != Some(self.tab) {
-                let left: f32 = widths[..self.tab].iter().map(|w| w + gap).sum();
-                if left < off {
-                    off = left;
-                } else if left + widths[self.tab] > off + room {
-                    off = left + widths[self.tab] - room;
-                }
-                ui.ctx().data_mut(|d| d.insert_temp(id.with("shown"), self.tab));
-            }
-            off = off.clamp(0.0, (len - room).max(0.0));
-            ui.ctx().data_mut(|d| d.insert_temp(id, off));
-            lo - off
-        } else {
-            match self.cfg.tabs_align {
-                0 => lo,
-                2 => hi - total,
-                _ => (lo + hi) / 2.0 - total / 2.0,
-            }
-            .max(lo)
-        };
-        let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
-        // (Scrolled, the tabs stay in their strip.)
-        let tabs_clip = if over { strip } else { row.expand(2.0) };
-        let tab_painter = ui.painter().with_clip_rect(tabs_clip);
         let dragging = self.drag.is_some();
         let pointer = ui.input(|i| i.pointer.hover_pos());
         let mut resting = None;
-        let mut rects = Vec::new();
-
-        if pad {
-            let at_x = if over { lo } else { x };
-            shoulder_glyph(&painter, at(at_x, shoulder_w), Action::PrevTab, self.pad);
-            if !over {
-                x += shoulder_w + gap;
-            }
-        }
-        // A tab dragged along the row follows the mouse, the others make
-        // room where it would go.
-        let lefts: Vec<f32> = widths.iter().scan(x, |cur, w| {
-            let l = *cur;
-            *cur += w + gap;
-            Some(l)
-        }).collect();
-        let moving = self.tab_drag.filter(|(d, _)| *d < widths.len());
-        let mut offsets = vec![0.0; widths.len()];
-        let mut target = None;
-        if let Some((d, x0)) = moving {
-            let dx = ui.input(|i| i.pointer.latest_pos()).map_or(0.0, |p| p.x - x0);
-            let c = lefts[d] + widths[d] / 2.0 + dx;
-            let t = (0..widths.len()).filter(|&k| k != d && lefts[k] + widths[k] / 2.0 < c).count();
-            let room = widths[d] + gap;
-            for (k, o) in offsets.iter_mut().enumerate() {
-                let after = if k < d { k } else { k.saturating_sub(1) };
-                *o = if k == d {
-                    dx
-                } else if k < d && after >= t {
-                    room
-                } else if k > d && after < t {
-                    -room
-                } else {
-                    0.0
-                };
-            }
-            target = Some((d, t));
-            ui.ctx().request_repaint();
-        }
+        let mut rects = vec![Rect::NOTHING; self.tabs.len()];
+        let at = |x: f32, w: f32| Rect::from_min_size(pos2(x, row.min.y), vec2(w, TAB_H));
         let mut picked = None;
-        let lifted = ui.ctx().layer_painter(egui::LayerId::new(Order::Foreground, ui.id().with("tab-lifted"))).with_clip_rect(row.expand(2.0));
-        for (i, (title, w)) in titles.into_iter().zip(widths).enumerate() {
-            let hit = at(x, w);
-            x += w + gap;
-            let rect = hit.translate(vec2(offsets[i], 0.0));
-            let painter = if moving.is_some_and(|(d, _)| d == i) { lifted.clone().with_clip_rect(tabs_clip) } else { tab_painter.clone() };
-            rects.push(hit);
-            // Scrolled out of sight: nothing to press.
-            if over && !strip.intersects(hit) {
-                continue;
-            }
-            let is_active = i == self.tab;
-            let r = ui.interact(if over { hit.intersect(strip) } else { hit }, ui.id().with(("tab", i)), Sense::click_and_drag());
-            if r.drag_started_by(egui::PointerButton::Primary) && !dragging {
-                if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-                    picked = Some((i, p.x));
-                }
-            }
-            let accent = v.selection.bg_fill;
-            // Dragged items held over another tab switch to it in a moment.
-            let under = dragging && !is_active && pointer.is_some_and(|p| rect.contains(p));
-            if under {
-                resting = Some(i);
-            }
-            let (fill, stroke) = if under {
-                (v.widgets.hovered.weak_bg_fill, Stroke::new(2.0, accent))
-            } else if is_active {
-                (tint(&v, 0.35), Stroke::new(1.5, accent))
-            } else if r.hovered() {
-                (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
+        let mut target = None;
+        // Where each group lies (a tab let go over the other one goes there).
+        let mut spans = Vec::new();
+        for (gi, (idx, lo, hi, gside)) in groups.into_iter().enumerate() {
+            spans.push((lo, hi, gside));
+            // The tab this group shows (the active side's in one row).
+            let shown = gside.map_or(self.tab, |s| self.tab_of(s));
+            let mine = gside.is_none_or(|s| s == self.side());
+            let pad = pad_hints && mine;
+            let shoulder_w = if pad { TAB_H * 1.4 } else { 0.0 };
+            let natural: Vec<f32> = idx.iter().map(|&i| natural_all[i]).collect();
+            // The tabs' room between them, less LB / RB and "+": tabs too wide
+            // for it narrow down alike (their names cut short); too many even
+            // so, they scroll, the current one in sight.
+            let n = natural.len();
+            let gaps = gap * n as f32;
+            let room = (hi - lo - shoulder_w * 2.0 - TAB_H - gap * if pad { 2.0 } else { 0.0 }).max(MIN_TAB + gap);
+            let fits = |m: f32| natural.iter().map(|w| w.min(m)).sum::<f32>() + gaps <= room;
+            let cap = if fits(f32::MAX) {
+                f32::MAX
             } else {
-                (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
-            };
-            painter.rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
-            let mut tx = rect.min.x + 14.0;
-            if let Some(sd) = side_of(i) {
-                let b = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BADGE / 2.0), Vec2::splat(BADGE));
-                let mine = sd == self.side();
-                painter.rect_filled(b, 4.0, if mine { accent } else { accent.gamma_multiply(0.35) });
-                let fg = if mine { v.strong_text_color() } else { v.text_color() };
-                painter.text(b.center(), Align2::CENTER_CENTER, if sd == 0 { "L" } else { "R" }, FontId::proportional(12.0), fg);
-                tx = b.max.x + 6.0;
-            }
-            painter.galley(pos2(tx, rect.center().y - title.size().y / 2.0), title, v.text_color());
-            if under && let Some(t) = spring_progress(&self.spring, &crate::app::SpringAt::Tab(i)) {
-                spring_bar(ui, rect, t);
-            }
-            let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
-            // (Its ×, when it's in sight.)
-            if many && (!over || strip.contains_rect(cr)) {
-                let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
-                if is_active || r.hovered() || cresp.hovered() {
-                    if cresp.hovered() {
-                        painter.circle_filled(cr.center(), 9.0, v.widgets.hovered.bg_fill);
-                    }
-                    painter.text(cr.center(), Align2::CENTER_CENTER, "×", FontId::proportional(15.0), v.weak_text_color());
+                let (mut a, mut b) = (MIN_TAB, natural.iter().cloned().fold(MIN_TAB, f32::max));
+                for _ in 0..24 {
+                    let m = (a + b) / 2.0;
+                    if fits(m) { a = m } else { b = m }
                 }
-                if cresp.clicked() {
-                    close = Some(i);
+                a
+            };
+            let widths: Vec<f32> = natural.iter().map(|w| w.min(cap)).collect();
+            let over = widths.iter().sum::<f32>() + gaps > room + 0.5;
+            let titles: Vec<_> = idx.iter().enumerate().map(|(k, &i)| elided(ui, &names[i], font.clone(), v.text_color(), (widths[k] - extra(i)).clamp(8.0, 180.0), 1)).collect();
+            let total = shoulder_w * 2.0 + widths.iter().sum::<f32>() + TAB_H + gap * (widths.len() + if pad { 2 } else { 0 }) as f32;
+            let strip_lo = lo + if pad { shoulder_w + gap } else { 0.0 };
+            let strip = Rect::from_min_max(pos2(strip_lo, row.min.y - 2.0), pos2(strip_lo + room, row.max.y + 2.0));
+            let here = idx.iter().position(|&i| i == shown);
+            let mut x = if over {
+                // Scrolled: by the wheel over it, and so the current tab shows.
+                let id = ui.id().with(("tabs-scroll", gi));
+                let len: f32 = widths.iter().sum::<f32>() + gaps;
+                let mut off: f32 = ui.ctx().data(|d| d.get_temp(id)).unwrap_or(0.0);
+                if ui.rect_contains_pointer(strip) {
+                    let wheel = ui.input(|i| i.smooth_scroll_delta);
+                    off -= wheel.x + wheel.y;
+                }
+                if let Some(k) = here.filter(|_| self.tab_drag.is_none() && ui.ctx().data(|d| d.get_temp::<usize>(id.with("shown"))) != Some(shown)) {
+                    let left: f32 = widths[..k].iter().map(|w| w + gap).sum();
+                    if left < off {
+                        off = left;
+                    } else if left + widths[k] > off + room {
+                        off = left + widths[k] - room;
+                    }
+                    ui.ctx().data_mut(|d| d.insert_temp(id.with("shown"), shown));
+                }
+                off = off.clamp(0.0, (len - room).max(0.0));
+                ui.ctx().data_mut(|d| d.insert_temp(id, off));
+                lo - off
+            } else {
+                match self.cfg.tabs_align {
+                    0 => lo,
+                    2 => hi - total,
+                    _ => (lo + hi) / 2.0 - total / 2.0,
+                }
+                .max(lo)
+            };
+            // (Scrolled, the tabs stay in their strip.)
+            let tabs_clip = if over { strip } else { Rect::from_min_max(pos2(lo, row.min.y), pos2(hi, row.max.y)).expand(2.0) };
+            let tab_painter = ui.painter().with_clip_rect(tabs_clip);
+
+            if pad {
+                let at_x = if over { lo } else { x };
+                shoulder_glyph(&painter, at(at_x, shoulder_w), Action::PrevTab, self.pad);
+                if !over {
+                    x += shoulder_w + gap;
+                }
+            }
+            // A tab dragged along the row follows the mouse, the others make
+            // room where it would go.
+            let lefts: Vec<f32> = widths.iter().scan(x, |cur, w| {
+                let l = *cur;
+                *cur += w + gap;
+                Some(l)
+            }).collect();
+            let moving = self.tab_drag.and_then(|(d, x0)| idx.iter().position(|&i| i == d).map(|k| (k, x0)));
+            let mut offsets = vec![0.0; widths.len()];
+            if let Some((d, x0)) = moving {
+                let dx = ui.input(|i| i.pointer.latest_pos()).map_or(0.0, |p| p.x - x0);
+                let c = lefts[d] + widths[d] / 2.0 + dx;
+                let t = (0..widths.len()).filter(|&k| k != d && lefts[k] + widths[k] / 2.0 < c).count();
+                let room = widths[d] + gap;
+                for (k, o) in offsets.iter_mut().enumerate() {
+                    let after = if k < d { k } else { k.saturating_sub(1) };
+                    *o = if k == d {
+                        dx
+                    } else if k < d && after >= t {
+                        room
+                    } else if k > d && after < t {
+                        -room
+                    } else {
+                        0.0
+                    };
+                }
+                // (As the whole row's indices.)
+                let to = idx[t.min(idx.len() - 1)];
+                target = Some((idx[d], to));
+                ui.ctx().request_repaint();
+            }
+            let lifted = ui.ctx().layer_painter(egui::LayerId::new(Order::Foreground, ui.id().with("tab-lifted"))).with_clip_rect(row.expand(2.0));
+            for (k, (title, w)) in titles.into_iter().zip(widths).enumerate() {
+                let i = idx[k];
+                let hit = at(x, w);
+                x += w + gap;
+                let rect = hit.translate(vec2(offsets[k], 0.0));
+                let painter = if moving.is_some_and(|(d, _)| d == k) { lifted.clone().with_clip_rect(if split { row.expand(2.0) } else { tabs_clip }) } else { tab_painter.clone() };
+                rects[i] = hit;
+                // Scrolled out of sight: nothing to press.
+                if over && !strip.intersects(hit) {
                     continue;
                 }
+                let is_active = i == shown;
+                let r = ui.interact(if over { hit.intersect(strip) } else { hit }, ui.id().with(("tab", i)), Sense::click_and_drag());
+                if r.drag_started_by(egui::PointerButton::Primary) && !dragging {
+                    if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                        picked = Some((i, p.x));
+                    }
+                }
+                // (The other pane's row: its tab shown, dimmer.)
+                let accent = if mine { v.selection.bg_fill } else { v.selection.bg_fill.gamma_multiply(0.5) };
+                // Dragged items held over another tab switch to it in a moment.
+                let under = dragging && !(is_active && mine) && pointer.is_some_and(|p| rect.contains(p));
+                if under {
+                    resting = Some(i);
+                }
+                let (fill, stroke) = if under {
+                    (v.widgets.hovered.weak_bg_fill, Stroke::new(2.0, v.selection.bg_fill))
+                } else if is_active {
+                    (tint(&v, if mine { 0.35 } else { 0.18 }), Stroke::new(1.5, accent))
+                } else if r.hovered() {
+                    (v.widgets.hovered.weak_bg_fill, v.widgets.hovered.bg_stroke)
+                } else {
+                    (v.widgets.inactive.weak_bg_fill.gamma_multiply(0.6), v.widgets.noninteractive.bg_stroke)
+                };
+                painter.rect(rect, 7.0, fill, stroke, StrokeKind::Inside);
+                let mut tx = rect.min.x + 14.0;
+                if let Some(sd) = side_of(i) {
+                    let accent = v.selection.bg_fill;
+                    let b = Rect::from_min_size(pos2(rect.min.x + 8.0, rect.center().y - BADGE / 2.0), Vec2::splat(BADGE));
+                    let mine = sd == self.side();
+                    painter.rect_filled(b, 4.0, if mine { accent } else { accent.gamma_multiply(0.35) });
+                    let fg = if mine { v.strong_text_color() } else { v.text_color() };
+                    painter.text(b.center(), Align2::CENTER_CENTER, if sd == 0 { "L" } else { "R" }, FontId::proportional(12.0), fg);
+                    tx = b.max.x + 6.0;
+                }
+                painter.galley(pos2(tx, rect.center().y - title.size().y / 2.0), title, v.text_color());
+                if under && let Some(t) = spring_progress(&self.spring, &crate::app::SpringAt::Tab(i)) {
+                    spring_bar(ui, rect, t);
+                }
+                let cr = Rect::from_center_size(pos2(rect.max.x - 14.0, rect.center().y), Vec2::splat(18.0));
+                // (Its ×, when it's in sight.)
+                if many && (!over || strip.contains_rect(cr)) {
+                    let cresp = ui.interact(cr, ui.id().with(("tab-close", i)), Sense::click());
+                    if is_active || r.hovered() || cresp.hovered() {
+                        if cresp.hovered() {
+                            painter.circle_filled(cr.center(), 9.0, v.widgets.hovered.bg_fill);
+                        }
+                        painter.text(cr.center(), Align2::CENTER_CENTER, "×", FontId::proportional(15.0), v.weak_text_color());
+                    }
+                    if cresp.clicked() {
+                        close = Some(i);
+                        continue;
+                    }
+                }
+                if r.clicked() {
+                    switch = Some(i);
+                }
+                if r.middle_clicked() {
+                    close = Some(i);
+                }
             }
-            if r.clicked() {
-                switch = Some(i);
+            if over {
+                x = strip.max.x + gap;
             }
-            if r.middle_clicked() {
-                close = Some(i);
+            let plus = at(x, TAB_H);
+            x += TAB_H + gap;
+            let r = ui.interact(plus, ui.id().with(("tab-new", gi)), Sense::click());
+            painter.rect(
+                plus,
+                7.0,
+                if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT },
+                v.widgets.noninteractive.bg_stroke,
+                StrokeKind::Inside,
+            );
+            painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
+            if r.on_hover_text(tr("New tab")).clicked() {
+                new_tab = Some(gside);
             }
-        }
-        if over {
-            x = strip.max.x + gap;
-        }
-        let plus = at(x, TAB_H);
-        x += TAB_H + gap;
-        let r = ui.interact(plus, ui.id().with("tab-new"), Sense::click());
-        painter.rect(
-            plus,
-            7.0,
-            if r.hovered() { v.widgets.hovered.weak_bg_fill } else { Color32::TRANSPARENT },
-            v.widgets.noninteractive.bg_stroke,
-            StrokeKind::Inside,
-        );
-        painter.text(plus.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), v.text_color());
-        if r.on_hover_text(tr("New tab")).clicked() {
-            new_tab = true;
-        }
-        if pad {
-            shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
+            if pad {
+                shoulder_glyph(&painter, at(x, shoulder_w), Action::NextTab, self.pad);
+            }
         }
         ui.add_space(6.0);
         self.tab_rects = rects;
         if picked.is_some() {
             self.tab_drag = picked;
         }
-        // Let go: it goes where it was shown.
+        // Let go: it goes where it was shown (over the other pane's row:
+        // into it).
         let mut moved = None;
-        if self.tab_drag.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+        let mut across = None;
+        if let Some((d, _)) = self.tab_drag.filter(|_| !ui.input(|i| i.pointer.primary_down())) {
             self.tab_drag = None;
-            moved = target.filter(|(d, t)| d != t);
+            let to_side = ui.input(|i| i.pointer.latest_pos()).and_then(|p| spans.iter().find(|(l, h, _)| p.x >= *l && p.x <= *h && p.y <= row.max.y + 24.0)).and_then(|s| s.2);
+            match to_side {
+                Some(s) if split && (s == 1) != self.tabs.get(d).is_some_and(|t| t.right) => across = Some((d, s)),
+                _ => moved = target.filter(|(d, t)| d != t),
+            }
         }
         if let Some(i) = resting {
             self.spring_rest(crate::app::SpringAt::Tab(i));
@@ -999,16 +1039,16 @@ impl App {
         }
         if let Some(t) = pl.or(pr) {
             Some(TabAct::Tool(t))
+        } else if let Some((i, s)) = across {
+            Some(TabAct::ToSide(i, s))
         } else if let Some((from, to)) = moved {
             Some(TabAct::Move(from, to))
         } else if let Some(i) = close {
             Some(TabAct::Close(i))
         } else if let Some(i) = switch {
             Some(TabAct::Switch(i))
-        } else if new_tab {
-            Some(TabAct::New)
         } else {
-            None
+            new_tab.map(TabAct::New)
         }
     }
 
@@ -1222,6 +1262,16 @@ impl App {
     }
 
     fn hints(&self) -> Vec<(Action, &'static str)> {
+        let mut v = self.base_hints();
+        // Pages in panes: L3 goes over to the other one.
+        if self.overlay.is_none() && !self.fan.shown && self.focus == Focus::Panes && self.pages_in_panes() && self.cur_tab().page_shown() {
+            let at = v.len().saturating_sub(1);
+            v.insert(at, (Action::LeftStick, tr("Other pane")));
+        }
+        v
+    }
+
+    fn base_hints(&self) -> Vec<(Action, &'static str)> {
         if self.fan.shown {
             return vec![(Action::Accept, tr("Choose")), (Action::Back, if self.fan.levels.len() > 1 { tr("Back") } else { tr("Close") })];
         }
@@ -1625,6 +1675,71 @@ impl App {
 
     // ------------------------------------------------------------ panes
 
+    /// A tab's page (a file shown, torrents, disk usage, the terminal) in
+    /// `ui`, if it shows one; what was done in it goes in `acts`.
+    fn draw_page(&mut self, ui: &mut Ui, tab: usize, focused: bool, acts: &mut PageActs) -> bool {
+        if let Some(v) = self.tabs[tab].viewer.as_mut() {
+            let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
+            let area = ui.available_rect_before_wrap();
+            // Pictures and videos: the folder's others as a strip of
+            // previews, on the side set.
+            let current = match &v.content {
+                crate::viewer::Content::Image(im) => im.siblings.get(im.index).cloned(),
+                crate::viewer::Content::Video(m) if !m.full => m.tracks.get(m.index).cloned(),
+                _ => None,
+            };
+            let at = self.cfg.viewer.strip;
+            if let Some(cur) = current.filter(|_| at != 0 && v.strip.len() > 1) {
+                let px = self.cfg.viewer.strip_px();
+                let band = px + 14.0;
+                let (strip, rest) = match at {
+                    2 => (Rect::from_min_max(area.min, pos2(area.max.x, area.min.y + band)), Rect::from_min_max(pos2(area.min.x, area.min.y + band + 6.0), area.max)),
+                    3 => (Rect::from_min_max(area.min, pos2(area.min.x + band, area.max.y)), Rect::from_min_max(pos2(area.min.x + band + 6.0, area.min.y), area.max)),
+                    4 => (Rect::from_min_max(pos2(area.max.x - band, area.min.y), area.max), Rect::from_min_max(area.min, pos2(area.max.x - band - 6.0, area.max.y))),
+                    _ => (Rect::from_min_max(pos2(area.min.x, area.max.y - band), area.max), Rect::from_min_max(area.min, pos2(area.max.x, area.max.y - band - 6.0))),
+                };
+                acts.strip_pick = draw_strip(ui, strip, &v.strip, &cur, &mut self.icons, px, at >= 3);
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rest).id_salt("viewer-beside-strip"));
+                acts.viewer = crate::viewer::draw::draw(&mut child, v, &self.cfg.viewer, &theme);
+            } else {
+                acts.viewer = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+            }
+            // A click into it: the keys go there (from the sidebar too).
+            acts.pressed = ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p)));
+            return true;
+        }
+        if self.tabs[tab].torrents {
+            let items = self.torrents.as_ref().map(|e| e.items()).unwrap_or_default();
+            let err = self.torrents.as_ref().and_then(|e| e.snap.lock().ok().and_then(|s| s.error.clone()));
+            self.torrent_cursor = self.torrent_cursor.min(items.len().saturating_sub(1));
+            acts.torrent = crate::torrents::draw::draw(ui, &items, self.torrent_cursor, err.as_deref(), focused, &mut self.icons);
+            return true;
+        }
+        if let Some(u) = self.tabs[tab].usage.as_deref_mut().filter(|u| u.shown) {
+            acts.usage = crate::usage::draw::draw(ui, u, &mut self.icons);
+            return true;
+        }
+        if let Some(t) = self.tabs[tab].term.as_deref_mut().filter(|t| t.shown) {
+            let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, ui.visuals().dark_mode);
+            // The pad's keyboard below: the terminal ends above it, so the
+            // prompt stays in sight.
+            let above = match &self.overlay {
+                Some(Overlay::Osk(k)) if k.live() => self.osk_top,
+                _ => None,
+            };
+            let typing = above.is_some();
+            if let Some(y) = above {
+                let r = ui.available_rect_before_wrap();
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(r.min, pos2(r.max.x, (y - 8.0).max(r.min.y + 120.0)))));
+                acts.term = crate::terminal::draw::draw(&mut child, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused || typing, !typing);
+            } else {
+                acts.term = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused, true);
+            }
+            return true;
+        }
+        false
+    }
+
     fn draw_center(&mut self, ui: &mut Ui) {
         let dual = self.cfg.dual;
         let tab = self.tab;
@@ -1646,75 +1761,64 @@ impl App {
         let mut torrent_act = None;
         let mut clicked_viewer = false;
         let mut strip_pick = None;
+        let mut pacts: Vec<(usize, PageActs)> = Vec::new();
         let full = self.video_full();
+        let in_panes = dual && self.cfg.dual_pages && !full;
         let frame = if full { egui::Frame::NONE.fill(egui::Color32::BLACK) } else { egui::Frame::central_panel(ui.style()) };
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             if !full {
                 self.draw_icon_pick_banner(ui);
                 tab_act = self.draw_tabs(ui);
             }
-            if let Some(v) = self.tabs[tab].viewer.as_mut() {
-                let theme = crate::viewer::theme::resolve(&self.cfg.viewer.theme, ui.visuals().dark_mode);
-                let area = ui.available_rect_before_wrap();
-                // Pictures and videos: the folder's others as a strip of
-                // previews, on the side set.
-                let current = match &v.content {
-                    crate::viewer::Content::Image(im) => im.siblings.get(im.index).cloned(),
-                    crate::viewer::Content::Video(m) if !m.full => m.tracks.get(m.index).cloned(),
-                    _ => None,
-                };
-                let at = self.cfg.viewer.strip;
-                if let Some(cur) = current.filter(|_| at != 0 && v.strip.len() > 1) {
-                    let px = self.cfg.viewer.strip_px();
-                    let band = px + 14.0;
-                    let (strip, rest) = match at {
-                        2 => (Rect::from_min_max(area.min, pos2(area.max.x, area.min.y + band)), Rect::from_min_max(pos2(area.min.x, area.min.y + band + 6.0), area.max)),
-                        3 => (Rect::from_min_max(area.min, pos2(area.min.x + band, area.max.y)), Rect::from_min_max(pos2(area.min.x + band + 6.0, area.min.y), area.max)),
-                        4 => (Rect::from_min_max(pos2(area.max.x - band, area.min.y), area.max), Rect::from_min_max(area.min, pos2(area.max.x - band - 6.0, area.max.y))),
-                        _ => (Rect::from_min_max(pos2(area.min.x, area.max.y - band), area.max), Rect::from_min_max(area.min, pos2(area.max.x, area.max.y - band - 6.0))),
-                    };
-                    strip_pick = draw_strip(ui, strip, &v.strip, &cur, &mut self.icons, px, at >= 3);
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rest).id_salt("viewer-beside-strip"));
-                    viewer_act = crate::viewer::draw::draw(&mut child, v, &self.cfg.viewer, &theme);
-                } else {
-                    viewer_act = crate::viewer::draw::draw(ui, v, &self.cfg.viewer, &theme);
+            // Pages in panes: each side's in its pane, beside the other.
+            if !in_panes {
+                let mut a = PageActs::default();
+                if self.draw_page(ui, tab, focused, &mut a) {
+                    pacts.push((active, a));
+                    return;
                 }
-                // A click into it: the keys go there (from the sidebar too).
-                clicked_viewer = ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| area.contains(p)));
-                return;
-            }
-            if self.tabs[tab].torrents {
-                let items = self.torrents.as_ref().map(|e| e.items()).unwrap_or_default();
-                let err = self.torrents.as_ref().and_then(|e| e.snap.lock().ok().and_then(|s| s.error.clone()));
-                self.torrent_cursor = self.torrent_cursor.min(items.len().saturating_sub(1));
-                torrent_act = crate::torrents::draw::draw(ui, &items, self.torrent_cursor, err.as_deref(), focused, &mut self.icons);
-                return;
-            }
-            if let Some(u) = self.tabs[tab].usage.as_deref_mut().filter(|u| u.shown) {
-                usage_act = crate::usage::draw::draw(ui, u, &mut self.icons);
-                return;
-            }
-            if let Some(t) = self.tabs[tab].term.as_deref_mut().filter(|t| t.shown) {
-                let scheme = crate::terminal::scheme::resolve(&self.cfg.terminal.scheme, ui.visuals().dark_mode);
-                // The pad's keyboard below: the terminal ends above it, so the
-                // prompt stays in sight.
-                let above = match &self.overlay {
-                    Some(Overlay::Osk(k)) if k.live() => self.osk_top,
-                    _ => None,
-                };
-                let typing = above.is_some();
-                if let Some(y) = above {
-                    let r = ui.available_rect_before_wrap();
-                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(r.min, pos2(r.max.x, (y - 8.0).max(r.min.y + 120.0)))));
-                    term_act = crate::terminal::draw::draw(&mut child, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused || typing, !typing);
-                } else {
-                    term_act = crate::terminal::draw::draw(ui, t, &scheme, self.cfg.terminal.font_size, &mut self.icons, focused, true);
-                }
-                return;
             }
             let dragging = self.drag.is_some();
             let tap = self.touch.tapped.then_some(self.touch.double);
             let finger = self.touch.active;
+            let paged = [in_panes && self.tabs[tab_of[0]].page_shown(), in_panes && self.tabs[tab_of[1]].page_shown()];
+            let full = ui.available_rect_before_wrap();
+            let gap = 6.0;
+            // The line between them is dragged with the mouse: as wide
+            // as each is wanted (not narrower than a little), or pulled
+            // up to a wall, the pane there goes.
+            let span = full.width() - gap;
+            let lo = (PANE_MIN / span).min(0.5);
+            let split_id = ui.id().with("dual-split");
+            let live: Option<f32> = ui.ctx().data(|d| d.get_temp(split_id));
+            let frac = live.unwrap_or(self.cfg.dual_split).clamp(lo, 1.0 - lo);
+            let w = (span * frac).round();
+            let ra = Rect::from_min_size(full.min, vec2(w, full.height()));
+            let rb = Rect::from_min_max(pos2(full.min.x + w + gap, full.min.y), full.max);
+            let frame_stroke = |v: &egui::Visuals, idx: usize| {
+                let is_active = active == idx;
+                if is_active && focused {
+                    Stroke::new(1.5, v.selection.bg_fill)
+                } else if is_active && on_sidebar {
+                    // (The one a sidebar place opens in.)
+                    Stroke::new(1.5, v.selection.bg_fill.gamma_multiply(0.5))
+                } else {
+                    Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color)
+                }
+            };
+            if dual {
+                for idx in (0..2).filter(|&i| paged[i]) {
+                    let rect = [ra, rb][idx];
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("page", idx)));
+                    child.painter().rect_stroke(rect, 6.0, frame_stroke(child.visuals(), idx), StrokeKind::Inside);
+                    let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
+                    let mut a = PageActs::default();
+                    self.draw_page(&mut inner, tab_of[idx], focused && idx == active, &mut a);
+                    // A press into it makes its side the active one.
+                    a.pressed |= ui.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| rect.contains(p)));
+                    pacts.push((idx, a));
+                }
+            }
             let App { tabs, icons, cfg, drag, spring, .. } = self;
             let lifted = |pane: usize| drag.as_ref().filter(|d| d.from == (tab_of[pane], pane)).map(|d| &d.names);
             // The entry a drag rests on in this side, and how long it has.
@@ -1725,31 +1829,14 @@ impl App {
             };
             if dual {
                 let (a, b) = crate::app::two_panes(tabs, tab_of[0], tab_of[1]);
-                let full = ui.available_rect_before_wrap();
-                let gap = 6.0;
-                // The line between them is dragged with the mouse: as wide
-                // as each is wanted (not narrower than a little), or pulled
-                // up to a wall, the pane there goes.
-                let span = full.width() - gap;
-                let lo = (PANE_MIN / span).min(0.5);
-                let split_id = ui.id().with("dual-split");
-                let live: Option<f32> = ui.ctx().data(|d| d.get_temp(split_id));
-                let frac = live.unwrap_or(cfg.dual_split).clamp(lo, 1.0 - lo);
-                let w = (span * frac).round();
-                let ra = Rect::from_min_size(full.min, vec2(w, full.height()));
-                let rb = Rect::from_min_max(pos2(full.min.x + w + gap, full.min.y), full.max);
                 divider = Some(full.min.x + w + gap / 2.0);
                 for (idx, (pane, rect)) in [(a, ra), (b, rb)].into_iter().enumerate() {
+                    if paged[idx] {
+                        continue;
+                    }
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("pane", idx)));
                     let is_active = active == idx;
-                    let stroke = if is_active && focused {
-                        Stroke::new(1.5, child.visuals().selection.bg_fill)
-                    } else if is_active && on_sidebar {
-                        // (The one a sidebar place opens in.)
-                        Stroke::new(1.5, child.visuals().selection.bg_fill.gamma_multiply(0.5))
-                    } else {
-                        Stroke::new(1.0, child.visuals().widgets.noninteractive.bg_stroke.color)
-                    };
+                    let stroke = frame_stroke(child.visuals(), idx);
                     child.painter().rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
                     let shown = pane.loc.clone();
@@ -1805,6 +1892,22 @@ impl App {
                 }
             }
         });
+        // What was done in a page: its side the active one first.
+        for (side, a) in pacts {
+            let any = a.pressed || a.viewer.is_some() || a.usage.is_some() || a.term.is_some() || a.torrent.is_some() || a.strip_pick.is_some();
+            if !any {
+                continue;
+            }
+            if side != self.side() {
+                self.set_side(side);
+            }
+            clicked_viewer |= a.pressed;
+            viewer_act = viewer_act.or(a.viewer);
+            usage_act = usage_act.or(a.usage);
+            term_act = term_act.or(a.term);
+            torrent_act = torrent_act.or(a.torrent);
+            strip_pick = strip_pick.or(a.strip_pick);
+        }
         if clicked_viewer && self.overlay.is_none() {
             self.focus = Focus::Panes;
         }
@@ -1852,7 +1955,7 @@ impl App {
             }
         }
         // (The tab may be gone: its page closed by its own ✕ just now.)
-        let page = self.tabs.get(tab).is_none_or(|t| t.usage.as_ref().is_some_and(|u| u.shown) || t.term.as_ref().is_some_and(|u| u.shown) || t.torrents || t.viewer.is_some());
+        let page = !in_panes && self.tabs.get(tab).is_none_or(|t| t.usage.as_ref().is_some_and(|u| u.shown) || t.term.as_ref().is_some_and(|u| u.shown) || t.torrents || t.viewer.is_some());
         let divider = if page { self.divider_x } else { divider };
         if divider != self.divider_x {
             // The address bar lines up with this on the next frame.
@@ -1965,7 +2068,13 @@ impl App {
             Some(TabAct::Close(i)) => self.run(Cmd::CloseTabAt(i)),
             Some(TabAct::Move(from, to)) => self.run(Cmd::MoveTab(from, to)),
             Some(TabAct::Tool(t)) => self.run_tool(t),
-            Some(TabAct::New) => self.run(Cmd::NewTab),
+            Some(TabAct::New(side)) => {
+                if let Some(s) = side {
+                    self.set_side(s);
+                }
+                self.run(Cmd::NewTab);
+            }
+            Some(TabAct::ToSide(i, s)) => self.run(Cmd::TabToSide(i, s)),
             None => {}
         }
     }
@@ -3713,6 +3822,18 @@ pub fn glyph(ui: &mut Ui, a: Action, pad: PadKind) {
 
 // ---------------------------------------------------------------- top bar
 
+/// What was done in a page drawn: in a file shown, the torrents, disk
+/// usage, the terminal; a press into it, a preview of the strip chosen.
+#[derive(Default)]
+struct PageActs {
+    viewer: Option<crate::viewer::draw::HeaderAct>,
+    usage: Option<crate::usage::draw::Act>,
+    term: Option<crate::terminal::draw::Act>,
+    torrent: Option<crate::torrents::draw::Act>,
+    pressed: bool,
+    strip_pick: Option<std::path::PathBuf>,
+}
+
 enum TabAct {
     Switch(usize),
     /// Dragged from one place in the row to another.
@@ -3720,7 +3841,10 @@ enum TabAct {
     /// A button beside the tabs pressed.
     Tool(crate::toolbar::Tool),
     Close(usize),
-    New,
+    /// "+" pressed (in a pane's own row: that side's).
+    New(Option<usize>),
+    /// Let go over the other pane's row.
+    ToSide(usize, usize),
 }
 
 enum TopAction {
@@ -4679,6 +4803,34 @@ fn draw_settings(ui: &mut Ui, st: &mut crate::app::Settings, cfg: &Config, icons
                                     }
                                     if r.clicked() {
                                         ev = Some(SettingsEvent::Toggle(row::FOLD_ADDR));
+                                    }
+                                }
+                                SItem::Row(r @ (row::DUAL_PAGES | row::DUAL_TABS | row::KEEP_TABS)) => {
+                                    let (on, label, id) = match r {
+                                        row::DUAL_PAGES => (cfg.dual_pages, tr("Pages open in a pane"), "dual-pages"),
+                                        row::DUAL_TABS => (cfg.dual_tabs, tr("Each pane has its own tabs"), "dual-tabs"),
+                                        _ => (cfg.keep_tabs, tr("Keep tabs for the next start"), "keep-tabs"),
+                                    };
+                                    let (rect, resp) = settings_row(ui, 44.0, st.row == r, id);
+                                    row_label(ui, rect, label, &label_font, v.text_color(), rect.max.x - 40.0);
+                                    let b = Rect::from_center_size(pos2(rect.max.x - 26.0, rect.center().y), Vec2::splat(20.0));
+                                    ui.painter().rect_stroke(b, 4.0, Stroke::new(1.5, v.strong_text_color()), StrokeKind::Inside);
+                                    if on {
+                                        ui.painter().text(b.center(), Align2::CENTER_CENTER, "✔", FontId::proportional(15.0), v.strong_text_color());
+                                    }
+                                    if resp.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(r));
+                                    }
+                                }
+                                SItem::Row(row::PAGES_SIDE) => {
+                                    // Which pane a page opens in (pages in panes only).
+                                    let (rect, r) = settings_row(ui, 44.0, st.row == row::PAGES_SIDE, "pages-side");
+                                    let shown = if cfg.pages_other { tr("In the other pane") } else { tr("In the same pane") };
+                                    let c = if cfg.dual_pages { v.strong_text_color() } else { v.weak_text_color() };
+                                    let left = row_value(ui, rect, &format!("◀ {shown} ▶"), c);
+                                    row_label(ui, rect, tr("Pages open"), &label_font, if cfg.dual_pages { v.text_color() } else { v.weak_text_color() }, left - 8.0);
+                                    if r.clicked() {
+                                        ev = Some(SettingsEvent::Toggle(row::PAGES_SIDE));
                                     }
                                 }
                                 SItem::Row(row::PAD_HINTS) => {

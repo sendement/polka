@@ -728,4 +728,11 @@ pub const T: &[(&str, &str)] = &[
     ("Open with", "打开方式："),
     ("left", "剩余"),
     ("Cancel operations", "取消操作"),
+    ("Pages open in a pane", "页面在面板中打开"),
+    ("Each pane has its own tabs", "每个面板有自己的标签页"),
+    ("Keep tabs for the next start", "下次启动时保留标签页"),
+    ("In the other pane", "在另一侧面板"),
+    ("In the same pane", "在同一面板"),
+    ("Pages open", "页面打开位置"),
+    ("Other pane", "另一侧面板"),
 ];

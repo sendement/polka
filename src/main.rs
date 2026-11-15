@@ -24,6 +24,7 @@ mod packages;
 mod props;
 mod sandbox;
 mod schemes;
+mod session;
 mod sidebar;
 mod status;
 mod net;
@@ -117,8 +118,17 @@ fn main() -> eframe::Result {
             }
             fonts::install(&cc.egui_ctx);
             appearance::watch(cc.egui_ctx.clone());
+            let asked = start.is_some();
             let mut app = app::App::new(cc.egui_ctx.clone(), start);
             app.dbus_fresh = dbus;
+            // The tabs kept, back (the first window only).
+            if session::first_window() && app.cfg.keep_tabs {
+                if let Some(saved) = session::load() {
+                    app.restore_tabs(saved, asked);
+                    // "Show in folder" opens beside them.
+                    app.dbus_fresh = false;
+                }
+            }
             fm1::serve(app.msg_tx.clone(), cc.egui_ctx.clone());
             use raw_window_handle::HasDisplayHandle;
             app.sys_clip = Some(egui_winit::clipboard::Clipboard::new(cc.display_handle().ok().map(|h| h.as_raw())));
