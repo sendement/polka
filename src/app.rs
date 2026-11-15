@@ -1780,7 +1780,7 @@ impl App {
         // still there), else beside the left one.
         if cfg.dual {
             let right = right_start(&cfg, &tabs[0].pane.loc);
-            tabs.push(Tab { for_right: true, ..Tab::new(Pane::new(right, &cfg)) });
+            tabs.push(Tab { for_right: true, right: true, ..Tab::new(Pane::new(right, &cfg)) });
         }
         let (msg_tx, msg_rx) = crossbeam_channel::unbounded();
         apply_accent(&ctx, &cfg);
@@ -2850,6 +2850,12 @@ impl App {
         }
     }
 
+    /// One pane while each has its own tabs (as set): the right's are
+    /// hidden till there are two again.
+    pub fn tab_hidden(&self, i: usize) -> bool {
+        self.cfg.dual_tabs && !self.cfg.dual && self.tabs.get(i).is_some_and(|t| t.right)
+    }
+
     /// Each pane with its own row of tabs (dual mode, as set).
     pub fn split_tabs(&self) -> bool {
         self.cfg.dual && self.cfg.dual_tabs
@@ -2879,6 +2885,11 @@ impl App {
     /// Each pane's own row of tabs just turned on: the tab each side shows
     /// is in its row.
     pub(crate) fn tabs_by_side(&mut self) {
+        // (One pane: the tab shown is never one of the hidden ones.)
+        if self.cfg.dual_tabs && !self.cfg.dual {
+            let t = self.tab;
+            self.tabs[t].right = false;
+        }
         if !self.split_tabs() {
             return;
         }
@@ -2891,7 +2902,7 @@ impl App {
     /// pane with its own tabs: the nearest in its row).
     pub(crate) fn back_from_page(&self, i: usize) -> usize {
         let row = self.tabs.get(i).is_some_and(|t| t.right);
-        if self.split_tabs() { self.row_neighbour(i, row, self.other_tab) } else { None }.unwrap_or(i.saturating_sub(1))
+        if self.cfg.dual_tabs { self.row_neighbour(i, row, if self.cfg.dual { self.other_tab } else { usize::MAX }) } else { None }.unwrap_or(i.saturating_sub(1))
     }
 
     /// A tab let go over the other pane's row: it's in that row now, shown
@@ -2924,9 +2935,15 @@ impl App {
         self.set_side(keep);
         let r = self.other_tab;
         let t = &self.tabs[r];
-        let spare = t.for_right && t.viewer.is_none() && t.usage.is_none() && t.term.is_none();
+        // (Each pane its own tabs: the right's wait, hidden, for it to
+        // come back.)
+        let spare = t.for_right && t.viewer.is_none() && t.usage.is_none() && t.term.is_none() && !self.cfg.dual_tabs;
         self.cfg.dual = false;
         self.side = 0;
+        if self.cfg.dual_tabs && self.tabs[self.tab].right {
+            // The right pane stays alone: its tab in the row shown.
+            self.tabs[self.tab].right = false;
+        }
         if spare && r != self.tab && self.tabs.len() > 1 {
             self.tabs.remove(r);
             if r < self.tab {
@@ -2951,7 +2968,7 @@ impl App {
 
     /// The active side to the next tab; the other side's is stepped over.
     fn switch_tab(&mut self, d: isize) {
-        if self.split_tabs() {
+        if self.cfg.dual_tabs {
             // Within the active pane's own row.
             let mine = self.side() == 1;
             let row: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].right == mine).collect();
@@ -3836,7 +3853,7 @@ impl App {
             return;
         }
         // (Each pane its own tabs: back on one of its row.)
-        let back = if self.split_tabs() { self.row_neighbour(i, self.tabs[i].right, self.other_tab) } else { None };
+        let back = if self.cfg.dual_tabs { self.row_neighbour(i, self.tabs[i].right, if self.cfg.dual { self.other_tab } else { usize::MAX }) } else { None };
         self.tabs.remove(i);
         if self.other_tab > i {
             self.other_tab -= 1;
@@ -3855,7 +3872,7 @@ impl App {
         if self.tabs[self.tab].own && has(&self.tabs[self.tab]) {
             return;
         }
-        match self.tabs.iter().position(|t| t.own && has(t)) {
+        match (0..self.tabs.len()).find(|&i| self.tabs[i].own && has(&self.tabs[i]) && !self.tab_hidden(i)) {
             Some(i) => {
                 // Pages in the other pane: it's brought up there.
                 if self.pages_to_other(self.tab) && i != self.other_tab && !self.split_tabs() {
@@ -5253,9 +5270,28 @@ impl App {
                                 self.side = 0;
                                 self.tab = keep;
                                 self.other_tab = keep;
+                                // The left row gone: the right's is the one now.
+                                if side == 0 {
+                                    for t in &mut self.tabs {
+                                        t.right = false;
+                                    }
+                                }
                                 self.cfg.save();
                                 self.range = None;
                                 return;
+                            }
+                        }
+                    }
+                    // One pane, the right's tabs hidden: on to a neighbour in
+                    // the row shown (the last one there stays).
+                    if self.cfg.dual_tabs && !self.cfg.dual {
+                        if self.tab_hidden(i) {
+                            return;
+                        }
+                        if i == self.tab {
+                            match self.row_neighbour(i, false, usize::MAX) {
+                                Some(k) => self.tab = k,
+                                None => return,
                             }
                         }
                     }

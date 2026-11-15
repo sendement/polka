@@ -759,7 +759,7 @@ impl App {
         let mut close = None;
         let mut new_tab = None;
         let v = ui.visuals().clone();
-        let many = self.tabs.len() > 1;
+        let many = (0..self.tabs.len()).filter(|&i| !self.tab_hidden(i)).count() > 1;
         let gap = 6.0;
         // (LB / RB beside them while the gamepad's hints show.)
         let pad_hints = self.show_pad();
@@ -801,7 +801,8 @@ impl App {
             let of = |right: bool| (0..self.tabs.len()).filter(|&i| self.tabs[i].right == right).collect::<Vec<_>>();
             vec![(of(false), lo, mid - gap / 2.0, Some(0)), (of(true), mid + gap / 2.0, hi, Some(1))]
         } else {
-            vec![((0..self.tabs.len()).collect(), lo, hi, None)]
+            // (One pane: the right's own tabs hidden till there are two.)
+            vec![((0..self.tabs.len()).filter(|&i| !self.tab_hidden(i)).collect(), lo, hi, None)]
         };
         let painter = ui.painter().with_clip_rect(row.expand(2.0));
         let dragging = self.drag.is_some();

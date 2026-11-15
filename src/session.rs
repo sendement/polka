@@ -133,11 +133,9 @@ impl App {
         self.tab = tab;
         self.other_tab = other;
         self.side = if cfg.dual { side } else { 0 };
-        if cfg.dual {
-            if self.tab == self.other_tab {
-                self.open_right_pane();
-            }
-            self.tabs_by_side();
+        if cfg.dual && self.tab == self.other_tab {
+            self.open_right_pane();
         }
+        self.tabs_by_side();
     }
 }

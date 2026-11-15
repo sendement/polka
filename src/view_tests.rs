@@ -4587,6 +4587,56 @@ fn dual_pages_screens() {
     h.state_mut().run(Cmd::CloseTabAt(l));
     assert!(!h.state().cfg.dual, "still two panes");
 
+    // One pane: the right's own tabs wait, hidden, and come back with it.
+    h.state_mut().run(Cmd::ToggleDual);
+    h.state_mut().set_side(1);
+    h.state_mut().run(Cmd::OpenInNewTab(b.clone()));
+    let rights: Vec<usize> = (0..h.state().tabs.len()).filter(|&k| h.state().tabs[k].right).collect();
+    assert!(rights.len() >= 2, "{rights:?}");
+    let n = h.state().tabs.len();
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(&mut h);
+    assert_eq!(h.state().tabs.len(), n, "the right's tabs went");
+    assert!(!h.state().tabs[h.state().tab].right);
+    for &k in &rights {
+        assert!(h.state().tab_hidden(k));
+        assert_eq!(h.state().tab_rects[k], egui::Rect::NOTHING, "right tab {k} in the row");
+    }
+    shot(&mut h, "dp5-one-pane-right-tabs-hidden");
+    for _ in 0..3 {
+        press(&mut h, &[Action::NextTab]);
+        assert!(!h.state().tabs[h.state().tab].right, "RB went to a hidden tab");
+    }
+    // Kept for the next start, hidden still.
+    let kept = crate::session::of(h.state());
+    let mut h4 = harness_with(dir.join("C"), [1100.0, 680.0], "-pages");
+    h4.state_mut().cfg.dual_tabs = true;
+    h4.state_mut().cfg.dual = false;
+    h4.state_mut().restore_tabs(kept, false);
+    assert_eq!((0..h4.state().tabs.len()).filter(|&k| h4.state().tab_hidden(k)).count(), rights.len());
+    drop(h4);
+    h.state_mut().run(Cmd::ToggleDual);
+    settle(&mut h);
+    assert!(h.state().tabs[h.state().tab_of(1)].right && !h.state().tabs[h.state().tab_of(0)].right);
+    assert_eq!((0..h.state().tabs.len()).filter(|&k| h.state().tabs[k].right).count(), rights.len());
+    shot(&mut h, "dp6-right-tabs-back");
+    // Started again (nothing kept): the right pane's tab in its own row.
+    h.state_mut().cfg.save();
+    let h5 = harness_with(dir.join("A"), [1100.0, 680.0], "-pages");
+    assert!(h5.state().cfg.dual && h5.state().cfg.dual_tabs);
+    assert!(h5.state().tabs[h5.state().tab_of(1)].right, "the right pane's tab in the left row");
+    assert!(!h5.state().tabs[h5.state().tab_of(0)].right);
+    drop(h5);
+    // The left row's last tab closed again: one pane on the right's tabs.
+    while (0..h.state().tabs.len()).filter(|&k| !h.state().tabs[k].right).count() > 1 {
+        let k = (0..h.state().tabs.len()).find(|&k| !h.state().tabs[k].right && k != h.state().tab_of(0)).unwrap();
+        h.state_mut().run(Cmd::CloseTabAt(k));
+    }
+    let l = h.state().tab_of(0);
+    h.state_mut().run(Cmd::CloseTabAt(l));
+    assert!(!h.state().cfg.dual);
+    assert!((0..h.state().tabs.len()).all(|k| !h.state().tab_hidden(k)), "tabs hidden with no left row");
+
     // The tabs kept: as they were, back at the next start.
     h.state_mut().run(Cmd::ToggleDual);
     settle(&mut h);
