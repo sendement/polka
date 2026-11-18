@@ -735,4 +735,12 @@ pub const T: &[(&str, &str)] = &[
     ("In the same pane", "Oʻsha panelda"),
     ("Pages open", "Sahifalar qayerda ochiladi"),
     ("Other pane", "Boshqa panel"),
+    ("Unpack installer", "Oʻrnatuvchini ochish"),
+    ("Unpacking the installer", "Oʻrnatuvchi ochilmoqda"),
+    ("Not an installer Polka can unpack", "Bu Polka ocha oladigan oʻrnatuvchi emas"),
+    ("Needs %t (the %p package)", "%t kerak (%p paketi)"),
+    ("a newer Inno Setup: innoextract's development version (innoextract-git) unpacks it", "Inno Setup ning yangi versiyasi: uni innoextract ning ishlab chiqilayotgan versiyasi (innoextract-git) ochadi"),
+    ("Wine couldn't start", "Wine ishga tushmadi"),
+    ("This repack's installer has no unarc.dll: it isn't unpacked this way", "Bu repak oʻrnatuvchisida unarc.dll yoʻq: uni bu yoʻl bilan ochib boʻlmaydi"),
+    ("Unpacked, but %n of the files the repack lists are missing", "Ochildi, lekin repak roʻyxatidagi %n ta fayl yetishmaydi"),
 ];

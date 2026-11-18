@@ -84,8 +84,9 @@ pub fn draw(ui: &mut Ui, u: &mut Usage, icons: &mut Icons) -> Option<Act> {
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let mut x = head.min.x + 6.0;
     let title = ui.painter().layout_no_wrap(tr("Disk usage").into(), FontId::proportional(16.0), vis.strong_text_color());
-    ui.painter().galley(pos2(x, head.center().y - title.size().y / 2.0), title.clone(), vis.strong_text_color());
-    x += title.size().x + 14.0;
+    // Narrow (a pane of its own): the buttons that don't fit left out, the
+    // view's ones first (□ and the menu still have them), then the title.
+    let keep = x + title.size().x + 60.0;
     let mut bx = head.max.x - 30.0;
     let btn = |bx: f32, w: f32| Rect::from_min_size(pos2(bx, head.min.y + 3.0), vec2(w, 28.0));
     if header_button(ui, btn(bx, 28.0), "✕", tr("Close"), false) {
@@ -99,13 +100,17 @@ pub fn draw(ui: &mut Ui, u: &mut Usage, icons: &mut Icons) -> Option<Act> {
         if u.ready().is_some_and(|r| r.btrfs) {
             let label = tr("Size on disk");
             let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+            if bx - w - 4.0 >= keep {
             bx -= w + 4.0;
             let asked = u.ready().is_some_and(|r| r.real.contains_key(&r.center));
             if header_button(ui, btn(bx, w), label, tr("Size after compression (btrfs, needs the administrator password)"), asked) {
                 act = Some(Act::Real);
             }
+            }
         }
-        for m in Mode::ALL.iter().rev() {
+        let widths: Vec<f32> = Mode::ALL.iter().map(|m| ui.painter().layout_no_wrap(mode_name(*m).to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 24.0).collect();
+        let fits = bx - widths.iter().sum::<f32>() >= keep;
+        for m in Mode::ALL.iter().rev().filter(|_| fits) {
             let label = mode_name(*m);
             let w = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
             bx -= w + 4.0;
@@ -113,6 +118,11 @@ pub fn draw(ui: &mut Ui, u: &mut Usage, icons: &mut Icons) -> Option<Act> {
                 act = Some(Act::Mode(*m));
             }
         }
+    }
+    if bx - 10.0 - x > 16.0 {
+        let g = elided_text(ui, tr("Disk usage"), FontId::proportional(16.0), vis.strong_text_color(), bx - 10.0 - x);
+        ui.painter().galley(pos2(x, head.center().y - g.size().y / 2.0), g.clone(), vis.strong_text_color());
+        x += g.size().x + 14.0;
     }
     // The path to the folder in the middle, each part clickable.
     if let Some(r) = u.ready() {
@@ -642,15 +652,24 @@ fn draw_list(ui: &mut Ui, area: Rect, r: &Ready, reveal: bool) -> Option<Act> {
                 Some(real) => format!("{} → {}   {pct:5.1}%", human_size(c.size), human_size(real.disk)),
                 None => format!("{}   {pct:5.1}%", human_size(c.size)),
             };
-            let rg = ui.painter().layout_no_wrap(right, FontId::monospace(13.0), vis.text_color());
+            // Narrow: the share alone on the right.
+            let mut rg = ui.painter().layout_no_wrap(right, FontId::monospace(13.0), vis.text_color());
+            if rg.size().x > row.width() - 36.0 - 90.0 {
+                rg = ui.painter().layout_no_wrap(format!("{pct:.0}%"), FontId::monospace(13.0), vis.text_color());
+            }
             let rx = row.max.x - 12.0 - rg.size().x;
             ui.painter().galley(pos2(rx, row.center().y - rg.size().y / 2.0), rg, vis.text_color());
             let label = if c.is_dir() { format!("{}/", c.name) } else { item_name(c) };
-            let g = elided_text(ui, &label, FontId::proportional(15.0), vis.strong_text_color(), (rx - row.min.x - 200.0).max(80.0));
+            // The name in what's left; the file count after it if that fits too.
+            let room = rx - 10.0 - (row.min.x + 36.0);
+            let files = c.is_dir().then(|| ui.painter().layout_no_wrap(trn("%n files", c.files as usize), FontId::proportional(12.5), vis.weak_text_color()));
+            let natural = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(15.0), vis.strong_text_color()).size().x;
+            let files = files.filter(|f| natural + 8.0 + f.size().x <= room.min(natural + 8.0 + 400.0));
+            let g = elided_text(ui, &label, FontId::proportional(15.0), vis.strong_text_color(), (room - files.as_ref().map_or(0.0, |f| f.size().x + 8.0)).max(12.0));
             ui.painter().galley(pos2(row.min.x + 36.0, row.center().y - g.size().y / 2.0), g.clone(), vis.strong_text_color());
-            if c.is_dir() {
+            if let Some(f) = files {
                 let x = row.min.x + 44.0 + g.size().x;
-                ui.painter().text(pos2(x, row.center().y), Align2::LEFT_CENTER, trn("%n files", c.files as usize), FontId::proportional(12.5), vis.weak_text_color());
+                ui.painter().galley(pos2(x, row.center().y - f.size().y / 2.0), f, vis.weak_text_color());
             }
             let mut p = r.center.clone();
             p.push(i);

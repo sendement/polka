@@ -23,6 +23,11 @@ renaming via an on-screen keyboard. Keyboard and mouse work too.
 - Archives work like folders (libarchive): browse zip, 7z, rar, tar.*, iso…; copy, move, rename,
   delete and create folders inside zip, 7z and tar.* (rar/iso are read-only)
 - Built-in archiver: zip, tar.zst, tar.gz, tar.xz; smart extract
+- Windows installers unpacked without running them: Inno Setup (`innoextract`), NSIS, MSI,
+  cabinets and self-extracting 7z/RAR/zip (`7z`, `msiextract`), InstallShield (`unshield`).
+  Repacks (FitGirl, DODI…) too: their FreeArc archives go through Wine one by one, with only the
+  unpacker and compressors they ship (in Polka's own prefix, no windows), checked against their
+  file list
 - Password-protected archives: zip (ZipCrypto/AES) via libarchive, 7z and rar via the `7z` tool;
   Polka asks for the password (hidden input) and retries. Passwords are kept in memory only
 - Name clashes ask: keep both, replace (folders merge), skip

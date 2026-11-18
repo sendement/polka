@@ -4663,6 +4663,179 @@ fn dual_pages_screens() {
     h.state_mut().cfg.save();
 }
 
+/// Pages in narrow panes (dual mode): each kept inside its own pane, the
+/// other one's untouched, whatever the line between them.
+#[test]
+#[ignore]
+fn narrow_pages_screens() {
+    use crate::app::Cmd;
+    use crate::vfs::Location;
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("narrowpages");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (p, kib) in [("Games/Townfall/data.pak", 600), ("Music/a very long album name indeed/01.flac", 300), ("Photos/2025/a.jpg", 70), ("notes.txt", 8)] {
+        let p = dir.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![7u8; kib * 1024]).unwrap();
+    }
+    std::fs::write(dir.join("long.txt"), "a line long enough to run past a narrow pane's edge, and then some more words\n".repeat(20)).unwrap();
+    let mut h = harness_with(dir.clone(), [1100.0, 680.0], "-narrow");
+    settle(&mut h);
+    h.state_mut().cfg.dual_pages = true;
+    h.state_mut().cfg.pages_other = false;
+    h.state_mut().cfg.dual_tabs = false;
+    if !h.state().cfg.dual {
+        h.state_mut().run(Cmd::ToggleDual);
+    }
+    let cfg = h.state().cfg.clone();
+    h.state_mut().set_side(1);
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    h.state_mut().set_side(0);
+    for (split, side) in [(0.2_f32, 0usize), (0.8, 1)] {
+        h.state_mut().cfg.dual_split = split;
+        h.state_mut().set_side(side);
+        h.state_mut().open_usage(Some(dir.clone()));
+        for _ in 0..40 {
+            settle(&mut h);
+            if h.state().cur_tab().usage.as_ref().is_some_and(|u| matches!(u.state, crate::usage::State::Ready(_))) {
+                break;
+            }
+        }
+        for mode in 0..3u8 {
+            if let Some(u) = h.state_mut().tabs.iter_mut().find_map(|t| t.usage.as_deref_mut()) {
+                u.mode = crate::usage::Mode::from(mode);
+            }
+            settle(&mut h);
+            shot(&mut h, &format!("np-usage-{side}-{mode}"));
+        }
+        h.state_mut().run(Cmd::UsageClose);
+        settle(&mut h);
+        let i = h.state().pane().entries.iter().position(|e| e.name == "long.txt").unwrap();
+        h.state_mut().pane_mut().set_cursor(i);
+        h.state_mut().view_current();
+        settle(&mut h);
+        shot(&mut h, &format!("np-text-{side}"));
+        h.state_mut().close_viewer();
+        h.state_mut().run(Cmd::TermOpen(None));
+        settle(&mut h);
+        shot(&mut h, &format!("np-term-{side}"));
+        h.state_mut().run(Cmd::TermClose);
+        h.state_mut().run(Cmd::TorrentsOpen);
+        settle(&mut h);
+        shot(&mut h, &format!("np-torrents-{side}"));
+        h.state_mut().run(Cmd::TorrentsClose);
+        settle(&mut h);
+    }
+    h.state_mut().cfg.dual = false;
+    h.state_mut().cfg.dual_pages = false;
+    h.state_mut().cfg.dual_split = 0.5;
+    h.state_mut().cfg.save();
+}
+
+/// Windows installers unpacked without Wine: a self-extracting 7z, Inno
+/// Setup (innoextract, when there's one and a sample), a repack told
+/// apart, a plain program refused.
+#[test]
+#[ignore]
+fn installer_screens() {
+    use crate::app::Cmd;
+    use crate::i18n::tr;
+    use std::path::Path;
+    use crate::vfs::Location;
+    let _alone = GLOBALS.write().unwrap_or_else(|e| e.into_inner());
+    let dir = std::fs::canonicalize(std::env::var_os("POLKA_TEST_DIR").expect("POLKA_TEST_DIR")).unwrap().join("installers");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("repack")).unwrap();
+    // innoextract from the fixtures if the system has none.
+    let tools = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/tools/usr/bin"));
+    if tools.join("innoextract").is_file() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        unsafe { std::env::set_var("PATH", std::env::join_paths(std::iter::once(tools.clone()).chain(std::env::split_paths(&path))).unwrap()) };
+    }
+    let sfx = Path::new("/usr/lib/7zip/7zCon.sfx");
+    let made = sfx.is_file() && {
+        std::fs::write(dir.join("readme.txt"), "inside the installer\n").unwrap();
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data/level.pak"), vec![3u8; 300_000]).unwrap();
+        std::process::Command::new("7z").current_dir(&dir).args(["a", "-sfx7zCon.sfx", "-mx1", "Mod Pack Setup.exe", "readme.txt", "data"]).output().is_ok_and(|o| o.status.success())
+    };
+    let _ = std::fs::remove_file(dir.join("readme.txt"));
+    let _ = std::fs::remove_dir_all(dir.join("data"));
+    // A program that is just a program.
+    if sfx.is_file() {
+        std::fs::copy(sfx, dir.join("tool.exe")).unwrap();
+    }
+    let inno = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/fixtures/inno/isetup-5.5.8-unicode.exe"));
+    let have_inno = inno.is_file() && crate::convert::has("innoextract");
+    if inno.is_file() {
+        std::fs::copy(&inno, dir.join("isetup.exe")).unwrap();
+        // A repack: the same outside, FreeArc data beside it.
+        std::fs::copy(&inno, dir.join("repack/setup.exe")).unwrap();
+        let mut bin = b"ArC\x01".to_vec();
+        bin.extend([0u8; 64]);
+        std::fs::write(dir.join("repack/fg-01.bin"), bin).unwrap();
+    }
+    let mut h = harness(dir.clone());
+    settle(&mut h);
+    let cfg = h.state().cfg.clone();
+    let unpack = |h: &mut Harness<'static, App>, name: &str| {
+        let i = h.state().pane().entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        h.state_mut().pane_mut().set_cursor(i);
+        h.state_mut().toast = None;
+        press(h, &[Action::Actions]);
+        let at = match &h.state().overlay {
+            Some(crate::app::Overlay::Menu(m)) => m.items.iter().position(|it| it.label == tr("Unpack installer")),
+            _ => None,
+        };
+        assert!(at.is_some(), "no \"Unpack installer\" for {name}");
+        h.state_mut().overlay = None;
+        h.state_mut().run(Cmd::UnpackInstaller);
+        wait_jobs(h);
+        settle(h);
+        h.state().toast.as_ref().map(|t| t.0.clone())
+    };
+    if made {
+        let err = unpack(&mut h, "Mod Pack Setup.exe");
+        assert_eq!(err, None, "the self-extracting 7z");
+        let out = dir.join("Mod Pack Setup");
+        assert_eq!(std::fs::read_to_string(out.join("readme.txt")).unwrap(), "inside the installer\n");
+        assert_eq!(std::fs::metadata(out.join("data/level.pak")).unwrap().len(), 300_000);
+        assert!(h.state().pane().entries.iter().any(|e| e.name == "Mod Pack Setup" && e.is_dir), "the folder isn't listed");
+        shot(&mut h, "in0-sfx-unpacked");
+        // Again: a folder of its own, not into the first.
+        unpack(&mut h, "Mod Pack Setup.exe");
+        assert!(dir.join("Mod Pack Setup (2)/readme.txt").is_file());
+        let err = unpack(&mut h, "tool.exe");
+        assert!(err.as_deref().is_some_and(|e| e.contains(tr("Not an installer Polka can unpack"))), "{err:?}");
+        assert!(!dir.join("tool").exists(), "a folder left for nothing");
+    }
+    if have_inno {
+        let err = unpack(&mut h, "isetup.exe");
+        assert_eq!(err, None, "Inno Setup");
+        assert!(dir.join("isetup/ISCC.exe").is_file(), "{:?}", std::fs::read_dir(dir.join("isetup")).map(|r| r.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
+        shot(&mut h, "in1-inno-unpacked");
+    }
+    if inno.is_file() {
+        h.state_mut().pane_mut().navigate(Location::Local(dir.join("repack")), None, &cfg);
+        settle(&mut h);
+        let err = unpack(&mut h, "setup.exe");
+        // (A real one's installer carries unarc.dll; this stand-in doesn't.)
+        assert!(err.as_deref().is_some_and(|e| e.contains("unarc.dll")), "{err:?}");
+        assert!(!dir.join("repack/setup").exists());
+        shot(&mut h, "in2-repack-refused");
+    }
+    // Something that isn't one: no such item.
+    std::fs::write(dir.join("notes.txt"), "x").unwrap();
+    h.state_mut().pane_mut().navigate(Location::Local(dir.clone()), None, &cfg);
+    settle(&mut h);
+    let i = h.state().pane().entries.iter().position(|e| e.name == "notes.txt").unwrap();
+    h.state_mut().pane_mut().set_cursor(i);
+    press(&mut h, &[Action::Actions]);
+    if let Some(crate::app::Overlay::Menu(m)) = &h.state().overlay {
+        assert!(!m.items.iter().any(|it| it.label == tr("Unpack installer")));
+    }
+}
+
 /// The mouse in dual mode: an address field held a moment widens; a drag
 /// resting on a crumb of the path or on a sidebar place opens it there.
 #[test]

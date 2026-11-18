@@ -402,7 +402,7 @@ impl Pane {
     }
 }
 
-fn natural_cmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
     loop {
         match (a.peek().copied(), b.peek().copied()) {
@@ -650,6 +650,8 @@ pub enum Cmd {
     VideoAudio,
     VideoSubs,
     ExtractHere,
+    /// The Windows installer chosen unpacked beside it (no Wine).
+    UnpackInstaller,
     ExtractOther,
     Pin(PathBuf),
     Unpin(PathBuf),
@@ -2258,6 +2260,9 @@ impl App {
                     }
                     if let Some(h) = j.history.lock().unwrap().take() {
                         steps.push(h);
+                    }
+                    if let Some(n) = j.note.lock().unwrap().take() {
+                        report.push(n);
                     }
                     false
                 }
@@ -4103,6 +4108,9 @@ impl App {
                 add(tr("Extract to other pane"), Cmd::ExtractOther, local && other_local);
             }
         }
+        if single && local && !targets[0].is_dir && crate::installers::is_candidate(&targets[0].name) {
+            add(tr("Unpack installer"), Cmd::UnpackInstaller, true);
+        }
         if one_dir_local {
             let path = p.entry_path(&targets[0]).unwrap();
             add(tr("Disk usage"), Cmd::UsageOpen(Some(path.clone())), true);
@@ -5223,6 +5231,12 @@ impl App {
                 if let Some(dest) = dest {
                     let archive = crate::volumes::first(&archive);
                     self.start(Op::Extract { archive, dest });
+                }
+            }
+            Cmd::UnpackInstaller => {
+                let Some(installer) = self.local_targets().into_iter().next() else { return };
+                if let Some(dest) = crate::installers::dest_for(&installer) {
+                    self.start(Op::Unpack { installer, dest });
                 }
             }
             Cmd::Pin(p) => {

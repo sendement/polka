@@ -61,13 +61,7 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
         }
     }
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
-    let mut x = head.min.x + 6.0;
     let dirty = matches!(&v.content, Content::Text(t) if t.ed.dirty);
-    let title = if dirty { format!("● {}", v.name) } else { v.name.clone() };
-    let name = ui.painter().layout_no_wrap(title, FontId::proportional(16.0), vis.strong_text_color());
-    ui.painter().galley(pos2(x, head.center().y - name.size().y / 2.0), name.clone(), vis.strong_text_color());
-    x += name.size().x + 14.0;
-    ui.painter().text(pos2(x, head.center().y), Align2::LEFT_CENTER, details(v), FontId::proportional(13.0), vis.weak_text_color());
     let mut bx = head.max.x - 30.0;
     let btn = |bx: f32, w: f32| Rect::from_min_size(pos2(bx, head.min.y + 3.0), vec2(w, 28.0));
     if header_button(ui, btn(bx, 28.0), "✕", tr("Close"), false) {
@@ -105,6 +99,20 @@ pub fn draw(ui: &mut Ui, v: &mut Viewer, prefs: &ViewerPrefs, theme: &Theme) -> 
                     act = Some(HeaderAct::ToggleMd);
                 }
             }
+        }
+    }
+    // The name and what it is, in the room the buttons leave (cut short
+    // in a narrow pane).
+    let mut x = head.min.x + 6.0;
+    let title = if dirty { format!("● {}", v.name) } else { v.name.clone() };
+    let room = bx - 10.0 - x;
+    if room > 16.0 {
+        let name = crate::view::elided_text(ui, &title, FontId::proportional(16.0), vis.strong_text_color(), room);
+        ui.painter().galley(pos2(x, head.center().y - name.size().y / 2.0), name.clone(), vis.strong_text_color());
+        x += name.size().x + 14.0;
+        if bx - 10.0 - x > 40.0 {
+            let g = crate::view::elided_text(ui, &details(v), FontId::proportional(13.0), vis.weak_text_color(), bx - 10.0 - x);
+            ui.painter().galley(pos2(x, head.center().y - g.size().y / 2.0), g, vis.weak_text_color());
         }
     }
     ui.add_space(4.0);

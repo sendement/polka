@@ -14,6 +14,8 @@ mod fonts;
 mod i18n;
 mod icons;
 mod input;
+mod installers;
+mod repack;
 mod keyboard;
 mod log;
 mod launch;

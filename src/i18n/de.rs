@@ -735,4 +735,12 @@ pub const T: &[(&str, &str)] = &[
     ("In the same pane", "Im selben Bereich"),
     ("Pages open", "Seiten öffnen sich"),
     ("Other pane", "Anderer Bereich"),
+    ("Unpack installer", "Installer entpacken"),
+    ("Unpacking the installer", "Installer wird entpackt"),
+    ("Not an installer Polka can unpack", "Kein Installer, den Polka entpacken kann"),
+    ("Needs %t (the %p package)", "Benötigt %t (Paket %p)"),
+    ("a newer Inno Setup: innoextract's development version (innoextract-git) unpacks it", "ein neueres Inno Setup: die Entwicklungsversion von innoextract (innoextract-git) entpackt es"),
+    ("Wine couldn't start", "Wine ließ sich nicht starten"),
+    ("This repack's installer has no unarc.dll: it isn't unpacked this way", "Der Installer dieses Repacks hat keine unarc.dll: so lässt er sich nicht entpacken"),
+    ("Unpacked, but %n of the files the repack lists are missing", "Entpackt, aber %n der vom Repack gelisteten Dateien fehlen"),
 ];

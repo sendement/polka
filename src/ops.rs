@@ -176,6 +176,8 @@ pub struct Job {
     pub rolled_back: AtomicBool,
     /// Keeping the journal (moves only: a copy's would just grow).
     pub journaling: AtomicBool,
+    /// Done, but with something to say (shown as a warning).
+    pub note: Mutex<Option<String>>,
 }
 
 /// One step of a move, for taking it back.
@@ -242,6 +244,7 @@ impl Job {
             rolling_back: AtomicBool::new(false),
             rolled_back: AtomicBool::new(false),
             journaling: AtomicBool::new(false),
+            note: Mutex::new(None),
         }
     }
 
@@ -287,7 +290,7 @@ impl Job {
     }
 
     /// Cancelled: stop (between files too, not only inside them).
-    fn check(&self) -> io::Result<()> {
+    pub(crate) fn check(&self) -> io::Result<()> {
         if self.cancel.load(Ordering::Relaxed) && !self.rolling_back.load(Ordering::Relaxed) {
             Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
         } else {
@@ -341,6 +344,8 @@ pub enum Op {
     Delete { paths: Vec<PathBuf> },
     Compress { sources: Vec<PathBuf>, out: PathBuf, opts: CompressOpts },
     Extract { archive: PathBuf, dest: PathBuf },
+    /// A Windows installer unpacked (without Wine) into a new folder.
+    Unpack { installer: PathBuf, dest: PathBuf },
     /// Delete / rename / mkdir inside an archive.
     ArchiveEdit { archive: PathBuf, plan: Plan, label: &'static str },
     /// A step of the history undone (`back`) or redone.
@@ -369,6 +374,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             (tr("Compressing"), vec![Location::Local(out.parent().unwrap_or(Path::new("/")).into())])
         }
         Op::Extract { dest, .. } => (tr("Extracting"), vec![Location::Local(dest.clone())]),
+        Op::Unpack { dest, .. } => (tr("Unpacking the installer"), vec![Location::Local(dest.parent().unwrap_or(Path::new("/")).into())]),
         Op::ArchiveEdit { archive, label, .. } => {
             (*label, vec![Location::Archive { archive: archive.clone(), inner: String::new() }])
         }
@@ -406,7 +412,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
             Dest::Archive { archive, .. } => name_of(archive),
         },
         Op::Compress { out, .. } => name_of(out),
-        Op::Extract { dest, .. } => name_of(dest),
+        Op::Extract { dest, .. } | Op::Unpack { dest, .. } => name_of(dest),
         Op::ArchiveEdit { archive, .. } => name_of(archive),
         Op::Trash { .. } => tr("Trash").to_string(),
         Op::Convert { items, .. } => match items.as_slice() {
@@ -442,6 +448,7 @@ pub fn spawn(op: Op, wake: impl Fn() + Send + 'static) -> Arc<Job> {
         rolling_back: AtomicBool::new(false),
         rolled_back: AtomicBool::new(false),
         journaling: AtomicBool::new(false),
+        note: Mutex::new(None),
     });
     let j = job.clone();
     std::thread::spawn(move || {
@@ -564,6 +571,17 @@ fn run(op: Op, job: &Job) -> io::Result<()> {
             } else {
                 listing(std::slice::from_ref(&dest)).difference(&before).cloned().collect()
             };
+            r
+        }
+        Op::Unpack { installer, dest } => {
+            let r = crate::installers::unpack(&installer, &dest, job);
+            // What was made goes (to the trash) on undo; a failed or
+            // stopped one's leftovers are cleared away.
+            if r.is_ok() {
+                job.did.lock().unwrap().created = vec![dest.clone()];
+            } else if dest.exists() {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
             r
         }
         Op::History { step, back } => undo_step(&step, back, job),

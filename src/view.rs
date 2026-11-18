@@ -1077,6 +1077,9 @@ impl App {
                     others += text_w(ui, t) + 16.0;
                 }
                 let budget = ui.available_width() - text_w(ui, &s) - hints_w - others - 24.0;
+                // The hints' own room: all but the count and a message (the
+                // figures give way to them first).
+                let hints_room = ui.available_width() - text_w(ui, &s) - others - 24.0;
                 ui.label(s);
                 self.status_figures(ui, budget);
                 if let Some((t, gap)) = vol {
@@ -1089,12 +1092,26 @@ impl App {
                 if let Some((t, err, _)) = &self.toast {
                     ui.separator();
                     let c = if *err { ui.visuals().error_fg_color } else { ui.visuals().strong_text_color() };
-                    ui.label(egui::RichText::new(t).color(c));
+                    // A long one cut short where the hints begin (the whole
+                    // of it on hover).
+                    let room = (ui.available_width() - hints_w.min(ui.available_width() * 0.5) - 12.0).max(80.0);
+                    ui.scope(|ui| {
+                        ui.set_max_width(room);
+                        ui.add(egui::Label::new(egui::RichText::new(t).color(c)).truncate());
+                    });
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     let from = ui.cursor().max.x;
                     // (An open window shows its own at its foot.)
-                    let hints = if self.show_pad() && self.overlay.is_none() { self.hints() } else { Vec::new() };
+                    let mut hints = if self.show_pad() && self.overlay.is_none() { self.hints() } else { Vec::new() };
+                    // Too many for the room left: the ones in the middle go
+                    // (the first, the main one, and the last, leaving, stay).
+                    let room = hints_room;
+                    let sp = ui.spacing().item_spacing.x;
+                    let width = |ui: &Ui, l: &str| ui.painter().layout_no_wrap(l.to_string(), font.clone(), Color32::WHITE).size().x + 28.0 + 6.0 + sp * 3.0;
+                    while hints.len() > 2 && hints.iter().map(|(_, l)| width(ui, l)).sum::<f32>() > room {
+                        hints.remove(hints.len() - 2);
+                    }
                     for (a, label) in hints.into_iter().rev() {
                         ui.label(label);
                         glyph(ui, a, self.pad);
@@ -1813,6 +1830,8 @@ impl App {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("page", idx)));
                     child.painter().rect_stroke(rect, 6.0, frame_stroke(child.visuals(), idx), StrokeKind::Inside);
                     let mut inner = child.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)));
+                    // Nothing of it over the other pane, however narrow.
+                    inner.set_clip_rect(rect.shrink(1.0).intersect(inner.clip_rect()));
                     let mut a = PageActs::default();
                     self.draw_page(&mut inner, tab_of[idx], focused && idx == active, &mut a);
                     // A press into it makes its side the active one.

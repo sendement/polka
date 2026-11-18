@@ -59,16 +59,22 @@ pub fn draw(ui: &mut Ui, t: &mut Terminal, scheme: &Scheme, size: f32, icons: &m
             (&["document-open-recent", "history", "appointment-soon"], "⟲", tr("Command history"), || Act::History),
             (&["input-keyboard", "keyboard", "preferences-desktop-keyboard"], "⌨", tr("Quick keys"), || Act::Keys),
         ];
-        for (names, fb, tip, a) in tools {
+        // Narrow: tools left out (the keys first, settings last) so each
+        // tab keeps a little room.
+        let n = t.sessions.len().max(1);
+        let mut shown = tools.len();
+        while shown > 1 && full.width() - shown as f32 * (STRIP_H - 2.0) - (STRIP_H - 6.0) - 14.0 < n as f32 * 60.0 {
+            shown -= 1;
+        }
+        for (names, fb, tip, a) in tools.into_iter().take(shown) {
             if crate::view::tool_button(ui, btn(rx), icons, names, fb, tip, false).clicked() {
                 act = Some(a());
             }
             rx -= STRIP_H - 2.0;
         }
         let tabs_end = rx + (STRIP_H - 6.0) - 8.0;
-        let n = t.sessions.len().max(1);
         let plus_w = STRIP_H - 6.0;
-        let tab_w = ((tabs_end - x - plus_w - 6.0) / n as f32).clamp(60.0, 240.0);
+        let tab_w = ((tabs_end - x - plus_w - 6.0) / n as f32).clamp(36.0, 240.0);
         for (i, s) in t.sessions.iter().enumerate() {
             let r = Rect::from_min_size(pos2(x, strip.min.y + 3.0), vec2(tab_w - 4.0, STRIP_H - 6.0));
             let resp = ui.interact(r, ui.id().with(("term-tab", i)), Sense::click());
@@ -83,7 +89,7 @@ pub fn draw(ui: &mut Ui, t: &mut Terminal, scheme: &Scheme, size: f32, icons: &m
             }
             let close = Rect::from_center_size(pos2(r.max.x - 14.0, r.center().y), Vec2::splat(20.0));
             let title = if s.exited { format!("{} — {}", s.title, tr("finished")) } else if s.title.is_empty() { tr("Terminal").to_string() } else { s.title.clone() };
-            let g = crate::view::elided_text(ui, &title, FontId::proportional(14.0), if cur { vis.strong_text_color() } else { vis.text_color() }, r.width() - 40.0);
+            let g = crate::view::elided_text(ui, &title, FontId::proportional(14.0), if cur { vis.strong_text_color() } else { vis.text_color() }, (r.width() - 40.0).max(4.0));
             ui.painter().galley(pos2(r.min.x + 10.0, r.center().y - g.size().y / 2.0), g, vis.text_color());
             let cr = ui.interact(close, ui.id().with(("term-tab-close", i)), Sense::click());
             if cr.hovered() {

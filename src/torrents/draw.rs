@@ -57,34 +57,53 @@ pub fn draw(ui: &mut Ui, items: &[Item], cursor: usize, error: Option<&str>, foc
     let title = ui.painter().layout_no_wrap(tr("Torrents").into(), FontId::proportional(16.0), vis.strong_text_color());
     let x = head.min.x + 6.0;
     ui.painter().galley(pos2(x, head.center().y - title.size().y / 2.0), title.clone(), vis.strong_text_color());
-    // All of them together: how fast.
-    let (down, up) = items.iter().fold((0.0, 0.0), |(d, u), t| (d + t.down, u + t.up));
-    if !items.is_empty() {
-        let sum = format!("↓ {}   ↑ {}", super::speed(down), super::speed(up));
-        ui.painter().text(pos2(x + title.size().x + 16.0, head.center().y), Align2::LEFT_CENTER, sum, FontId::proportional(13.5), vis.weak_text_color());
-    }
     let mut bx = head.max.x - 30.0;
     let btn = |bx: f32, w: f32| Rect::from_min_size(pos2(bx, head.min.y + 3.0), vec2(w, 28.0));
     if header_button(ui, btn(bx, 28.0), "✕", tr("Close")) {
         act = Some(Act::Close);
     }
-    let label = format!("+ {}", tr("Magnet link"));
-    let w = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+    // Narrow: "+" alone.
+    let mut label = format!("+ {}", tr("Magnet link"));
+    let mut w = ui.painter().layout_no_wrap(label.clone(), FontId::proportional(15.0), vis.text_color()).size().x + 20.0;
+    if bx - w - 6.0 < x + title.size().x + 10.0 {
+        label = "+".into();
+        w = 28.0;
+    }
     bx -= w + 6.0;
+    // All of them together: how fast (if there's room).
+    let (down, up) = items.iter().fold((0.0, 0.0), |(d, u), t| (d + t.down, u + t.up));
+    if !items.is_empty() {
+        let sum = ui.painter().layout_no_wrap(format!("↓ {}   ↑ {}", super::speed(down), super::speed(up)), FontId::proportional(13.5), vis.weak_text_color());
+        let at = x + title.size().x + 16.0;
+        if at + sum.size().x < bx - 8.0 {
+            ui.painter().galley(pos2(at, head.center().y - sum.size().y / 2.0), sum, vis.weak_text_color());
+        }
+    }
     if header_button(ui, btn(bx, w), &label, tr("Add a magnet link…")) {
         act = Some(Act::Magnet);
     }
     ui.add_space(4.0);
     let area = ui.available_rect_before_wrap();
     ui.allocate_rect(area, Sense::hover());
+    // (Lines wrapped to the width: a narrow pane keeps them.)
+    let wrapped = |ui: &Ui, text: String, size: f32, color: egui::Color32| {
+        let mut job = egui::text::LayoutJob::simple(text, FontId::proportional(size), color, (area.width() - 32.0).max(40.0));
+        job.halign = egui::Align::Center;
+        ui.painter().layout_job(job)
+    };
     if let Some(e) = error {
-        ui.painter().text(area.center(), Align2::CENTER_CENTER, format!("{}: {e}", tr("The torrent client couldn't start")), FontId::proportional(15.0), vis.error_fg_color);
+        let g = wrapped(ui, format!("{}: {e}", tr("The torrent client couldn't start")), 15.0, vis.error_fg_color);
+        ui.painter().galley(pos2(area.center().x, area.center().y - g.size().y / 2.0), g, vis.error_fg_color);
         return act;
     }
     if items.is_empty() {
         let c = area.center();
-        ui.painter().text(pos2(c.x, c.y - 30.0), Align2::CENTER_CENTER, tr("No torrents yet"), FontId::proportional(20.0), vis.strong_text_color());
-        ui.painter().text(pos2(c.x, c.y + 2.0), Align2::CENTER_CENTER, tr("Open a .torrent file in the panes, or add a magnet link."), FontId::proportional(14.0), vis.weak_text_color());
+        let a = wrapped(ui, tr("No torrents yet").to_string(), 20.0, vis.strong_text_color());
+        let b = wrapped(ui, tr("Open a .torrent file in the panes, or add a magnet link.").to_string(), 14.0, vis.weak_text_color());
+        let top = c.y - (a.size().y + 10.0 + b.size().y) / 2.0;
+        let ah = a.size().y;
+        ui.painter().galley(pos2(c.x, top), a, vis.strong_text_color());
+        ui.painter().galley(pos2(c.x, top + ah + 10.0), b, vis.weak_text_color());
         return act;
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
